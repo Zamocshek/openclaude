@@ -18,6 +18,26 @@ import {
   runCronJobNow,
   updateCronJob,
 } from './cron.js'
+import {
+  addCuratedMemoryEntry,
+  applyCuratedMemoryDirectives,
+  applyOrStageCuratedMemoryAction,
+  appendChatLog,
+  buildCuratedMemoryContextSection,
+  buildCuratedMemorySystemInstructions,
+  approvePendingCuratedMemoryAction,
+  extractCuratedMemoryDirectives,
+  getCuratedMemoryStatus,
+  loadPendingCuratedMemoryActions,
+  listCuratedMemoryEntries,
+  removeCuratedMemoryEntry,
+  rejectPendingCuratedMemoryAction,
+  replaceCuratedMemoryEntry,
+  searchChatLog,
+  searchCuratedMemory,
+  CuratedMemoryError,
+  type CuratedMemoryKind,
+} from './memory.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -78,6 +98,11 @@ type FrontmatterStreamStripper = {
   flush: () => string
 }
 
+type LineStreamStripper = {
+  push: (chunk: string) => string
+  flush: () => string
+}
+
 export class AgentApiServer {
   private readonly config: AgentGatewayConfig
   private readonly onAgentResponse?: AgentApiServerOptions['onAgentResponse']
@@ -87,6 +112,8 @@ export class AgentApiServer {
   private readonly conversationLatest = new Map<string, string>()
   private readonly chatSessions = new Map<string, ConversationMessage[]>()
   private readonly chatSessionOrder: string[] = []
+  private readonly memorySnapshots = new Map<string, string>()
+  private readonly memorySnapshotOrder: string[] = []
   private readonly runs = new Map<string, SseQueue>()
 
   constructor(options: AgentApiServerOptions) {
@@ -247,6 +274,82 @@ export class AgentApiServer {
       return
     }
 
+    if (url.pathname === '/api/memory' || url.pathname === '/api/memory/') {
+      await this.handleMemoryCollection(method, url, request, response)
+      return
+    }
+
+    if (url.pathname === '/api/memory/status' && method === 'GET') {
+      this.writeJson(response, 200, await getCuratedMemoryStatus())
+      return
+    }
+
+    if (url.pathname === '/api/memory/search' && method === 'GET') {
+      const query = url.searchParams.get('q') || ''
+      const kind = parseMemoryKind(url.searchParams.get('kind'))
+      const limit = parseLimit(url.searchParams.get('limit'), 20)
+      const memories = await searchCuratedMemory({ query, kind, limit })
+      this.writeJson(response, 200, { data: memories })
+      return
+    }
+
+    if (url.pathname === '/api/memory/sessions/search' && method === 'GET') {
+      const query = url.searchParams.get('q') || ''
+      const limit = parseLimit(url.searchParams.get('limit'), 20)
+      const data = await searchChatLog({ query, limit })
+      this.writeJson(response, 200, { data })
+      return
+    }
+
+    if (url.pathname === '/api/memory/tool' && method === 'POST') {
+      await this.handleMemoryTool(request, response)
+      return
+    }
+
+    if (url.pathname === '/api/memory/pending' && method === 'GET') {
+      this.writeJson(response, 200, {
+        data: await loadPendingCuratedMemoryActions(),
+      })
+      return
+    }
+
+    if (url.pathname === '/api/memory/approve' && method === 'POST') {
+      try {
+        const body = await this.readJson(request)
+        const result = await approvePendingCuratedMemoryAction(
+          String(body.id || 'all'),
+        )
+        this.writeJson(response, 200, result)
+      } catch (error) {
+        this.writeMemoryError(response, error)
+      }
+      return
+    }
+
+    if (url.pathname === '/api/memory/reject' && method === 'POST') {
+      try {
+        const body = await this.readJson(request)
+        const result = await rejectPendingCuratedMemoryAction(
+          String(body.id || 'all'),
+        )
+        this.writeJson(response, 200, result)
+      } catch (error) {
+        this.writeMemoryError(response, error)
+      }
+      return
+    }
+
+    const memoryMatch = url.pathname.match(/^\/api\/memory\/([^/]+)$/)
+    if (memoryMatch) {
+      await this.handleMemoryEntryRoute(
+        method,
+        decodeURIComponent(memoryMatch[1]!),
+        request,
+        response,
+      )
+      return
+    }
+
     if (url.pathname === '/api/jobs') {
       if (method === 'GET') {
         this.writeJson(response, 200, { jobs: await listCronJobs(true) })
@@ -296,7 +399,11 @@ export class AgentApiServer {
       history,
       currentUser: chatInput.currentUser,
     })
-    const { prompt: runnerPrompt } = buildPromptFromChatMessages(promptMessages)
+    const { prompt: baseRunnerPrompt } = buildPromptFromChatMessages(promptMessages)
+    const runnerPrompt = await this.buildRunnerPromptWithMemory(
+      baseRunnerPrompt,
+      `chat:${sessionId}`,
+    )
     if (!runnerPrompt.trim()) {
       this.writeJson(response, 400, openAiError('No user message found'))
       return
@@ -306,6 +413,13 @@ export class AgentApiServer {
     const model = String(body.model || this.config.api.modelName)
 
     if (body.stream) {
+      recordApiChatLog({
+        direction: 'in',
+        source: 'api',
+        endpoint: 'chat.completions',
+        sessionId,
+        text: chatInput.currentUser.content,
+      })
       await this.streamChatCompletion(response, id, model, runnerPrompt, {
         includeUsage: shouldIncludeStreamUsage(body),
         sessionId,
@@ -315,6 +429,13 @@ export class AgentApiServer {
       return
     }
 
+    recordApiChatLog({
+      direction: 'in',
+      source: 'api',
+      endpoint: 'chat.completions',
+      sessionId,
+      text: chatInput.currentUser.content,
+    })
     const result = await runOpenClaudeAgent({
       prompt: runnerPrompt,
       config: this.config,
@@ -328,7 +449,14 @@ export class AgentApiServer {
       return
     }
 
-    const responseText = normalizeAgentResponseText(result.text)
+    const responseText = await this.prepareAgentResponseText(result.text, 'api')
+    recordApiChatLog({
+      direction: 'out',
+      source: 'api',
+      endpoint: 'chat.completions',
+      sessionId,
+      text: responseText,
+    })
 
     this.storeChatSession(sessionId, [
       ...history,
@@ -399,6 +527,7 @@ export class AgentApiServer {
     writeChunk({ role: 'assistant' })
     let fullText = ''
     const frontmatterStripper = createFrontmatterStreamStripper()
+    const memoryDirectiveStripper = createMemoryDirectiveStreamStripper()
     const result = await runOpenClaudeAgent({
       prompt,
       config: this.config,
@@ -406,7 +535,9 @@ export class AgentApiServer {
       onStdout: chunk => {
         fullText += chunk
         if (response.destroyed) return
-        const visibleChunk = frontmatterStripper.push(chunk)
+        const visibleChunk = memoryDirectiveStripper.push(
+          frontmatterStripper.push(chunk),
+        )
         if (visibleChunk) {
           writeChunk({ content: visibleChunk })
         }
@@ -419,7 +550,10 @@ export class AgentApiServer {
       writeChunk({ content: formatAgentFailureForApi(result) })
     }
 
-    const trailingVisibleChunk = frontmatterStripper.flush()
+    const trailingVisibleChunk = [
+      memoryDirectiveStripper.push(frontmatterStripper.flush()),
+      memoryDirectiveStripper.flush(),
+    ].join('')
     if (trailingVisibleChunk && !response.destroyed) {
       writeChunk({ content: trailingVisibleChunk })
     }
@@ -438,8 +572,15 @@ export class AgentApiServer {
     response.write('data: [DONE]\n\n')
     completed = true
     response.end()
-    const normalizedFullText = normalizeAgentResponseText(fullText)
+    const normalizedFullText = await this.prepareAgentResponseText(fullText, 'api')
     if (normalizedFullText) {
+      recordApiChatLog({
+        direction: 'out',
+        source: 'api',
+        endpoint: 'chat.completions',
+        sessionId: options.sessionId,
+        text: normalizedFullText,
+      })
       if (options.sessionId && options.currentUser) {
         this.storeChatSession(options.sessionId, [
           ...(options.history || []),
@@ -485,10 +626,27 @@ export class AgentApiServer {
     const previousHistory = explicitHistory.length
       ? explicitHistory
       : normalizeConversationHistory(previous?.conversation_history)
-    const runnerPrompt = buildResponsesRunnerPrompt({
+    const baseRunnerPrompt = buildResponsesRunnerPrompt({
       instructions,
       previousHistory,
       prompt,
+    })
+    const memorySnapshotKey = conversation
+      ? `responses:${conversation}`
+      : typeof previous?.memory_snapshot_key === 'string'
+        ? previous.memory_snapshot_key
+        : `responses:${randomUUID()}`
+    const runnerPrompt = await this.buildRunnerPromptWithMemory(
+      baseRunnerPrompt,
+      memorySnapshotKey,
+    )
+    recordApiChatLog({
+      direction: 'in',
+      source: 'api',
+      endpoint: 'responses',
+      conversation,
+      previousResponseId: previousResponseId || undefined,
+      text: prompt,
     })
     const result = await runOpenClaudeAgent({
       prompt: runnerPrompt,
@@ -503,7 +661,14 @@ export class AgentApiServer {
       return
     }
 
-    const responseText = normalizeAgentResponseText(result.text)
+    const responseText = await this.prepareAgentResponseText(result.text, 'api')
+    recordApiChatLog({
+      direction: 'out',
+      source: 'api',
+      endpoint: 'responses',
+      conversation,
+      text: responseText,
+    })
 
     const responseId = `resp_${randomUUID().replace(/-/g, '')}`
     const data = {
@@ -536,6 +701,7 @@ export class AgentApiServer {
         instructions,
         previous_response_id: previousResponseId || undefined,
         conversation: conversation || undefined,
+        memory_snapshot_key: memorySnapshotKey,
       })
     }
 
@@ -560,9 +726,20 @@ export class AgentApiServer {
     const prompt = normalizeResponsesInput(input)
     const instructions =
       typeof body.instructions === 'string' ? body.instructions.trim() : ''
+    const runnerPrompt = await this.buildRunnerPromptWithMemory(
+      instructions ? `${instructions}\n\n${prompt}` : prompt,
+      `run:${runId}`,
+    )
+    recordApiChatLog({
+      direction: 'in',
+      source: 'api',
+      endpoint: 'runs',
+      runId,
+      text: prompt,
+    })
 
     void runOpenClaudeAgent({
-      prompt: instructions ? `${instructions}\n\n${prompt}` : prompt,
+      prompt: runnerPrompt,
       config: this.config,
       onStdout: chunk => {
         queue.push({
@@ -574,8 +751,15 @@ export class AgentApiServer {
       },
     }).then(
       async result => {
-        const responseText = normalizeAgentResponseText(result.text)
         if (result.exitCode === 0) {
+          const responseText = await this.prepareAgentResponseText(result.text, 'run')
+          recordApiChatLog({
+            direction: 'out',
+            source: 'api',
+            endpoint: 'runs',
+            runId,
+            text: responseText,
+          })
           queue.push({
             event: 'run.completed',
             run_id: runId,
@@ -642,6 +826,140 @@ export class AgentApiServer {
     response.end()
   }
 
+  private async handleMemoryCollection(
+    method: string,
+    url: URL,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    try {
+      if (method === 'GET') {
+        const kind = parseMemoryKind(url.searchParams.get('kind'))
+        const data = await listCuratedMemoryEntries(kind)
+        this.writeJson(response, 200, { data })
+        return
+      }
+
+      if (method === 'POST') {
+        const body = await this.readJson(request)
+        const content = String(body.content || '').trim()
+        const kind = parseMemoryKind(body.kind) || 'memory'
+        const tags = Array.isArray(body.tags)
+          ? body.tags.map(String)
+          : splitMemoryTags(body.tags)
+        const result = await addCuratedMemoryEntry({
+          kind,
+          content,
+          source: String(body.source || 'api'),
+          tags,
+        })
+        this.writeJson(response, result.added ? 201 : 200, result)
+        return
+      }
+    } catch (error) {
+      this.writeMemoryError(response, error)
+      return
+    }
+
+    this.writeJson(response, 405, openAiError('Method not allowed'))
+  }
+
+  private async handleMemoryTool(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    try {
+      const body = await this.readJson(request)
+      const result = await applyOrStageCuratedMemoryAction(
+        {
+          action: body.action,
+          kind: parseMemoryKind(body.kind ?? body.target),
+          content: body.content ?? body.new_text ?? body.newText,
+          oldText: body.old_text ?? body.oldText,
+          id: typeof body.id === 'string' ? body.id : undefined,
+          source: String(body.source || 'api-tool'),
+          tags: Array.isArray(body.tags)
+            ? body.tags.map(String)
+            : splitMemoryTags(body.tags),
+        },
+        {
+          requireApproval:
+            this.config.memory.writeApproval && body.force !== true,
+        },
+      )
+      this.writeJson(response, result.pending ? 202 : 200, result)
+    } catch (error) {
+      this.writeMemoryError(response, error)
+    }
+  }
+
+  private async handleMemoryEntryRoute(
+    method: string,
+    id: string,
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    try {
+      if (method === 'PATCH') {
+        const body = await this.readJson(request)
+        const tags = body.tags === undefined
+          ? undefined
+          : Array.isArray(body.tags)
+            ? body.tags.map(String)
+            : splitMemoryTags(body.tags)
+        const result = await replaceCuratedMemoryEntry({
+          id,
+          content: String(body.content || ''),
+          tags,
+        })
+        this.writeJson(response, 200, result)
+        return
+      }
+
+      if (method === 'DELETE') {
+        const result = await removeCuratedMemoryEntry(id)
+        this.writeJson(
+          response,
+          result.removed ? 200 : 404,
+          result.removed ? result : openAiError('Memory entry not found'),
+        )
+        return
+      }
+    } catch (error) {
+      this.writeMemoryError(response, error)
+      return
+    }
+
+    this.writeJson(response, 405, openAiError('Method not allowed'))
+  }
+
+  private writeMemoryError(response: ServerResponse, error: unknown): void {
+    if (error instanceof CuratedMemoryError) {
+      this.writeJson(
+        response,
+        error.code === 'not_found'
+          ? 404
+          : error.code === 'ambiguous_match'
+            ? 409
+            : 400,
+        {
+          error: {
+            message: error.message,
+            type: error.code,
+            details: error.details ?? null,
+          },
+        },
+      )
+      return
+    }
+
+    this.writeJson(
+      response,
+      500,
+      openAiError(error instanceof Error ? error.message : String(error)),
+    )
+  }
+
   private async handleJobRoute(
     method: string,
     jobId: string,
@@ -695,6 +1013,81 @@ export class AgentApiServer {
     }
   }
 
+  private async buildRunnerPromptWithMemory(
+    prompt: string,
+    snapshotKey?: string,
+  ): Promise<string> {
+    const memory = snapshotKey
+      ? await this.getMemorySnapshot(snapshotKey)
+      : await this.loadMemoryContext()
+    const instructions = buildCuratedMemorySystemInstructions({
+      memoryEnabled: this.config.memory.enabled,
+      userProfileEnabled: this.config.memory.userProfileEnabled,
+      writeApproval: this.config.memory.writeApproval,
+    })
+    if (!memory && !instructions) return prompt
+
+    return [
+      memory ? 'Persistent memory context:' : '',
+      memory,
+      instructions ? 'Persistent memory write protocol:' : '',
+      instructions,
+      '',
+      'Current request:',
+      prompt,
+    ].filter(part => part !== '').join('\n')
+  }
+
+  private async getMemorySnapshot(snapshotKey: string): Promise<string> {
+    const existing = this.memorySnapshots.get(snapshotKey)
+    if (existing !== undefined) return existing
+
+    const memory = await this.loadMemoryContext()
+    this.memorySnapshots.set(snapshotKey, memory)
+    this.memorySnapshotOrder.push(snapshotKey)
+    while (this.memorySnapshotOrder.length > 100) {
+      const oldest = this.memorySnapshotOrder.shift()
+      if (!oldest) break
+      this.memorySnapshots.delete(oldest)
+    }
+    return memory
+  }
+
+  private async loadMemoryContext(): Promise<string> {
+    return buildCuratedMemoryContextSection({
+      memoryEnabled: this.config.memory.enabled,
+      userProfileEnabled: this.config.memory.userProfileEnabled,
+      writeApproval: this.config.memory.writeApproval,
+    }).catch(() => '')
+  }
+
+  private async prepareAgentResponseText(
+    text: string,
+    source: 'api' | 'run',
+  ): Promise<string> {
+    const normalized = normalizeAgentResponseText(text)
+    const parsed = extractCuratedMemoryDirectives(normalized)
+    if (parsed.directives.length === 0) return normalized
+
+    try {
+      const applied = await applyCuratedMemoryDirectives(normalized, {
+        source: `${source}-agent`,
+        requireApproval: this.config.memory.writeApproval,
+        memoryEnabled: this.config.memory.enabled,
+        userProfileEnabled: this.config.memory.userProfileEnabled,
+      })
+      return applied.text
+    } catch (error) {
+      recordApiChatLog({
+        direction: 'memory-error',
+        source,
+        endpoint: 'memory.directive',
+        text: error instanceof Error ? error.message : String(error),
+      })
+      return parsed.text || normalized
+    }
+  }
+
   private storeChatSession(
     sessionId: string,
     history: ConversationMessage[],
@@ -708,6 +1101,7 @@ export class AgentApiServer {
       const oldest = this.chatSessionOrder.shift()
       if (!oldest) break
       this.chatSessions.delete(oldest)
+      this.memorySnapshots.delete(`chat:${oldest}`)
     }
   }
 
@@ -815,7 +1209,7 @@ export class AgentApiServer {
     return {
       'Access-Control-Allow-Origin': allowOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id',
       'Access-Control-Expose-Headers': 'X-Hermes-Session-Id',
     }
   }
@@ -901,6 +1295,28 @@ function isProtectedApiPath(pathname: string): boolean {
     path === '/runs' ||
     path.startsWith('/runs/')
   )
+}
+
+function recordApiChatLog(entry: Record<string, unknown>): void {
+  void appendChatLog(entry).catch(() => {})
+}
+
+function parseMemoryKind(value: unknown): CuratedMemoryKind | undefined {
+  return value === 'user' || value === 'memory' ? value : undefined
+}
+
+function splitMemoryTags(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  return value
+    .split(/[,\s]+/u)
+    .map(tag => tag.trim())
+    .filter(Boolean)
+}
+
+function parseLimit(value: string | null, fallback: number): number {
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback
+  return Math.min(parsed, 100)
 }
 
 function getHeaderValue(request: IncomingMessage, name: string): string {
@@ -1090,6 +1506,42 @@ function createFrontmatterStreamStripper(): FrontmatterStreamStripper {
       buffer = ''
       decided = true
       return visible
+    },
+  }
+}
+
+function createMemoryDirectiveStreamStripper(): LineStreamStripper {
+  let pending = ''
+
+  const flushCompleteLines = (includeTrailing: boolean): string => {
+    const lines = pending.split(/(\r?\n)/u)
+    pending = ''
+    let output = ''
+
+    for (let index = 0; index < lines.length; index += 2) {
+      const line = lines[index] || ''
+      const separator = lines[index + 1] || ''
+      const isLastUnterminated = !separator && index >= lines.length - 1
+      if (isLastUnterminated && !includeTrailing) {
+        pending = line
+        continue
+      }
+      const parsed = extractCuratedMemoryDirectives(line)
+      if (parsed.directives.length > 0 && !parsed.text) continue
+      output += line + separator
+    }
+
+    return output
+  }
+
+  return {
+    push(chunk: string): string {
+      if (!chunk) return ''
+      pending += chunk
+      return flushCompleteLines(false)
+    },
+    flush(): string {
+      return flushCompleteLines(true)
     },
   }
 }

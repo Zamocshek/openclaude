@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { mkdtemp, rm } from 'fs/promises'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { getDefaultAgentGatewayConfig, type AgentGatewayConfig } from './config.js'
 
 const runOpenClaudeAgent = mock(async (options: {
@@ -71,6 +74,10 @@ function testConfig(overrides?: Partial<AgentGatewayConfig>): AgentGatewayConfig
       ...defaults.cron,
       ...overrides?.cron,
     },
+    memory: {
+      ...defaults.memory,
+      ...overrides?.memory,
+    },
     runner: {
       ...defaults.runner,
       ...overrides?.runner,
@@ -80,14 +87,28 @@ function testConfig(overrides?: Partial<AgentGatewayConfig>): AgentGatewayConfig
 
 describe('AgentApiServer', () => {
   let server: import('./apiServer.js').AgentApiServer | undefined
+  let previousGatewayStateDir: string | undefined
+  let tempGatewayStateDir: string | undefined
 
-  beforeEach(() => {
+  beforeEach(async () => {
     runOpenClaudeAgent.mockClear()
+    previousGatewayStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    tempGatewayStateDir = await mkdtemp(join(tmpdir(), 'openclaude-api-server-'))
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = tempGatewayStateDir
   })
 
   afterEach(async () => {
     await server?.stop()
     server = undefined
+    if (previousGatewayStateDir === undefined) {
+      delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    } else {
+      process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousGatewayStateDir
+    }
+    if (tempGatewayStateDir) {
+      await rm(tempGatewayStateDir, { recursive: true, force: true })
+    }
+    tempGatewayStateDir = undefined
   })
 
   test('serves OpenAI-compatible chat completions through the agent runner', async () => {
@@ -108,11 +129,16 @@ describe('AgentApiServer', () => {
     const body = await response.json() as {
       choices: Array<{ message: { content: string } }>
     }
-    expect(body.choices[0]?.message.content).toBe(
-      'mock response: hello from api',
+    expect(body.choices[0]?.message.content).toContain('hello from api')
+    expect(runOpenClaudeAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('hello from api'),
+      }),
     )
     expect(runOpenClaudeAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: 'hello from api' }),
+      expect.objectContaining({
+        prompt: expect.stringContaining('Persistent memory tool protocol'),
+      }),
     )
   })
 
@@ -149,6 +175,120 @@ describe('AgentApiServer', () => {
       headers: { Authorization: 'Bearer secret' },
     })
     expect(authorized.status).toBe(200)
+  })
+
+  test('serves bearer-protected Hermes-style memory endpoints', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({ api: { apiKey: 'secret' } as never }),
+    })
+    await server.start()
+
+    const unauthorized = await fetch(`${server.url}/api/memory`)
+    expect(unauthorized.status).toBe(401)
+
+    const created = await fetch(`${server.url}/api/memory`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer secret',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'memory',
+        content: 'Gateway memory endpoints are bearer-protected.',
+        tags: ['security'],
+      }),
+    })
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as {
+      entry: { id: string; content: string }
+    }
+    expect(createdBody.entry.content).toContain('bearer-protected')
+
+    const search = await fetch(`${server.url}/api/memory/search?q=bearer`, {
+      headers: { Authorization: 'Bearer secret' },
+    })
+    expect(search.status).toBe(200)
+    const searchBody = await search.json() as {
+      data: Array<{ id: string }>
+    }
+    expect(searchBody.data[0]?.id).toBe(createdBody.entry.id)
+  })
+
+  test('stages memory tool writes when approval is enabled', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({
+        memory: { writeApproval: true } as never,
+      }),
+    })
+    await server.start()
+
+    const staged = await fetch(`${server.url}/api/memory/tool`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'add',
+        target: 'memory',
+        content: 'Memory tool writes can be staged for approval.',
+      }),
+    })
+    expect(staged.status).toBe(202)
+    const stagedBody = await staged.json() as {
+      pending: boolean
+      staged: { id: string }
+    }
+    expect(stagedBody.pending).toBe(true)
+
+    const pending = await fetch(`${server.url}/api/memory/pending`)
+    const pendingBody = await pending.json() as { data: unknown[] }
+    expect(pendingBody.data).toHaveLength(1)
+
+    const approved = await fetch(`${server.url}/api/memory/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: stagedBody.staged.id }),
+    })
+    expect(approved.status).toBe(200)
+
+    const search = await fetch(`${server.url}/api/memory/search?q=staged`)
+    const searchBody = await search.json() as {
+      data: Array<{ content: string }>
+    }
+    expect(searchBody.data[0]?.content).toContain('staged for approval')
+  })
+
+  test('strips and applies hidden memory directives from agent responses', async () => {
+    runOpenClaudeAgent.mockImplementationOnce(async () => ({
+      text: [
+        'Visible answer.',
+        '[MEMORY action="add" target="memory" content="Agent responses may request durable memory writes."]',
+      ].join('\n'),
+      stderr: '',
+      exitCode: 0,
+      timedOut: false,
+    }))
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const response = await fetch(`${server.url}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'remember this' }),
+    })
+    expect(response.status).toBe(200)
+    const body = await response.json() as {
+      output: Array<{ content?: Array<{ text?: string }> }>
+    }
+    expect(body.output[0]?.content?.[0]?.text).toBe('Visible answer.')
+
+    const search = await fetch(`${server.url}/api/memory/search?q=durable`)
+    const searchBody = await search.json() as {
+      data: Array<{ content: string }>
+    }
+    expect(searchBody.data[0]?.content).toContain('durable memory writes')
   })
 
   test('serves OpenWebUI-friendly model aliases', async () => {

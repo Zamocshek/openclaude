@@ -50,6 +50,37 @@ Inside OpenClaude:
   cron, OpenAI-compatible agent API, Open WebUI, and Ouroboros settings
 - run `/onboard-github` for GitHub Models onboarding
 
+### Telegram Inference
+
+When the Agent Gateway Telegram bridge is enabled, the bot accepts normal
+messages as agent prompts and supports these owner-control commands from
+Telegram:
+
+- `/help`, `/commands` - show Telegram help and refresh the command menu
+- `/chatid` - show the current chat ID
+- `/status` - show gateway, worker, cron, budget, and Ouroboros status
+- `/provider`, `/provider models`,
+  `/provider set <provider> <model> [base_url] [api_key]` - inspect or switch
+  the provider and model used by the next agent runs
+- `/model <model>`, `/baseurl <url>`, `/apikey <key>` - update the active
+  OpenAI-compatible provider profile
+- `/stop`, `/retry` - abort or retry the current Telegram inference task
+- `/files`, `/transcribe`, `/errors [n]` - inspect downloaded files,
+  transcription availability, and recent gateway errors
+- `/schedule every 1h | prompt`, `/cron [list|reload|chatid|path|examples]`,
+  `/jobs`, `/runjob <id>`, `/pausejob <id>`, `/resumejob <id>`,
+  `/deletejob <id>` - manage scheduled agent jobs
+- `/restart`, `/panic`, `/bg [start|stop]`,
+  `/consciousness [start|stop]`, `/evolution [on|off]`,
+  `/evolve [now|stop|status]`, `/review`, `/infinite <goal>` - control the
+  long-running gateway/Ouroboros loops
+- `/identity`, `/scratchpad`, `/bible`, `/architecture`, `/git`,
+  `/git status`, `/git log`, `/git diff [path]`, `/git commit <msg>`,
+  `/undo` - inspect memory and repository state
+
+The bridge also registers the same base commands with Telegram's command menu
+through `setMyCommands` at startup.
+
 ### Release Scripts
 
 For local production-style runs, use the cross-platform wrappers in

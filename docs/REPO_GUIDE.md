@@ -87,6 +87,9 @@ Telegram bridge currently handles:
 - voice and audio transcription
 - allowlists by chat ID and user ID
 - API-response mirroring to the home chat if enabled
+- `/help` and `/commands` render the command list from
+  `TELEGRAM_COMMAND_HELP_SECTIONS`; `start()` registers the same base commands
+  with Telegram through `setMyCommands`
 - provider switching from Telegram:
   - `/provider` shows the active provider/model/base URL
   - `/provider set <provider> <model> [base_url] [api_key]`

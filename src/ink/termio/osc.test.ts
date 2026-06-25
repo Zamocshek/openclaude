@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { join } from 'node:path'
 
 const originalEnv = { ...process.env }
-const originalPlatform = process.platform
 const mockedClipboardPath = join(process.cwd(), 'openclaude-clipboard.txt')
+let testEnv = { ...originalEnv }
+let testPlatform: NodeJS.Platform = process.platform
 
 const generateTempFilePathMock = mock(() => mockedClipboardPath)
 
@@ -12,17 +13,15 @@ const execFileNoThrowMock = mock(
   async () => ({ code: 0, stdout: '', stderr: '' }),
 )
 
-mock.module('../../utils/execFileNoThrow.js', () => ({
-  execFileNoThrow: execFileNoThrowMock,
-  execFileNoThrowWithCwd: execFileNoThrowMock,
-}))
-
-mock.module('../../utils/tempfile.js', () => ({
-  generateTempFilePath: generateTempFilePathMock,
-}))
-
 async function importFreshOscModule() {
-  return import(`./osc.ts?ts=${Date.now()}-${Math.random()}`)
+  const module = await import(`./osc.ts?ts=${Date.now()}-${Math.random()}`)
+  module._setClipboardTestOverrides({
+    platform: testPlatform,
+    env: testEnv,
+    execFileNoThrow: execFileNoThrowMock,
+    generateTempFilePath: generateTempFilePathMock,
+  })
+  return module
 }
 
 async function flushClipboardCopy(): Promise<void> {
@@ -48,15 +47,15 @@ describe('Windows clipboard fallback', () => {
   beforeEach(() => {
     execFileNoThrowMock.mockClear()
     generateTempFilePathMock.mockClear()
-    process.env = { ...originalEnv }
-    delete process.env['SSH_CONNECTION']
-    delete process.env['TMUX']
-    Object.defineProperty(process, 'platform', { value: 'win32' })
+    testEnv = { ...originalEnv }
+    delete testEnv['SSH_CONNECTION']
+    delete testEnv['TMUX']
+    testPlatform = 'win32'
   })
 
   afterEach(() => {
-    process.env = { ...originalEnv }
-    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    testEnv = { ...originalEnv }
+    testPlatform = process.platform
   })
 
   test('uses PowerShell instead of clip.exe for local Windows copy', async () => {
@@ -99,34 +98,35 @@ describe('Windows clipboard fallback', () => {
 describe('clipboard path behavior remains stable', () => {
   beforeEach(() => {
     execFileNoThrowMock.mockClear()
-    process.env = { ...originalEnv }
-    delete process.env['SSH_CONNECTION']
-    delete process.env['TMUX']
+    testEnv = { ...originalEnv }
+    delete testEnv['SSH_CONNECTION']
+    delete testEnv['TMUX']
+    testPlatform = process.platform
   })
 
   afterEach(() => {
-    process.env = { ...originalEnv }
-    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    testEnv = { ...originalEnv }
+    testPlatform = process.platform
   })
 
   test('getClipboardPath stays native on local macOS', async () => {
-    Object.defineProperty(process, 'platform', { value: 'darwin' })
+    testPlatform = 'darwin'
     const { getClipboardPath } = await importFreshOscModule()
 
     expect(getClipboardPath()).toBe('native')
   })
 
   test('getClipboardPath stays tmux-buffer when TMUX is set', async () => {
-    Object.defineProperty(process, 'platform', { value: 'linux' })
-    process.env['TMUX'] = '/tmp/tmux-1000/default,123,0'
+    testPlatform = 'linux'
+    testEnv['TMUX'] = '/tmp/tmux-1000/default,123,0'
     const { getClipboardPath } = await importFreshOscModule()
 
     expect(getClipboardPath()).toBe('tmux-buffer')
   })
 
   test('Windows clipboard fallback is skipped over SSH', async () => {
-    Object.defineProperty(process, 'platform', { value: 'win32' })
-    process.env['SSH_CONNECTION'] = '1 2 3 4'
+    testPlatform = 'win32'
+    testEnv['SSH_CONNECTION'] = '1 2 3 4'
     const { setClipboard } = await importFreshOscModule()
 
     await setClipboard('Привет мир')
@@ -137,7 +137,7 @@ describe('clipboard path behavior remains stable', () => {
   })
 
   test('local macOS clipboard fallback still uses pbcopy', async () => {
-    Object.defineProperty(process, 'platform', { value: 'darwin' })
+    testPlatform = 'darwin'
     const { setClipboard } = await importFreshOscModule()
 
     await setClipboard('hello')

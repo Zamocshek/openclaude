@@ -12,6 +12,33 @@ import type { Action, Color, TabStatusAction } from './types.js'
 
 export const OSC_PREFIX = ESC + String.fromCharCode(ESC_TYPE.OSC)
 
+type ExecFileNoThrowFn = typeof execFileNoThrow
+
+let clipboardPlatformOverride: NodeJS.Platform | undefined
+let clipboardEnvOverride: NodeJS.ProcessEnv | undefined
+let execFileNoThrowOverride: ExecFileNoThrowFn | undefined
+let generateTempFilePathOverride: typeof generateTempFilePath | undefined
+
+function getRuntimePlatform(): NodeJS.Platform {
+  return clipboardPlatformOverride ?? process.platform
+}
+
+function getRuntimeEnv(name: string): string | undefined {
+  return clipboardEnvOverride ? clipboardEnvOverride[name] : process.env[name]
+}
+
+function runExecFileNoThrow(
+  command: Parameters<ExecFileNoThrowFn>[0],
+  args: Parameters<ExecFileNoThrowFn>[1],
+  options: Parameters<ExecFileNoThrowFn>[2],
+): ReturnType<ExecFileNoThrowFn> {
+  return (execFileNoThrowOverride ?? execFileNoThrow)(command, args, options)
+}
+
+function getTempFilePath(prefix: string, suffix: string): string {
+  return (generateTempFilePathOverride ?? generateTempFilePath)(prefix, suffix)
+}
+
 /** String Terminator (ESC \) - alternative to BEL for terminating OSC */
 export const ST = ESC + '\\'
 
@@ -35,11 +62,11 @@ export function osc(...parts: (string | number)[]): string {
  * wrapped \x07 is opaque DCS payload and tmux never sees the bell.
  */
 export function wrapForMultiplexer(sequence: string): string {
-  if (process.env['TMUX']) {
+  if (getRuntimeEnv('TMUX')) {
     const escaped = sequence.replaceAll('\x1b', '\x1b\x1b')
     return `\x1bPtmux;${escaped}\x1b\\`
   }
-  if (process.env['STY']) {
+  if (getRuntimeEnv('STY')) {
     return `\x1bP${sequence}\x1b\\`
   }
   return sequence
@@ -65,9 +92,9 @@ export type ClipboardPath = 'native' | 'tmux-buffer' | 'osc52'
 
 export function getClipboardPath(): ClipboardPath {
   const nativeAvailable =
-    process.platform === 'darwin' && !process.env['SSH_CONNECTION']
+    getRuntimePlatform() === 'darwin' && !getRuntimeEnv('SSH_CONNECTION')
   if (nativeAvailable) return 'native'
-  if (process.env['TMUX']) return 'tmux-buffer'
+  if (getRuntimeEnv('TMUX')) return 'tmux-buffer'
   return 'osc52'
 }
 
@@ -90,12 +117,12 @@ function tmuxPassthrough(payload: string): string {
  * Returns true if the buffer was loaded successfully.
  */
 export async function tmuxLoadBuffer(text: string): Promise<boolean> {
-  if (!process.env['TMUX']) return false
+  if (!getRuntimeEnv('TMUX')) return false
   const args =
-    process.env['LC_TERMINAL'] === 'iTerm2'
+    getRuntimeEnv('LC_TERMINAL') === 'iTerm2'
       ? ['load-buffer', '-']
       : ['load-buffer', '-w', '-']
-  const { code } = await execFileNoThrow('tmux', args, {
+  const { code } = await runExecFileNoThrow('tmux', args, {
     input: text,
     useCwd: false,
     timeout: 2000,
@@ -149,7 +176,7 @@ export async function setClipboard(text: string): Promise<string> {
   // Gated on SSH_CONNECTION (not SSH_TTY) since tmux panes inherit SSH_TTY
   // forever but SSH_CONNECTION is in tmux's default update-environment and
   // clears on local attach. Fire-and-forget.
-  if (!process.env['SSH_CONNECTION']) copyNative(text)
+  if (!getRuntimeEnv('SSH_CONNECTION')) copyNative(text)
 
   const tmuxBufferLoaded = await tmuxLoadBuffer(text)
 
@@ -172,37 +199,37 @@ let linuxCopy: 'wl-copy' | 'xclip' | 'xsel' | null | undefined
  */
 function copyNative(text: string): void {
   const opts = { input: text, useCwd: false, timeout: 2000 }
-  switch (process.platform) {
+  switch (getRuntimePlatform()) {
     case 'darwin':
-      void execFileNoThrow('pbcopy', [], opts)
+      void runExecFileNoThrow('pbcopy', [], opts)
       return
     case 'linux': {
       if (linuxCopy === null) return
       if (linuxCopy === 'wl-copy') {
-        void execFileNoThrow('wl-copy', [], opts)
+        void runExecFileNoThrow('wl-copy', [], opts)
         return
       }
       if (linuxCopy === 'xclip') {
-        void execFileNoThrow('xclip', ['-selection', 'clipboard'], opts)
+        void runExecFileNoThrow('xclip', ['-selection', 'clipboard'], opts)
         return
       }
       if (linuxCopy === 'xsel') {
-        void execFileNoThrow('xsel', ['--clipboard', '--input'], opts)
+        void runExecFileNoThrow('xsel', ['--clipboard', '--input'], opts)
         return
       }
       // First call: probe wl-copy (Wayland) then xclip/xsel (X11), cache winner.
-      void execFileNoThrow('wl-copy', [], opts).then(r => {
+      void runExecFileNoThrow('wl-copy', [], opts).then(r => {
         if (r.code === 0) {
           linuxCopy = 'wl-copy'
           return
         }
-        void execFileNoThrow('xclip', ['-selection', 'clipboard'], opts).then(
+        void runExecFileNoThrow('xclip', ['-selection', 'clipboard'], opts).then(
           r2 => {
             if (r2.code === 0) {
               linuxCopy = 'xclip'
               return
             }
-            void execFileNoThrow('xsel', ['--clipboard', '--input'], opts).then(
+            void runExecFileNoThrow('xsel', ['--clipboard', '--input'], opts).then(
               r3 => {
                 linuxCopy = r3.code === 0 ? 'xsel' : null
               },
@@ -217,11 +244,11 @@ function copyNative(text: string): void {
       // boundary. Write UTF-8 text to a temp file and let PowerShell read it
       // directly as UTF-8 before calling Set-Clipboard.
       void (async () => {
-        const tempPath = generateTempFilePath('openclaude-clipboard', '.txt')
+        const tempPath = getTempFilePath('openclaude-clipboard', '.txt')
         const escapedTempPath = tempPath.replace(/'/g, "''")
         try {
           await writeFile(tempPath, text, { encoding: 'utf8' })
-          await execFileNoThrow(
+          await runExecFileNoThrow(
             'powershell',
             [
               '-NoProfile',
@@ -246,6 +273,27 @@ function copyNative(text: string): void {
 /** @internal test-only */
 export function _resetLinuxCopyCache(): void {
   linuxCopy = undefined
+}
+
+/** @internal test-only */
+export function _setClipboardTestOverrides(options: {
+  platform?: NodeJS.Platform
+  env?: NodeJS.ProcessEnv
+  execFileNoThrow?: ExecFileNoThrowFn
+  generateTempFilePath?: typeof generateTempFilePath
+}): void {
+  clipboardPlatformOverride = options.platform
+  clipboardEnvOverride = options.env
+  execFileNoThrowOverride = options.execFileNoThrow
+  generateTempFilePathOverride = options.generateTempFilePath
+}
+
+/** @internal test-only */
+export function _resetClipboardTestOverrides(): void {
+  clipboardPlatformOverride = undefined
+  clipboardEnvOverride = undefined
+  execFileNoThrowOverride = undefined
+  generateTempFilePathOverride = undefined
 }
 
 /**

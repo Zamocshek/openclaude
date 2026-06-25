@@ -92,6 +92,19 @@ describe('Codex provider config', () => {
     expect(resolved.baseUrl).toBe('https://chatgpt.com/backend-api/codex')
   })
 
+  test('resolves gpt-5.5 to Codex transport with reasoning', async () => {
+    const { resolveProviderRequest } = await importFreshProviderConfigModule()
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_API_BASE
+    delete process.env.CLAUDE_CODE_USE_GITHUB
+
+    const resolved = resolveProviderRequest({ model: 'gpt-5.5' })
+    expect(resolved.transport).toBe('codex_responses')
+    expect(resolved.resolvedModel).toBe('gpt-5.5')
+    expect(resolved.reasoning).toEqual({ effort: 'high' })
+    expect(resolved.baseUrl).toBe('https://chatgpt.com/backend-api/codex')
+  })
+
   test('resolves codexspark alias to Codex transport with Codex base URL', async () => {
     const { resolveProviderRequest } = await importFreshProviderConfigModule()
     delete process.env.OPENAI_BASE_URL

@@ -4,13 +4,22 @@ set -e
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-/home/node/.openclaude}"
 LEGACY_CONFIG_FILE="${CLAUDE_LEGACY_CONFIG_FILE:-/home/node/.claude.json}"
 mkdir -p "$CONFIG_DIR"
-chown -R node:node "$CONFIG_DIR" 2>/dev/null || true
+chown node:node "$CONFIG_DIR" 2>/dev/null || true
 
 unset_empty_env() {
   name="$1"
   eval "value=\${$name-}"
   if [ -z "$value" ]; then
     unset "$name"
+  fi
+}
+
+export_if_missing() {
+  name="$1"
+  value="$2"
+  eval "current=\${$name-}"
+  if [ -n "$value" ] && [ -z "$current" ]; then
+    export "$name=$value"
   fi
 }
 
@@ -29,32 +38,32 @@ normalize_provider_env() {
   provider="$(printf '%s' "${OPENCLAUDE_PROVIDER:-}" | tr '[:upper:]' '[:lower:]')"
 
   case "$provider" in
-    openai|onlysq|ollama|lmstudio|lm-studio|openrouter|deepseek|groq|together|fireworks|nvidia-nim|minimax|atomic-chat)
+    openai|openai-compatible|codex|onlysq|ollama|lmstudio|lm-studio|openrouter|deepseek|groq|together|fireworks|nvidia-nim|minimax|atomic-chat)
       export CLAUDE_CODE_USE_OPENAI="${CLAUDE_CODE_USE_OPENAI:-1}"
-      [ -n "${OPENCLAUDE_BASE_URL:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ] && export OPENAI_BASE_URL="$OPENCLAUDE_BASE_URL"
-      [ -n "${OPENCLAUDE_MODEL:-}" ] && [ -z "${OPENAI_MODEL:-}" ] && export OPENAI_MODEL="$OPENCLAUDE_MODEL"
-      [ -n "${OPENCLAUDE_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && export OPENAI_API_KEY="$OPENCLAUDE_API_KEY"
+      export_if_missing OPENAI_BASE_URL "${OPENCLAUDE_BASE_URL:-}"
+      export_if_missing OPENAI_MODEL "${OPENCLAUDE_MODEL:-}"
+      export_if_missing OPENAI_API_KEY "${OPENCLAUDE_API_KEY:-}"
       ;;
     gemini|google-gemini)
       export CLAUDE_CODE_USE_GEMINI="${CLAUDE_CODE_USE_GEMINI:-1}"
-      [ -n "${OPENCLAUDE_BASE_URL:-}" ] && [ -z "${GEMINI_BASE_URL:-}" ] && export GEMINI_BASE_URL="$OPENCLAUDE_BASE_URL"
-      [ -n "${OPENCLAUDE_MODEL:-}" ] && [ -z "${GEMINI_MODEL:-}" ] && export GEMINI_MODEL="$OPENCLAUDE_MODEL"
-      [ -n "${OPENCLAUDE_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ] && export GEMINI_API_KEY="$OPENCLAUDE_API_KEY"
+      export_if_missing GEMINI_BASE_URL "${OPENCLAUDE_BASE_URL:-}"
+      export_if_missing GEMINI_MODEL "${OPENCLAUDE_MODEL:-}"
+      export_if_missing GEMINI_API_KEY "${OPENCLAUDE_API_KEY:-}"
       ;;
     mistral)
       export CLAUDE_CODE_USE_MISTRAL="${CLAUDE_CODE_USE_MISTRAL:-1}"
-      [ -n "${OPENCLAUDE_BASE_URL:-}" ] && [ -z "${MISTRAL_BASE_URL:-}" ] && export MISTRAL_BASE_URL="$OPENCLAUDE_BASE_URL"
-      [ -n "${OPENCLAUDE_MODEL:-}" ] && [ -z "${MISTRAL_MODEL:-}" ] && export MISTRAL_MODEL="$OPENCLAUDE_MODEL"
-      [ -n "${OPENCLAUDE_API_KEY:-}" ] && [ -z "${MISTRAL_API_KEY:-}" ] && export MISTRAL_API_KEY="$OPENCLAUDE_API_KEY"
+      export_if_missing MISTRAL_BASE_URL "${OPENCLAUDE_BASE_URL:-}"
+      export_if_missing MISTRAL_MODEL "${OPENCLAUDE_MODEL:-}"
+      export_if_missing MISTRAL_API_KEY "${OPENCLAUDE_API_KEY:-}"
       ;;
     anthropic|claude|firstparty|first-party)
-      [ -n "${OPENCLAUDE_BASE_URL:-}" ] && [ -z "${ANTHROPIC_BASE_URL:-}" ] && export ANTHROPIC_BASE_URL="$OPENCLAUDE_BASE_URL"
-      [ -n "${OPENCLAUDE_MODEL:-}" ] && [ -z "${ANTHROPIC_MODEL:-}" ] && export ANTHROPIC_MODEL="$OPENCLAUDE_MODEL"
-      [ -n "${OPENCLAUDE_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && export ANTHROPIC_API_KEY="$OPENCLAUDE_API_KEY"
+      export_if_missing ANTHROPIC_BASE_URL "${OPENCLAUDE_BASE_URL:-}"
+      export_if_missing ANTHROPIC_MODEL "${OPENCLAUDE_MODEL:-}"
+      export_if_missing ANTHROPIC_API_KEY "${OPENCLAUDE_API_KEY:-}"
       ;;
     github|copilot|github-copilot)
       export CLAUDE_CODE_USE_GITHUB="${CLAUDE_CODE_USE_GITHUB:-1}"
-      [ -n "${OPENCLAUDE_MODEL:-}" ] && [ -z "${OPENAI_MODEL:-}" ] && export OPENAI_MODEL="$OPENCLAUDE_MODEL"
+      export_if_missing OPENAI_MODEL "${OPENCLAUDE_MODEL:-}"
       ;;
   esac
 }

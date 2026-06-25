@@ -31,6 +31,10 @@ const CODEX_ALIAS_MODELS: Record<
     model: 'gpt-5.4',
     reasoningEffort: 'high',
   },
+  'gpt-5.5': {
+    model: 'gpt-5.5',
+    reasoningEffort: 'high',
+  },
   'gpt-5.4': {
     model: 'gpt-5.4',
     reasoningEffort: 'high',
@@ -389,7 +393,7 @@ export function resolveProviderRequest(options?: {
     Boolean(envResolvedCodexModel) &&
     descriptor.baseModel === envResolvedCodexModel
   const isCodexAliasModel =
-    isOpenAICodexShortcutAlias(requestedModel) || requestedMatchesEnvCodexShortcut
+    isCodexAlias(requestedModel) || requestedMatchesEnvCodexShortcut
   const hasUserSetBaseUrl = rawBaseUrl && rawBaseUrl !== DEFAULT_OPENAI_BASE_URL
   const finalBaseUrl =
     !isGithubMode && isCodexAliasModel && !hasUserSetBaseUrl

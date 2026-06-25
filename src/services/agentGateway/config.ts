@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { resolve, join } from 'path'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
@@ -16,6 +17,11 @@ export type AgentGatewayConfig = {
   cron: {
     enabled: boolean
     tickIntervalSeconds: number
+  }
+  memory: {
+    enabled: boolean
+    userProfileEnabled: boolean
+    writeApproval: boolean
   }
   telegram: {
     enabled: boolean
@@ -81,6 +87,10 @@ export type AgentGatewayConfig = {
 
 export const AGENT_GATEWAY_CONFIG_FILE = 'agent-gateway.json'
 
+export function generateAgentGatewayApiKey(): string {
+  return `ocag_${randomBytes(24).toString('base64url')}`
+}
+
 export function getAgentGatewayConfigPath(): string {
   return join(getClaudeConfigHomeDir(), AGENT_GATEWAY_CONFIG_FILE)
 }
@@ -103,6 +113,11 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
     cron: {
       enabled: false,
       tickIntervalSeconds: 60,
+    },
+    memory: {
+      enabled: true,
+      userProfileEnabled: true,
+      writeApproval: false,
     },
     telegram: {
       enabled: false,
@@ -190,6 +205,8 @@ export function normalizeAgentGatewayConfig(
   const input = raw && typeof raw === 'object' ? raw as Record<string, any> : {}
   const api = input.api && typeof input.api === 'object' ? input.api : {}
   const cron = input.cron && typeof input.cron === 'object' ? input.cron : {}
+  const memory =
+    input.memory && typeof input.memory === 'object' ? input.memory : {}
   const telegram =
     input.telegram && typeof input.telegram === 'object' ? input.telegram : {}
   const ouroboros =
@@ -217,6 +234,11 @@ export function normalizeAgentGatewayConfig(
         1,
         Number(cron.tickIntervalSeconds || defaults.cron.tickIntervalSeconds),
       ),
+    },
+    memory: {
+      enabled: memory.enabled !== false,
+      userProfileEnabled: memory.userProfileEnabled !== false,
+      writeApproval: Boolean(memory.writeApproval),
     },
     telegram: {
       enabled: Boolean(telegram.enabled),
@@ -382,6 +404,13 @@ export function applyAgentGatewayEnvOverrides(
 ): AgentGatewayConfig {
   const apiEnabled = parseEnvBoolean(env.OPENCLAUDE_AGENT_API_ENABLED)
   const cronEnabled = parseEnvBoolean(env.OPENCLAUDE_AGENT_CRON_ENABLED)
+  const memoryEnabled = parseEnvBoolean(env.OPENCLAUDE_MEMORY_ENABLED)
+  const userProfileEnabled = parseEnvBoolean(
+    env.OPENCLAUDE_USER_PROFILE_ENABLED,
+  )
+  const memoryWriteApproval = parseEnvBoolean(
+    env.OPENCLAUDE_MEMORY_WRITE_APPROVAL,
+  )
   const telegramEnabled = parseEnvBoolean(env.OPENCLAUDE_TELEGRAM_ENABLED)
   const telegramDownloadFiles = parseEnvBoolean(
     env.OPENCLAUDE_TELEGRAM_DOWNLOAD_FILES,
@@ -420,6 +449,13 @@ export function applyAgentGatewayEnvOverrides(
       tickIntervalSeconds:
         env.OPENCLAUDE_AGENT_CRON_TICK_SECONDS ??
         config.cron.tickIntervalSeconds,
+    },
+    memory: {
+      ...config.memory,
+      enabled: memoryEnabled ?? config.memory.enabled,
+      userProfileEnabled:
+        userProfileEnabled ?? config.memory.userProfileEnabled,
+      writeApproval: memoryWriteApproval ?? config.memory.writeApproval,
     },
     telegram: {
       ...config.telegram,

@@ -1,10 +1,10 @@
 import React from 'react'
-import { randomBytes } from 'crypto'
 import { Box, Text } from '../ink.js'
 import { Select } from './CustomSelect/select.js'
 import TextInput from './TextInput.js'
 import {
   type AgentGatewayConfig,
+  generateAgentGatewayApiKey,
   getAgentGatewayConfigPath,
   loadAgentGatewayConfig,
   maskSecret,
@@ -865,7 +865,7 @@ export function AgentGatewayManager({
             return
           }
           if (value === 'generate-api-key') {
-            const apiKey = generateApiKey()
+            const apiKey = generateAgentGatewayApiKey()
             void persist(
               current => ({
                 ...current,
@@ -1099,10 +1099,6 @@ function splitList(value: string): string[] {
     .split(/[,\s]+/)
     .map(item => item.trim())
     .filter(Boolean)
-}
-
-function generateApiKey(): string {
-  return `ocag_${randomBytes(24).toString('base64url')}`
 }
 
 function getAgentGatewayCopy(language: AgentGatewayConfig['ui']['language']) {

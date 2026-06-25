@@ -29,6 +29,103 @@ Run `/agent-gateway` inside OpenClaude when you prefer the terminal UI. The
 terminal UI works on Windows, macOS, Linux, WSL, and Docker because it uses the
 same Ink console surface as the main CLI.
 
+For headless setup and automation, use the non-interactive CLI:
+
+```bash
+openclaude gateway auth login --generate
+openclaude gateway codex login
+openclaude gateway model
+openclaude gateway setup new provider api --codex
+openclaude gateway memory add --kind user "User prefers concise Russian engineering updates."
+openclaude gateway status
+openclaude gateway serve
+openclaude gateway run "Inspect the current workspace and summarize it."
+```
+
+Useful CLI commands:
+
+- `openclaude gateway auth login --generate` enables the Agent API and stores a
+  generated Bearer key in `agent-gateway.json`.
+- `openclaude gateway auth login --api-key -` reads the key from stdin.
+- `openclaude gateway configure --enable-telegram --telegram-bot-token ...`
+  updates Telegram settings without opening the UI.
+- `openclaude gateway health` checks a running gateway server.
+- `openclaude gateway run ...` sends a prompt to the running gateway through the
+  Responses API and uses the stored Bearer key automatically.
+- `openclaude gateway model` shows the active gateway model plus Codex provider
+  credential/profile status.
+- `openclaude gateway setup new provider api --codex` runs the Hermes-style
+  setup path for Codex subscription auth. Pass `--api-key ...` for manual Agent
+  API auth instead.
+- `openclaude gateway auth logout --disable-api` removes the stored Agent API
+  key and disables the local API.
+
+Codex subscription auth is separate from the Agent API Bearer key:
+
+- `openclaude gateway codex login` starts the Codex OAuth flow, opens ChatGPT
+  sign-in, stores Codex credentials in secure storage, and saves a Codex startup
+  provider profile for gateway child runs.
+- `openclaude gateway codex login --no-browser` prints the OAuth URL for
+  headless or remote shells.
+- `openclaude gateway codex status` shows whether Codex credentials resolve
+  from secure storage, `CODEX_API_KEY`, or `~/.codex/auth.json`.
+- `openclaude gateway codex logout` clears stored Codex OAuth credentials and
+  removes the Codex startup profile unless `--keep-profile` is passed.
+
+Hermes-style bounded memory is available through CLI and the protected API. It
+keeps two curated files under the gateway state directory:
+
+- `MEMORY.md`: project decisions, durable operating procedures, recurring
+  fixes, and long-term lessons. Limit: 2200 characters.
+- `USER.md`: user profile, preferences, communication style, and collaboration
+  habits. Limit: 1375 characters.
+
+Memory commands:
+
+```bash
+openclaude gateway memory status
+openclaude gateway memory add --kind memory --tags api "Gateway responses must stay OpenAI-compatible."
+openclaude gateway memory add --kind user "User wants short Russian status updates."
+openclaude gateway memory search gateway
+openclaude gateway memory search --sessions "previous task"
+openclaude gateway memory replace <memory-id> "Updated memory text"
+openclaude gateway memory remove <memory-id>
+openclaude gateway memory replace-text "exact old substring" "replacement text"
+openclaude gateway memory remove-text "exact old substring"
+openclaude gateway memory approval on
+openclaude gateway memory pending
+openclaude gateway memory approve <pending-id>
+openclaude gateway memory tool --action add --kind memory --content "Durable fact"
+```
+
+The gateway injects curated memory into `/v1/chat/completions`,
+`/v1/responses`, `/v1/runs`, and Telegram prompts. API chat sessions using
+`X-Hermes-Session-Id` and Responses API named/continued conversations keep a
+frozen memory snapshot for the conversation, matching Hermes' "memory snapshot
+at session start" behavior. API conversations are also appended to the gateway
+JSONL log so `memory search --sessions` can recover prior work.
+
+The child agent can request memory changes by emitting standalone hidden control
+lines. The gateway strips them from visible API/Telegram responses:
+
+```text
+[MEMORY action="add" target="memory" content="short durable fact" tags="api"]
+[MEMORY action="replace" target="user" old_text="exact old substring" content="replacement"]
+[MEMORY action="remove" target="memory" old_text="exact old substring"]
+```
+
+When memory approval is enabled, agent-requested writes are staged until
+`gateway memory approve`; otherwise valid writes are applied immediately. Memory
+content is bounded, duplicate-checked, and rejected when it looks like a secret,
+prompt injection, or exfiltration instruction.
+
+Memory write routes are protected by the same Agent API Bearer key:
+`GET/POST /api/memory`, `PATCH/DELETE /api/memory/:id`,
+`POST /api/memory/tool`, `GET /api/memory/pending`,
+`POST /api/memory/approve`, `POST /api/memory/reject`,
+`GET /api/memory/search?q=...`, and
+`GET /api/memory/sessions/search?q=...`.
+
 ## What It Configures
 
 - Model provider profile: provider, base URL, model, and API key.
@@ -76,6 +173,72 @@ Once any chat or user allowlist is configured, messages are accepted only when:
 
 Use `/chatid` in Telegram to see the current chat ID. Telegram user IDs can be
 added through `/agent-gateway`.
+
+## Telegram Inference Commands
+
+The Telegram bridge treats normal messages as prompts for the agent and exposes
+owner-control commands directly in the chat. `/help` returns the authoritative
+runtime help text, and the bridge also registers base commands with Telegram's
+command menu through `setMyCommands` on startup.
+
+Basics:
+
+- `/help` - show Telegram help and refresh the command menu.
+- `/commands` - show the same Telegram command reference.
+- `/chatid` - show the current chat ID.
+- `/status` - show gateway, workers, cron, budget, and Ouroboros status.
+- `/transcribe` - check voice/audio transcription availability.
+
+Inference and providers:
+
+- `/provider` - show active provider, model, and API endpoint.
+- `/provider models` - load models from the active OpenAI-compatible endpoint.
+- `/provider set <provider> <model> [base_url] [api_key]` - switch
+  provider/model for next agent runs.
+- `/model <model>` - switch model for next agent runs.
+- `/baseurl <url>` - switch OpenAI-compatible base URL.
+- `/apikey <key>` - store provider API key for next runs.
+
+Tasks and files:
+
+- `/stop` - abort the current running task.
+- `/retry` - retry the last task with the same prompt.
+- `/files` - list recent files downloaded from this chat.
+- `/errors [n]` - show recent Telegram/gateway errors.
+
+Cron and scheduling:
+
+- `/schedule every 1h | prompt` - create a cron job that replies here.
+- `/cron [list|reload|chatid|path|examples]` - manage cron jobs.
+- `/jobs` - list jobs created for this chat.
+- `/runjob <id>` - trigger a scheduled job now.
+- `/pausejob <id>` - pause a scheduled job.
+- `/resumejob <id>` - resume a paused job.
+- `/deletejob <id>` - delete a job permanently.
+
+Runtime control:
+
+- `/restart` - soft-restart the gateway runtime.
+- `/panic` - abort active tasks and stop the gateway runtime.
+- `/bg [start|stop]` - show or control background consciousness.
+- `/consciousness [start|stop]` - show, resume, or pause consciousness loop.
+- `/evolution [on|off]` - show or toggle self-improvement cycles.
+- `/evolve [now|stop|status]` - control autonomous evolution mode.
+- `/review` - run a deep architecture review cycle.
+- `/infinite <goal>` - run an opt-in persistent task loop.
+
+Memory and repository:
+
+- `/identity` - show current identity.
+- `/scratchpad` - show working memory.
+- `/bible` - show Constitution (`BIBLE.md`).
+- `/architecture` - show architecture doc.
+- `/git` - show git command help.
+- `/git status` - show git status.
+- `/git log` - show recent commits.
+- `/git diff [path]` - show uncommitted changes.
+- `/git commit <msg>` - stage and commit all changes.
+- `/undo` - revert the last git commit with a hard reset.
 
 ## Open WebUI
 

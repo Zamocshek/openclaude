@@ -76,6 +76,8 @@ if (feature('ABLATION_BASELINE') && process.env.CLAUDE_CODE_ABLATION_BASELINE) {
  */
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  const isAgentGatewayCliCommand =
+    args[0] === 'agent-gateway' || args[0] === 'gateway';
 
   // Fast-path for --version/-v: zero module loading needed
   if (args.length === 1 && (args[0] === '--version' || args[0] === '-v' || args[0] === '-V')) {
@@ -124,9 +126,11 @@ async function main(): Promise<void> {
   if (startupEnv !== process.env) {
     const startupProfileError = await getProviderValidationError(startupEnv)
     if (startupProfileError) {
-      console.error(
-        `Warning: ignoring saved provider profile. ${startupProfileError}`,
-      )
+      if (!isAgentGatewayCliCommand) {
+        console.error(
+          `Warning: ignoring saved provider profile. ${startupProfileError}`,
+        )
+      }
     } else {
       applyProfileEnvToProcessEnv(process.env, startupEnv)
     }
@@ -142,7 +146,9 @@ async function main(): Promise<void> {
     hydrateGithubModelsTokenFromSecureStorage()
   }
 
-  await validateProviderEnvOrExit()
+  if (!isAgentGatewayCliCommand) {
+    await validateProviderEnvOrExit()
+  }
 
   if (
     process.env.OPENCLAUDE_AGENT_GATEWAY_SERVER === '1' ||
@@ -177,7 +183,8 @@ async function main(): Promise<void> {
     process.env.OPENCLAUDE_AGENT_GATEWAY_CHILD !== '1' &&
     !args.includes('-p') &&
     !args.includes('--print') &&
-    !args.includes('--init-only')
+    !args.includes('--init-only') &&
+    !isAgentGatewayCliCommand
   ) {
     const { startAgentGatewayFromConfig } = await import('../services/agentGateway/index.js')
     await startAgentGatewayFromConfig().catch(error => {

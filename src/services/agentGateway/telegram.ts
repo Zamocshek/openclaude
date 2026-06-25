@@ -6,13 +6,23 @@ import { getAgentGatewayStateDir, updateAgentGatewayConfig } from './config.js'
 import { createCronJob, deleteCronJob, getCronJob, getCronJobsPath, listCronJobs, pauseCronJob, resumeCronJob, runCronJobNow } from './cron.js'
 import { runOpenClaudeAgent, redactAgentText, type AgentRunResult } from './agentRunner.js'
 import { detectTranscriptionTool, transcribeAudio } from './transcription.js'
-import { buildMemoryContextSection, loadScratchpadBlocks, loadIdentity, loadPatterns, appendChatLog, loadDialogueBlocks } from './memory.js'
+import {
+  applyCuratedMemoryDirectives,
+  buildCuratedMemorySystemInstructions,
+  buildMemoryContextSection,
+  loadScratchpadBlocks,
+  loadIdentity,
+  loadPatterns,
+  appendChatLog,
+  loadDialogueBlocks,
+} from './memory.js'
 import { loadRecentReflections, buildReflectionContextSection } from './reflection.js'
 import { getAgentGatewayRuntime, restartAgentGateway, stopAgentGateway } from './index.js'
 import { toggleEvolution, getEvolutionStatus, runEvolutionCycle, loadEvolutionState } from './evolution.js'
 import type { EvolutionResult, EvolutionType } from './evolution.js'
 import { buildSelfEditPrompt, selfRead, selfWrite, selfEdit, selfList, gitStatus, gitDiff, gitCommit, gitLog, gitReset } from './selfEdit.js'
 import { runInfiniteTask } from './infiniteTask.js'
+import { isCodexAlias } from '../api/providerConfig.js'
 
 export type TelegramFileRef = {
   file_id: string
@@ -124,6 +134,144 @@ export type TelegramStoredFile = {
   createdAt: string
 }
 
+type TelegramCommandHelpItem = {
+  syntax: string
+  description: string
+  botDescription?: string
+}
+
+type TelegramCommandHelpSection = {
+  title: string
+  commands: TelegramCommandHelpItem[]
+}
+
+type TelegramBotCommand = {
+  command: string
+  description: string
+}
+
+const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
+  {
+    title: 'Basics',
+    commands: [
+      { syntax: '/help', description: 'show this help and refresh the Telegram command menu', botDescription: 'Show Telegram control help' },
+      { syntax: '/commands', description: 'show the same Telegram command reference' },
+      { syntax: '/chatid', description: 'show the current chat ID' },
+      { syntax: '/status', description: 'show gateway, workers, cron, budget, and Ouroboros status' },
+      { syntax: '/transcribe', description: 'check voice/audio transcription availability' },
+    ],
+  },
+  {
+    title: 'Inference and providers',
+    commands: [
+      { syntax: '/provider', description: 'show active provider, model, and API endpoint', botDescription: 'Show or switch provider/model' },
+      { syntax: '/provider models', description: 'load models from the active OpenAI-compatible endpoint' },
+      { syntax: '/provider set <provider> <model> [base_url] [api_key]', description: 'switch provider/model for next agent runs' },
+      { syntax: '/model <model>', description: 'switch model for next agent runs' },
+      { syntax: '/baseurl <url>', description: 'switch OpenAI-compatible base URL' },
+      { syntax: '/apikey <key>', description: 'store provider API key for next runs' },
+    ],
+  },
+  {
+    title: 'Tasks and files',
+    commands: [
+      { syntax: '/stop', description: 'abort the current running task' },
+      { syntax: '/retry', description: 'retry the last task with the same prompt' },
+      { syntax: '/files', description: 'list recent files downloaded from this chat' },
+      { syntax: '/errors [n]', description: 'show recent Telegram/gateway errors' },
+    ],
+  },
+  {
+    title: 'Cron and scheduling',
+    commands: [
+      { syntax: '/schedule every 1h | prompt', description: 'create a cron job that replies here' },
+      { syntax: '/cron [list|reload|chatid|path|examples]', description: 'manage cron jobs' },
+      { syntax: '/jobs', description: 'list jobs created for this chat' },
+      { syntax: '/runjob <id>', description: 'trigger a scheduled job now' },
+      { syntax: '/pausejob <id>', description: 'pause a scheduled job' },
+      { syntax: '/resumejob <id>', description: 'resume a paused job' },
+      { syntax: '/deletejob <id>', description: 'delete a job permanently' },
+    ],
+  },
+  {
+    title: 'Runtime control',
+    commands: [
+      { syntax: '/restart', description: 'soft-restart the gateway runtime' },
+      { syntax: '/panic', description: 'abort active tasks and stop the gateway runtime' },
+      { syntax: '/bg [start|stop]', description: 'show or control background consciousness' },
+      { syntax: '/consciousness [start|stop]', description: 'show, resume, or pause consciousness loop' },
+      { syntax: '/evolution [on|off]', description: 'show or toggle self-improvement cycles' },
+      { syntax: '/evolve [now|stop|status]', description: 'control autonomous evolution mode' },
+      { syntax: '/review', description: 'run a deep architecture review cycle' },
+      { syntax: '/infinite <goal>', description: 'run an opt-in persistent task loop' },
+    ],
+  },
+  {
+    title: 'Memory and repository',
+    commands: [
+      { syntax: '/identity', description: 'show current identity' },
+      { syntax: '/scratchpad', description: 'show working memory' },
+      { syntax: '/bible', description: 'show Constitution (BIBLE.md)' },
+      { syntax: '/architecture', description: 'show architecture doc' },
+      { syntax: '/git', description: 'show git command help' },
+      { syntax: '/git status', description: 'show git status' },
+      { syntax: '/git log', description: 'show recent commits' },
+      { syntax: '/git diff [path]', description: 'show uncommitted changes' },
+      { syntax: '/git commit <msg>', description: 'stage and commit all changes' },
+      { syntax: '/undo', description: 'revert the last git commit with a hard reset' },
+    ],
+  },
+]
+
+export function buildTelegramHelpText(): string {
+  const lines = [
+    'OpenClaude Telegram inference is online.',
+    '',
+    'Send text, screenshots, images, documents, voice, video, or other Telegram files. Files are saved locally and passed to the agent as paths.',
+    'Voice messages, audio files, and audio documents are transcribed before the agent runs when transcription is available.',
+    '',
+    'Available commands:',
+  ]
+
+  for (const section of TELEGRAM_COMMAND_HELP_SECTIONS) {
+    lines.push('', `${section.title}:`)
+    for (const command of section.commands) {
+      lines.push(`${command.syntax} - ${command.description}`)
+    }
+  }
+
+  lines.push(
+    '',
+    'Agent output can include [[image:C:\\path\\out.png]] or [[document:C:\\path\\file.pdf]] to upload generated files.',
+  )
+
+  return lines.join('\n')
+}
+
+export function buildTelegramBotCommands(): TelegramBotCommand[] {
+  const commands = new Map<string, string>()
+  for (const section of TELEGRAM_COMMAND_HELP_SECTIONS) {
+    for (const item of section.commands) {
+      const command = parseTelegramBotCommandName(item.syntax)
+      if (!command || commands.has(command)) continue
+      commands.set(command, item.botDescription || item.description)
+    }
+  }
+
+  return [...commands.entries()]
+    .slice(0, 100)
+    .map(([command, description]) => ({
+      command,
+      description: description.slice(0, 256),
+    }))
+}
+
+function parseTelegramBotCommandName(syntax: string): string | undefined {
+  const command = syntax.trim().split(/\s+/, 1)[0]?.replace(/^\//, '')
+  if (!command || !/^[a-z0-9_]{1,32}$/.test(command)) return undefined
+  return command
+}
+
 export class TelegramAgentBridge {
   private readonly config: AgentGatewayConfig
   private stopped = false
@@ -139,7 +287,18 @@ export class TelegramAgentBridge {
 
   start(): void {
     if (!this.config.telegram.enabled || !this.config.telegram.botToken) return
+    void this.registerBotCommands()
     void this.pollLoop()
+  }
+
+  private async registerBotCommands(): Promise<void> {
+    try {
+      await this.callTelegram('setMyCommands', {
+        commands: buildTelegramBotCommands(),
+      })
+    } catch {
+      // Command menu registration is best-effort; polling still matters.
+    }
   }
 
   stop(): void {
@@ -204,13 +363,16 @@ export class TelegramAgentBridge {
     phase: string,
     signal?: AbortSignal,
   ): Promise<TelegramTaskProgress> {
+    const providerProfile = await loadProviderProfile()
+    const startedAt = Date.now()
     const response = await this.callTelegram<any>('sendMessage', {
       chat_id: chatId,
       text: formatTelegramProgressText({
         status: 'running',
         phase,
-        startedAt: Date.now(),
+        startedAt,
         events: [],
+        providerProfile,
       }),
       disable_web_page_preview: true,
       reply_markup: {
@@ -224,6 +386,8 @@ export class TelegramAgentBridge {
     return new TelegramTaskProgress({
       messageId,
       phase,
+      startedAt,
+      providerProfile,
       stopTyping,
       edit: async text => {
         if (!messageId) return
@@ -273,7 +437,9 @@ export class TelegramAgentBridge {
         onStdout: chunk => progress.observeStdout(chunk),
       })
     } finally {
-      this.activeTasks.delete(chatId)
+      if (this.activeTasks.get(chatId)?.controller === controller) {
+        this.activeTasks.delete(chatId)
+      }
     }
 
     if (!result) {
@@ -324,17 +490,33 @@ export class TelegramAgentBridge {
         const updates = await this.getUpdates()
         for (const update of updates) {
           this.offset = Math.max(this.offset, update.update_id + 1)
-          if (update.message) {
-            await this.handleUpdate(update)
-          }
           if (update.callback_query) {
             await this.handleCallbackQuery(update.callback_query)
+          }
+          if (update.message) {
+            this.handleMessageUpdateInBackground(update)
           }
         }
       } catch {
         await sleep(5_000)
       }
     }
+  }
+
+  private handleMessageUpdateInBackground(update: TelegramUpdate): void {
+    void this.handleUpdate(update).catch(error => {
+      void this.reportMessageUpdateError(update, error).catch(() => {})
+    })
+  }
+
+  private async reportMessageUpdateError(update: TelegramUpdate, error: unknown): Promise<void> {
+    const message = update.message
+    const chatId = message?.chat?.id === undefined ? '' : String(message.chat.id)
+    if (!message || !chatId || !this.isMessageAllowed(message, chatId)) return
+
+    const detail = error instanceof Error ? error.message : String(error)
+    await recordTelegramError(chatId, 'telegram-message', detail)
+    await this.sendMessage(chatId, `Telegram bridge error: ${detail}`)
   }
 
   private async getUpdates(): Promise<TelegramUpdate[]> {
@@ -376,65 +558,8 @@ export class TelegramAgentBridge {
     if (!this.isMessageAllowed(message, chatId)) return
     const commandText = normalizeTelegramCommand(text)
 
-    if (text === '/start' || text === '/help') {
-      await this.sendMessage(
-        chatId,
-        [
-          'OpenClaude agent bridge is online.',
-          '',
-          'Send text, screenshots, images, documents, voice, video, or other Telegram files. Files are saved locally and passed to the agent as paths.',
-          'Voice messages, audio files, and audio documents are automatically transcribed and sent to the agent.',
-          '',
-          'Commands:',
-          '/chatid - show this chat id',
-          '/schedule every 1h | prompt - create a cron job that replies here',
-          '/cron [list|reload|chatid|path|examples] - manage cron jobs',
-          '/jobs - list jobs created for this chat',
-          '/runjob <id> - trigger a job now',
-          '/pausejob <id> - pause a scheduled job',
-          '/resumejob <id> - resume a paused job',
-          '/deletejob <id> - delete a job permanently',
-          '/files - list recent files downloaded from this chat',
-          '/transcribe - check if voice transcription is available',
-          '/provider - show active provider/model/API endpoint',
-          '/provider models - load models from the active OpenAI-compatible endpoint',
-          '/provider set <provider> <model> [base_url] [api_key] - switch provider for next runs',
-          '/model <model> - switch model for next runs',
-          '/baseurl <url> - switch OpenAI-compatible base URL for next runs',
-          '/apikey <key> - switch provider API key for next runs',
-          '/errors [n] - show recent Telegram/gateway errors',
-          '/status - show gateway, workers, cron, budget, and Ouroboros status',
-          '/panic - abort active tasks and stop the gateway runtime',
-          '/restart - soft-restart the gateway runtime',
-          '/bg - show background consciousness status',
-          '/bg start - start background consciousness loop',
-          '/bg stop - stop background consciousness loop',
-          '/consciousness - show background consciousness status',
-          '/consciousness start - resume consciousness loop',
-          '/consciousness stop - pause consciousness loop',
-          '/evolution - show evolution status',
-          '/evolution on - enable self-improvement cycles',
-          '/evolution off - disable evolution',
-          '/evolve - start autonomous evolution mode',
-          '/evolve stop - stop autonomous evolution mode',
-          '/evolve now - run one evolution cycle now',
-          '/review - run a deep architecture review cycle',
-          '/identity - show current identity',
-          '/scratchpad - show working memory',
-          '/bible - show Constitution (BIBLE.md)',
-          '/architecture - show architecture doc',
-          '/git status - show git status',
-          '/git log - show recent commits',
-          '/git diff [path] - show uncommitted changes',
-          '/git commit <msg> - stage and commit all changes',
-          '/stop - stop the current running task',
-          '/retry - retry the last task with the same prompt',
-          '/infinite <goal> - run an opt-in persistent task loop',
-          '/undo - revert the last git commit (hard reset)',
-          '',
-          'Agent output can include [[image:C:\\path\\out.png]] or [[document:C:\\path\\file.pdf]] to upload generated files.',
-        ].join('\n'),
-      )
+    if (commandText === '/start' || commandText === '/help' || commandText === '/commands') {
+      await this.sendMessage(chatId, buildTelegramHelpText())
       return
     }
 
@@ -598,6 +723,21 @@ export class TelegramAgentBridge {
       return
     }
 
+    if (commandText === '/git') {
+      await this.sendMessage(
+        chatId,
+        [
+          'Git commands:',
+          '/git status - show git status',
+          '/git log - show recent commits',
+          '/git diff [path] - show uncommitted changes',
+          '/git commit <msg> - stage and commit all changes',
+          '/undo - revert the last git commit with a hard reset',
+        ].join('\n'),
+      )
+      return
+    }
+
     if (text === '/git status') {
       await this.handleGitStatusCommand(chatId)
       return
@@ -661,13 +801,23 @@ export class TelegramAgentBridge {
       username: message.from?.username,
     })
 
-    // Send "thinking" message with Stop button
+    const providerProfile = await loadProviderProfile()
+    const progressStartedAt = Date.now()
+    const progressPhase = 'Running Telegram request'
+
+    // Send initial progress message with Stop button
     const thinkingMsg = await this.callTelegram('sendMessage', {
       chat_id: chatId,
-      text: 'OpenClaude is thinking...',
+      text: formatTelegramProgressText({
+        status: 'running',
+        phase: progressPhase,
+        startedAt: progressStartedAt,
+        events: [],
+        providerProfile,
+      }),
       reply_markup: {
         inline_keyboard: [[
-          { text: '⏹ Stop', callback_data: `stop:${chatId}` },
+          { text: 'Stop', callback_data: `stop:${chatId}` },
         ]],
       },
     })
@@ -676,7 +826,9 @@ export class TelegramAgentBridge {
     const controller = new AbortController()
     const progress = new TelegramTaskProgress({
       messageId: thinkingMessageId,
-      phase: 'Running Telegram request',
+      phase: progressPhase,
+      startedAt: progressStartedAt,
+      providerProfile,
       stopTyping: this.startTypingLoop(chatId, controller.signal),
       edit: async progressText => {
         if (!thinkingMessageId) return
@@ -702,6 +854,7 @@ export class TelegramAgentBridge {
       from: message.from,
       text,
       attachments,
+      config: this.config,
     })
 
     // Save for /retry
@@ -718,7 +871,9 @@ export class TelegramAgentBridge {
         onStdout: chunk => progress.observeStdout(chunk),
       })
     } finally {
-      this.activeTasks.delete(chatId)
+      if (this.activeTasks.get(chatId)?.controller === controller) {
+        this.activeTasks.delete(chatId)
+      }
     }
 
     if (controller.signal.aborted) {
@@ -815,6 +970,7 @@ export class TelegramAgentBridge {
         from: message.from,
         text: agentText,
         attachments: [attachment],
+        config: this.config,
       })
       const result = await this.runAgentWithProgress(
         chatId,
@@ -893,12 +1049,7 @@ export class TelegramAgentBridge {
         return
       }
       const previous = await loadProviderProfile()
-      const profile = normalizeProviderProfile({
-        provider: parsed.provider,
-        model: parsed.model,
-        baseUrl: parsed.baseUrl || previous.baseUrl,
-        apiKey: parsed.apiKey || previous.apiKey,
-      })
+      const profile = buildTelegramProviderProfileUpdate(previous, parsed)
       await saveProviderProfile(profile)
       await this.sendMessage(
         chatId,
@@ -920,6 +1071,8 @@ export class TelegramAgentBridge {
         '/provider - show current provider',
         '/provider models - load models from current OpenAI-compatible endpoint',
         '/provider set <provider> <model> [base_url] [api_key]',
+        '/provider set deepseek deepseek-v4-pro',
+        '/provider set codex gpt-5.5',
         '/model <model>',
         '/baseurl <url>',
         '/apikey <key>',
@@ -1407,7 +1560,9 @@ export class TelegramAgentBridge {
         onProgress: event => progress.addEvent(event),
         onStdout: chunk => progress.observeStdout(chunk),
       })
-      this.activeTasks.delete(chatId)
+      if (this.activeTasks.get(chatId)?.controller === controller) {
+        this.activeTasks.delete(chatId)
+      }
       if (controller.signal.aborted) {
         progress.dispose()
         return
@@ -1422,12 +1577,16 @@ export class TelegramAgentBridge {
       await progress.finish('completed', 'Evolution cycle finished.')
       await this.sendEvolutionResult(chatId, result)
     } catch (error) {
-      this.activeTasks.delete(chatId)
+      if (this.activeTasks.get(chatId)?.controller === controller) {
+        this.activeTasks.delete(chatId)
+      }
       await progress.finish('failed', 'Evolution cycle failed.')
       await recordTelegramError(chatId, 'evolution-cycle', error)
       await this.sendMessage(chatId, error instanceof Error ? error.message : String(error))
     } finally {
-      this.activeTasks.delete(chatId)
+      if (this.activeTasks.get(chatId)?.controller === controller) {
+        this.activeTasks.delete(chatId)
+      }
     }
   }
 
@@ -1665,10 +1824,13 @@ export class TelegramAgentBridge {
   // -----------------------------------------------------------------------
 
   private async handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> {
-    // Answer the callback query first to remove the loading state
-    await this.callTelegram('answerCallbackQuery', {
-      callback_query_id: query.id,
-    })
+    try {
+      await this.callTelegram('answerCallbackQuery', {
+        callback_query_id: query.id,
+      })
+    } catch {
+      // The abort action matters more than clearing Telegram's button spinner.
+    }
 
     const data = query.data || ''
 
@@ -1699,7 +1861,7 @@ export class TelegramAgentBridge {
       await this.callTelegram('editMessageText', {
         chat_id: chatId,
         message_id: task.messageId,
-        text: '⏹ Task stopped by user.',
+        text: 'Task stopped by user.',
       })
     } catch {
       // Message may have already been replaced
@@ -1809,7 +1971,9 @@ export class TelegramAgentBridge {
       consciousness?.injectObservation(`Infinite task stopped: ${trimmedGoal.slice(0, 300)}`)
       consciousness?.resume()
       progress.dispose()
-      this.activeTasks.delete(chatId)
+      if (this.activeTasks.get(chatId)?.controller === controller) {
+        this.activeTasks.delete(chatId)
+      }
     }
   }
 
@@ -1833,7 +1997,8 @@ export class TelegramAgentBridge {
     text: string,
     fallback?: string,
   ): Promise<void> {
-    const parsed = extractTelegramSendDirectives(text)
+    const memoryProcessed = await this.applyAgentMemoryDirectives(chatId, text)
+    const parsed = extractTelegramSendDirectives(memoryProcessed)
     if (parsed.text.trim()) {
       await this.sendMessage(chatId, parsed.text)
     }
@@ -1856,6 +2021,28 @@ export class TelegramAgentBridge {
 
     if (!parsed.text.trim() && parsed.directives.length === 0 && fallback) {
       await this.sendMessage(chatId, fallback)
+    }
+  }
+
+  private async applyAgentMemoryDirectives(
+    chatId: string,
+    text: string,
+  ): Promise<string> {
+    try {
+      const processed = await applyCuratedMemoryDirectives(text, {
+        source: 'telegram-agent',
+        requireApproval: this.config.memory.writeApproval,
+        memoryEnabled: this.config.memory.enabled,
+        userProfileEnabled: this.config.memory.userProfileEnabled,
+      })
+      return processed.text
+    } catch (error) {
+      await recordTelegramError(
+        chatId,
+        'memory-directive',
+        error instanceof Error ? error.message : String(error),
+      )
+      return text.replace(/^\s*\[MEMORY(?:\s+[^\]]+)?\]\s*$/gim, '').trim()
     }
   }
 
@@ -2086,7 +2273,9 @@ function buildAgentChatLogOutput(
 
   return {
     direction: 'out',
-    text: (result.exitCode === 0 ? result.text : result.text || failureSummary).slice(0, 2000),
+    text: stripMemoryDirectiveLines(
+      result.exitCode === 0 ? result.text : result.text || failureSummary,
+    ).slice(0, 2000),
     chatId,
     exitCode: result.exitCode,
     timedOut: result.timedOut,
@@ -2098,12 +2287,18 @@ function buildAgentChatLogOutput(
   }
 }
 
-type AgentProviderProfile = {
+function stripMemoryDirectiveLines(text: string): string {
+  return text.replace(/^\s*\[MEMORY(?:\s+[^\]]+)?\]\s*$/gim, '').trim()
+}
+
+export type AgentProviderProfile = {
   provider: string
   baseUrl: string
   model: string
   apiKey: string
 }
+
+type TelegramProgressProviderProfile = Pick<AgentProviderProfile, 'provider' | 'model'>
 
 type ProviderInfo = {
   value: string
@@ -2114,6 +2309,7 @@ type ProviderInfo = {
 
 const TELEGRAM_PROVIDER_PRESETS: ProviderInfo[] = [
   { value: 'openai-compatible', flag: 'openai' },
+  { value: 'codex', flag: 'openai' },
   { value: 'abacus', flag: 'openai', baseUrl: 'https://routellm.abacus.ai/v1' },
   { value: 'onlysq', flag: 'openai', baseUrl: 'https://api.onlysq.ru/ai/openai' },
   { value: 'openai', flag: 'openai', baseUrl: 'https://api.openai.com/v1' },
@@ -2143,6 +2339,13 @@ async function loadProviderProfile(): Promise<AgentProviderProfile> {
     else if (env.CLAUDE_CODE_USE_MISTRAL) provider = 'mistral'
     else if (env.CLAUDE_CODE_USE_GITHUB) provider = 'github'
     else if (env.ANTHROPIC_API_KEY) provider = 'anthropic'
+    else if (
+      env.CODEX_API_KEY &&
+      isCodexAlias(env.OPENCLAUDE_MODEL || env.OPENAI_MODEL || '') &&
+      !(env.OPENCLAUDE_BASE_URL || env.OPENAI_BASE_URL)
+    ) {
+      provider = 'codex'
+    }
     else provider = 'openai-compatible'
   }
   const info = getTelegramProviderInfo(provider)
@@ -2150,15 +2353,18 @@ async function loadProviderProfile(): Promise<AgentProviderProfile> {
   return normalizeProviderProfile({
     provider,
     baseUrl:
-      env.OPENCLAUDE_BASE_URL ||
-      (isOpenAI ? env.OPENAI_BASE_URL : env[`${info.flag.toUpperCase()}_BASE_URL`]) ||
-      info.baseUrl ||
-      '',
+      provider === 'codex'
+        ? env.OPENCLAUDE_BASE_URL || ''
+        : env.OPENCLAUDE_BASE_URL ||
+          (isOpenAI ? env.OPENAI_BASE_URL : env[`${info.flag.toUpperCase()}_BASE_URL`]) ||
+          info.baseUrl ||
+          '',
     model:
       env.OPENCLAUDE_MODEL ||
       (isOpenAI ? env.OPENAI_MODEL : env[`${info.flag.toUpperCase()}_MODEL`]) ||
       '',
     apiKey:
+      (provider === 'codex' ? env.CODEX_API_KEY : '') ||
       env.OPENCLAUDE_API_KEY ||
       (isOpenAI ? env.OPENAI_API_KEY : env[`${info.flag.toUpperCase()}_API_KEY`]) ||
       info.apiKey ||
@@ -2211,6 +2417,13 @@ function providerProfileEnv(profile: AgentProviderProfile): Record<string, strin
     MISTRAL_MODEL: '',
     MISTRAL_API_KEY: '',
   }
+  if (profile.provider === 'codex') {
+    updates.CLAUDE_CODE_USE_OPENAI = '1'
+    updates.OPENAI_BASE_URL = profile.baseUrl
+    updates.OPENAI_MODEL = profile.model
+    if (profile.apiKey) updates.CODEX_API_KEY = profile.apiKey
+    return updates
+  }
   if (info.flag === 'openai') {
     updates.CLAUDE_CODE_USE_OPENAI = '1'
     updates.OPENAI_BASE_URL = profile.baseUrl
@@ -2235,6 +2448,28 @@ function providerProfileEnv(profile: AgentProviderProfile): Record<string, strin
     updates.OPENAI_MODEL = profile.model
   }
   return updates
+}
+
+export function buildTelegramProviderProfileUpdate(
+  previous: AgentProviderProfile,
+  parsed: Partial<AgentProviderProfile>,
+): AgentProviderProfile {
+  const provider = String(parsed.provider || previous.provider || 'openai-compatible')
+    .trim()
+    .toLowerCase()
+  const providerChanged = provider !== previous.provider
+  const defaults = getTelegramProviderInfo(provider)
+
+  return normalizeProviderProfile({
+    provider,
+    model: parsed.model || previous.model,
+    baseUrl: parsed.baseUrl !== undefined
+      ? parsed.baseUrl
+      : (providerChanged ? defaults.baseUrl || '' : previous.baseUrl),
+    apiKey: parsed.apiKey !== undefined
+      ? parsed.apiKey
+      : (providerChanged ? defaults.apiKey || '' : previous.apiKey),
+  })
 }
 
 function parseProviderSetCommand(input: string): Partial<AgentProviderProfile> | null {
@@ -2268,6 +2503,23 @@ function formatProviderProfile(profile: AgentProviderProfile): string {
 }
 
 async function loadProviderModels(profile: AgentProviderProfile): Promise<string> {
+  if (profile.provider === 'codex') {
+    return [
+      'Codex models available through Codex auth:',
+      '- gpt-5.5',
+      '- gpt-5.4',
+      '- gpt-5.3-codex',
+      '- gpt-5.3-codex-spark',
+      '- gpt-5.2-codex',
+      '- gpt-5.1-codex-max',
+      '- gpt-5.1-codex-mini',
+      '- codexplan',
+      '- codexspark',
+      '',
+      'Use /model <model> or /provider set codex <model>.',
+    ].join('\n')
+  }
+
   const info = getTelegramProviderInfo(profile.provider)
   if (info.flag !== 'openai') {
     return 'Model loading is implemented for OpenAI-compatible providers. Enter model manually with /model <model>.'
@@ -2476,11 +2728,13 @@ type TelegramProgressSnapshot = {
   phase: string
   startedAt: number
   events: TelegramProgressEvent[]
+  providerProfile?: TelegramProgressProviderProfile
 }
 
 class TelegramTaskProgress {
   readonly messageId: number
-  private readonly startedAt = Date.now()
+  private readonly startedAt: number
+  private readonly providerProfile?: TelegramProgressProviderProfile
   private readonly events: TelegramProgressEvent[] = []
   private readonly edit: (text: string) => Promise<void>
   private readonly stopTyping: () => void
@@ -2494,11 +2748,15 @@ class TelegramTaskProgress {
   constructor(input: {
     messageId: number
     phase: string
+    startedAt?: number
+    providerProfile?: TelegramProgressProviderProfile
     edit: (text: string) => Promise<void>
     stopTyping: () => void
   }) {
     this.messageId = input.messageId
     this.phase = input.phase
+    this.startedAt = input.startedAt ?? Date.now()
+    this.providerProfile = input.providerProfile
     this.edit = input.edit
     this.stopTyping = input.stopTyping
     this.heartbeatTimer = setInterval(() => this.scheduleEdit(), 15_000)
@@ -2573,6 +2831,7 @@ class TelegramTaskProgress {
         phase: this.phase,
         startedAt: this.startedAt,
         events: this.events,
+        providerProfile: this.providerProfile,
       }))
     } catch {
       // Telegram rejects unchanged/rate-limited edits; progress is best-effort.
@@ -2621,6 +2880,8 @@ export function formatTelegramProgressText(snapshot: TelegramProgressSnapshot): 
   const lines = [
     `OpenClaude task: ${snapshot.status}`,
     `Phase: ${snapshot.phase}`,
+    `Provider: ${snapshot.providerProfile?.provider || 'not set'}`,
+    `Model: ${snapshot.providerProfile?.model || 'not set'}`,
     `Elapsed: ${formatDuration(Date.now() - snapshot.startedAt)}`,
     '',
     'Activity:',
@@ -2672,6 +2933,7 @@ export function buildTelegramAgentPrompt(input: {
   text: string
   attachments: TelegramAttachment[]
   memoryContext?: string
+  memoryWriteProtocol?: string
   reflectionContext?: string
 }): string {
   const lines = [
@@ -2689,6 +2951,10 @@ export function buildTelegramAgentPrompt(input: {
   // Inject memory context (scratchpad, identity, patterns) if available
   if (input.memoryContext) {
     lines.push('', '## Your persistent memory (Ouroboros consciousness system)', input.memoryContext)
+  }
+
+  if (input.memoryWriteProtocol) {
+    lines.push('', input.memoryWriteProtocol)
   }
 
   // Inject reflection context (recent task reflections) if available
@@ -2730,15 +2996,25 @@ export async function buildTelegramAgentPromptWithMemory(input: {
   from?: TelegramMessage['from']
   text: string
   attachments: TelegramAttachment[]
+  config?: AgentGatewayConfig
 }): Promise<string> {
+  const memoryOptions = input.config
+    ? {
+        memoryEnabled: input.config.memory.enabled,
+        userProfileEnabled: input.config.memory.userProfileEnabled,
+        writeApproval: input.config.memory.writeApproval,
+      }
+    : undefined
   const [memoryContext, reflectionContext] = await Promise.all([
-    buildMemoryContextSection().catch(() => ''),
+    buildMemoryContextSection(memoryOptions).catch(() => ''),
     buildReflectionContextSection().catch(() => ''),
   ])
+  const memoryWriteProtocol = buildCuratedMemorySystemInstructions(memoryOptions)
 
   return buildTelegramAgentPrompt({
     ...input,
     memoryContext: memoryContext || undefined,
+    memoryWriteProtocol: memoryWriteProtocol || undefined,
     reflectionContext: reflectionContext || undefined,
   })
 }

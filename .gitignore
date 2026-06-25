@@ -10,6 +10,7 @@ GEMINI.md
 package-lock.json
 /.claude
 coverage/
+logs/
 .playwright-cli/
 .tmp-control-center/
 .tmp-gateway/

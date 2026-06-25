@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
   buildTelegramAgentPrompt,
+  buildTelegramBotCommands,
   buildTelegramDownloadFileName,
+  buildTelegramHelpText,
+  buildTelegramProviderProfileUpdate,
   extractTelegramSendDirectives,
   formatTelegramProgressText,
   getAudioTranscriptionCandidate,
@@ -13,6 +16,27 @@ import {
 } from './telegram.js'
 
 describe('agent gateway Telegram bridge helpers', () => {
+  test('builds Telegram help text and bot command menu from one command list', () => {
+    const help = buildTelegramHelpText()
+    const commands = buildTelegramBotCommands()
+
+    expect(help).toContain('OpenClaude Telegram inference is online.')
+    expect(help).toContain('/provider set <provider> <model> [base_url] [api_key]')
+    expect(help).toContain('/stop - abort the current running task')
+    expect(help).toContain('/git commit <msg> - stage and commit all changes')
+    expect(commands).toContainEqual({
+      command: 'help',
+      description: 'Show Telegram control help',
+    })
+    expect(commands).toContainEqual({
+      command: 'provider',
+      description: 'Show or switch provider/model',
+    })
+    expect(commands.every(item => !item.command.startsWith('/'))).toBe(true)
+    expect(commands.every(item => item.command.length <= 32)).toBe(true)
+    expect(commands.every(item => item.description.length <= 256)).toBe(true)
+  })
+
   test('selects the highest resolution photo Telegram sends', () => {
     const photo = selectLargestPhoto([
       { file_id: 'small', width: 90, height: 90, file_size: 1_000 },
@@ -187,6 +211,7 @@ describe('agent gateway Telegram bridge helpers', () => {
       status: 'running',
       phase: 'Running Telegram request',
       startedAt: Date.now() - 2_000,
+      providerProfile: { provider: 'deepseek', model: 'deepseek-v4-pro' },
       events: [
         { label: 'PowerShell: "Get-Content file"', count: 2 },
       ],
@@ -194,6 +219,8 @@ describe('agent gateway Telegram bridge helpers', () => {
 
     expect(text).toContain('OpenClaude task: running')
     expect(text).toContain('Phase: Running Telegram request')
+    expect(text).toContain('Provider: deepseek')
+    expect(text).toContain('Model: deepseek-v4-pro')
     expect(text).toContain('PowerShell: "Get-Content file" (x2)')
   })
 
@@ -208,5 +235,25 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(text).toContain('OpenClaude task: completed')
     expect(text).toContain('no streamed model/tool activity captured')
     expect(text).not.toContain('waiting for model/tool output')
+  })
+
+  test('switches provider profile without carrying old endpoint into codex', () => {
+    const profile = buildTelegramProviderProfileUpdate(
+      {
+        provider: 'deepseek',
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/v1',
+        apiKey: 'deepseek-key',
+      },
+      {
+        provider: 'codex',
+        model: 'gpt-5.5',
+      },
+    )
+
+    expect(profile.provider).toBe('codex')
+    expect(profile.model).toBe('gpt-5.5')
+    expect(profile.baseUrl).toBe('')
+    expect(profile.apiKey).toBe('')
   })
 })

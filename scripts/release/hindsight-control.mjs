@@ -52,7 +52,6 @@ Environment:
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     stdio: 'inherit',
-    shell: process.platform === 'win32',
     ...options,
   })
   if (result.error) throw result.error
@@ -60,11 +59,19 @@ function run(command, args, options = {}) {
 }
 
 function gitAvailable() {
-  return spawnSync('git', ['--version'], { stdio: 'ignore', shell: process.platform === 'win32' }).status === 0
+  return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0
 }
 
 function dockerAvailable() {
-  return spawnSync('docker', ['--version'], { stdio: 'ignore', shell: process.platform === 'win32' }).status === 0
+  return spawnSync('docker', ['--version'], { stdio: 'ignore' }).status === 0
+}
+
+function dockerContainerRunning(name) {
+  const result = spawnSync('docker', ['inspect', '-f', '{{.State.Running}}', name], {
+    encoding: 'utf8',
+  })
+  if (result.status !== 0) return undefined
+  return result.stdout.trim() === 'true'
 }
 
 function install() {
@@ -81,6 +88,17 @@ function install() {
 function dockerUp() {
   if (!dockerAvailable()) throw new Error('Docker is required for Hindsight docker-up')
   fs.mkdirSync(dataDir, { recursive: true })
+  const name = process.env.HINDSIGHT_CONTAINER_NAME || 'openclaude-hindsight'
+  const running = dockerContainerRunning(name)
+  if (running === true) {
+    run('docker', ['update', '--restart', 'unless-stopped', name])
+    console.log(`Hindsight API: http://localhost:${apiPort}`)
+    console.log(`Hindsight UI:  http://localhost:${uiPort}`)
+    return
+  }
+  if (running === false) {
+    run('docker', ['rm', '-f', name])
+  }
   const env = {
     ...process.env,
     HINDSIGHT_API_LLM_API_KEY: process.env.HINDSIGHT_API_LLM_API_KEY || process.env.OPENCLAUDE_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || '',
@@ -89,12 +107,13 @@ function dockerUp() {
   }
   const args = [
     'run',
-    '--rm',
     '-d',
+    '--restart',
+    'unless-stopped',
     '--pull',
     'always',
     '--name',
-    process.env.HINDSIGHT_CONTAINER_NAME || 'openclaude-hindsight',
+    name,
     '-p',
     `${apiPort}:8888`,
     '-p',
@@ -125,7 +144,6 @@ function dockerDown() {
   const name = process.env.HINDSIGHT_CONTAINER_NAME || 'openclaude-hindsight'
   const result = spawnSync('docker', ['rm', '-f', name], {
     stdio: 'inherit',
-    shell: process.platform === 'win32',
   })
   if (result.error) throw result.error
 }

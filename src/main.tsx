@@ -141,6 +141,7 @@ import { validateUuid } from './utils/uuid.js';
 // Plugin startup checks are now handled non-blockingly in REPL.tsx
 
 import { registerMcpAddCommand } from 'src/commands/mcp/addCommand.js';
+import { registerAgentGatewayCommand } from 'src/commands/agent-gateway/cliCommand.js';
 import { registerMcpDoctorCommand } from 'src/commands/mcp/doctorCommand.js';
 import { registerMcpXaaIdpCommand } from 'src/commands/mcp/xaaIdpCommand.js';
 import { fetchClaudeAIMcpConfigsIfEligible } from 'src/services/mcp/claudeai.js';
@@ -3901,6 +3902,7 @@ async function run(): Promise<CommanderCommand> {
   if (isXaaEnabled()) {
     registerMcpXaaIdpCommand(mcp);
   }
+  registerAgentGatewayCommand(program, createSortedHelpConfig);
   mcp.command('remove <name>').description('Remove an MCP server').option('-s, --scope <scope>', 'Configuration scope (local, user, or project) - if not specified, removes from whichever scope it exists in').action(async (name: string, options: {
     scope?: string;
   }) => {
