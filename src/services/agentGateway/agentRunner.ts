@@ -184,7 +184,9 @@ export function buildAgentArgs(
     args.push('--dangerously-skip-permissions')
   }
 
-  if (config.runner.availableTools.length > 0) {
+  if (config.runner.disableTools) {
+    args.push('--tools', '')
+  } else if (config.runner.availableTools.length > 0) {
     args.push('--tools', config.runner.availableTools.join(','))
   }
 

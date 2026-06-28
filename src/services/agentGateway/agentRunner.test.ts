@@ -55,6 +55,17 @@ describe('agent gateway prompt builder', () => {
     expect(args).not.toContain('hello from api')
   })
 
+  test('can disable model tool calls for local providers that reject tool schemas', () => {
+    const config = getDefaultAgentGatewayConfig()
+    config.runner.disableTools = true
+    config.runner.availableTools = ['Bash']
+
+    const args = buildAgentArgs(config)
+
+    expect(args).toContain('--tools')
+    expect(args[args.indexOf('--tools') + 1]).toBe('')
+  })
+
   test('can request verbose stream-json for gateway progress observers', () => {
     const config = getDefaultAgentGatewayConfig()
     const args = buildAgentArgs(config, { streamEvents: true })

@@ -76,6 +76,8 @@ export function registerAgentGatewayCommand(
     )
     .option('--max-turns <turns>', 'Maximum turns for each gateway agent run')
     .option('--timeout-ms <ms>', 'Timeout for each gateway agent run')
+    .option('--disable-tools', 'Run gateway child agents without model tool calls')
+    .option('--enable-tools', 'Allow gateway child agents to use configured tools')
     .option('--cors-origins <origins>', 'Comma/space-separated CORS origins')
     .option('--no-browser', 'Print the Codex OAuth URL without opening a browser')
     .option('--show-key', 'Reveal stored/generated credentials in output')
@@ -93,6 +95,8 @@ export function registerAgentGatewayCommand(
       permissionMode?: string
       maxTurns?: string
       timeoutMs?: string
+      disableTools?: boolean
+      enableTools?: boolean
       corsOrigins?: string
       noBrowser?: boolean
       showKey?: boolean
@@ -127,6 +131,8 @@ export function registerAgentGatewayCommand(
     )
     .option('--max-turns <turns>', 'Maximum turns for each gateway agent run')
     .option('--timeout-ms <ms>', 'Timeout for each gateway agent run')
+    .option('--disable-tools', 'Run gateway child agents without model tool calls')
+    .option('--enable-tools', 'Allow gateway child agents to use configured tools')
     .option('--cors-origins <origins>', 'Comma/space-separated CORS origins')
     .option('--disable-api', 'Save the key but leave the Agent API disabled')
     .option('--json', 'Output as JSON')
@@ -141,6 +147,8 @@ export function registerAgentGatewayCommand(
       permissionMode?: string
       maxTurns?: string
       timeoutMs?: string
+      disableTools?: boolean
+      enableTools?: boolean
       corsOrigins?: string
       disableApi?: boolean
       json?: boolean
@@ -239,6 +247,8 @@ export function registerAgentGatewayCommand(
     )
     .option('--max-turns <turns>', 'Maximum turns for each gateway agent run')
     .option('--timeout-ms <ms>', 'Timeout for each gateway agent run')
+    .option('--disable-tools', 'Run gateway child agents without model tool calls')
+    .option('--enable-tools', 'Allow gateway child agents to use configured tools')
     .option('--tools <tools>', 'Comma/space-separated available tool names')
     .option('--disallowed-tools <tools>', 'Comma/space-separated denied tool names')
     .option('--enable-telegram', 'Enable the Telegram bridge')
@@ -268,6 +278,8 @@ export function registerAgentGatewayCommand(
       permissionMode?: string
       maxTurns?: string
       timeoutMs?: string
+      disableTools?: boolean
+      enableTools?: boolean
       tools?: string
       disallowedTools?: string
       enableTelegram?: boolean

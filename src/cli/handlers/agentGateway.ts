@@ -77,6 +77,8 @@ export type GatewayAuthLoginOptions = OutputOptions & {
   permissionMode?: string
   maxTurns?: string
   timeoutMs?: string
+  disableTools?: boolean
+  enableTools?: boolean
   corsOrigins?: string
   disableApi?: boolean
 }
@@ -93,6 +95,8 @@ export type GatewayConfigureOptions = OutputOptions & {
   permissionMode?: string
   maxTurns?: string
   timeoutMs?: string
+  disableTools?: boolean
+  enableTools?: boolean
   tools?: string
   disallowedTools?: string
   enableTelegram?: boolean
@@ -355,8 +359,15 @@ export function buildAgentGatewayConfiguredConfig(
   if (options.timeoutMs) {
     next.runner.timeoutMs = parsePositiveInteger(options.timeoutMs, 'timeout')
   }
+  if (options.disableTools) {
+    next.runner.disableTools = true
+  }
+  if (options.enableTools) {
+    next.runner.disableTools = false
+  }
 
   if ('tools' in options && options.tools !== undefined) {
+    next.runner.disableTools = false
     next.runner.availableTools = splitListOption(options.tools)
   }
   if ('disallowedTools' in options && options.disallowedTools !== undefined) {

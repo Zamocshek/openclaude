@@ -38,7 +38,7 @@ normalize_provider_env() {
   provider="$(printf '%s' "${OPENCLAUDE_PROVIDER:-}" | tr '[:upper:]' '[:lower:]')"
 
   case "$provider" in
-    openai|openai-compatible|codex|onlysq|ollama|lmstudio|lm-studio|openrouter|deepseek|groq|together|fireworks|nvidia-nim|minimax|atomic-chat)
+    openai|openai-compatible|codex|onlysq|ollama|lmstudio|lm-studio|lmstudio-lan|openrouter|deepseek|groq|together|fireworks|nvidia-nim|minimax|atomic-chat)
       export CLAUDE_CODE_USE_OPENAI="${CLAUDE_CODE_USE_OPENAI:-1}"
       export_if_missing OPENAI_BASE_URL "${OPENCLAUDE_BASE_URL:-}"
       export_if_missing OPENAI_MODEL "${OPENCLAUDE_MODEL:-}"

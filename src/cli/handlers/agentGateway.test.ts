@@ -98,6 +98,7 @@ describe('agent gateway CLI helpers', () => {
       telegramAllowedChatIds: '42,43',
       telegramAllowedUserIds: '7 8',
       enableCron: true,
+      disableTools: true,
       tools: 'Bash,Read Edit',
       disallowedTools: 'WebSearch',
       disableMemory: true,
@@ -120,6 +121,7 @@ describe('agent gateway CLI helpers', () => {
       writeApproval: true,
     })
     expect(next.runner.availableTools).toEqual(['Bash', 'Read', 'Edit'])
+    expect(next.runner.disableTools).toBe(false)
     expect(next.runner.disallowedTools).toEqual(['WebSearch'])
   })
 

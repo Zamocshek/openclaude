@@ -195,6 +195,9 @@ Inference and providers:
 - `/provider models` - load models from the active OpenAI-compatible endpoint.
 - `/provider set <provider> <model> [base_url] [api_key]` - switch
   provider/model for next agent runs.
+- `/provider set lmstudio-lan gemma-4-12b-obliterated` - switch to the LAN
+  LM Studio preset at `http://192.168.187.1:1234/v1` and enable no-tools
+  runner mode for models whose LM Studio template rejects OpenAI tool schemas.
 - `/model <model>` - switch model for next agent runs.
 - `/baseurl <url>` - switch OpenAI-compatible base URL.
 - `/apikey <key>` - store provider API key for next runs.
@@ -334,7 +337,8 @@ settings, Ouroboros wakeup/max-round/budget settings, model provider settings,
 and WebSearch provider settings (`WEB_SEARCH_PROVIDER`, provider API keys, and
 custom `WEB_*` settings). By default the gateway does not block WebSearch; set
 `OPENCLAUDE_AGENT_RUNNER_DISALLOWED_TOOLS` only when a container should deny
-specific tools.
+specific tools. Set `OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS=1` when a local
+OpenAI-compatible model rejects structured tool calls.
 
 Docker starts accept either provider-native env (`CLAUDE_CODE_USE_OPENAI=1`,
 `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`) or UI-style env

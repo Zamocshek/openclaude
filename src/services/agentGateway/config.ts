@@ -80,6 +80,7 @@ export type AgentGatewayConfig = {
     maxTurns: number
     timeoutMs: number
     permissionMode: AgentGatewayPermissionMode
+    disableTools: boolean
     availableTools: string[]
     disallowedTools: string[]
   }
@@ -166,6 +167,7 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
       maxTurns: 12,
       timeoutMs: 3 * 60 * 1000,
       permissionMode: 'default',
+      disableTools: false,
       availableTools: [],
       disallowedTools: [],
     },
@@ -356,6 +358,7 @@ export function normalizeAgentGatewayConfig(
         Number(runner.timeoutMs || defaults.runner.timeoutMs),
       ),
       permissionMode: normalizePermissionMode(runner.permissionMode),
+      disableTools: Boolean(runner.disableTools),
       availableTools: Array.isArray(runner.availableTools)
         ? normalizeStringArray(runner.availableTools)
         : Array.isArray(runner.tools)
@@ -583,6 +586,9 @@ export function applyAgentGatewayEnvOverrides(
       permissionMode:
         env.OPENCLAUDE_AGENT_RUNNER_PERMISSION_MODE ??
         config.runner.permissionMode,
+      disableTools:
+        parseEnvBoolean(env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS) ??
+        config.runner.disableTools,
       availableTools:
         env.OPENCLAUDE_AGENT_RUNNER_TOOLS !== undefined
           ? splitEnvList(env.OPENCLAUDE_AGENT_RUNNER_TOOLS)

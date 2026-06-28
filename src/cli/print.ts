@@ -448,6 +448,10 @@ export function canBatchWith(
   )
 }
 
+function shouldDisableHeadlessModelTools(): boolean {
+  return isEnvTruthy(process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS)
+}
+
 export async function runHeadless(
   inputPrompt: string | AsyncIterable<string>,
   getAppState: () => AppState,
@@ -793,7 +797,9 @@ export async function runHeadless(
     appState.mcp.tools,
     appState.toolPermissionContext,
   )
-  let filteredTools = [...tools, ...allowedMcpTools]
+  let filteredTools = shouldDisableHeadlessModelTools()
+    ? []
+    : [...tools, ...allowedMcpTools]
 
   // When using SDK URL, always use stdio permission prompting to delegate to the SDK
   const effectivePermissionPromptToolName = options.sdkUrl
@@ -1483,6 +1489,9 @@ function runHeadlessStreaming(
       allTools = allTools.filter(
         tool => !toolMatchesName(tool, options.permissionPromptToolName!),
       )
+    }
+    if (shouldDisableHeadlessModelTools()) {
+      return []
     }
     const initJsonSchema = getInitJsonSchema()
     if (initJsonSchema && !options.jsonSchema) {

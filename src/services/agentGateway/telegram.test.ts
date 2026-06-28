@@ -256,4 +256,24 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(profile.baseUrl).toBe('')
     expect(profile.apiKey).toBe('')
   })
+
+  test('switches Telegram provider profile to LM Studio LAN defaults', () => {
+    const profile = buildTelegramProviderProfileUpdate(
+      {
+        provider: 'deepseek',
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/v1',
+        apiKey: 'deepseek-key',
+      },
+      {
+        provider: 'lmstudio-lan',
+        model: 'gemma-4-12b-obliterated',
+      },
+    )
+
+    expect(profile.provider).toBe('lmstudio-lan')
+    expect(profile.model).toBe('gemma-4-12b-obliterated')
+    expect(profile.baseUrl).toBe('http://192.168.187.1:1234/v1')
+    expect(profile.apiKey).toBe('lm-studio')
+  })
 })

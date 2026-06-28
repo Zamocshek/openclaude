@@ -1011,6 +1011,11 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         description: 'Local LM Studio endpoint',
       },
       {
+        value: 'lmstudio-lan',
+        label: 'LM Studio LAN',
+        description: 'LM Studio on the local network',
+      },
+      {
         value: 'custom',
         label: 'Custom',
         description: 'Any OpenAI-compatible provider',

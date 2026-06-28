@@ -479,6 +479,18 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.model).toBe('gemini-3-flash')
     expect(defaults.requiresApiKey).toBe(true)
   })
+
+  test('lmstudio-lan preset points at the configured LAN model', async () => {
+    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
+
+    const defaults = getProviderPresetDefaults('lmstudio-lan')
+
+    expect(defaults.provider).toBe('openai')
+    expect(defaults.baseUrl).toBe('http://192.168.187.1:1234/v1')
+    expect(defaults.model).toBe('gemma-4-12b-obliterated')
+    expect(defaults.apiKey).toBe('lm-studio')
+    expect(defaults.requiresApiKey).toBe(false)
+  })
 })
 
 describe('deleteProviderProfile', () => {

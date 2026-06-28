@@ -30,6 +30,7 @@ export type ProviderPreset =
   | 'openrouter'
   | 'onlysq'
   | 'lmstudio'
+  | 'lmstudio-lan'
   | 'custom'
   | 'nvidia-nim'
   | 'minimax'
@@ -294,6 +295,15 @@ export function getProviderPresetDefaults(
         baseUrl: 'http://localhost:1234/v1',
         model: 'local-model',
         apiKey: '',
+        requiresApiKey: false,
+      }
+    case 'lmstudio-lan':
+      return {
+        provider: 'openai',
+        name: 'LM Studio LAN',
+        baseUrl: 'http://192.168.187.1:1234/v1',
+        model: 'gemma-4-12b-obliterated',
+        apiKey: 'lm-studio',
         requiresApiKey: false,
       }
     case 'custom':

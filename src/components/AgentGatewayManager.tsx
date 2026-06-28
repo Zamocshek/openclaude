@@ -396,6 +396,7 @@ export function AgentGatewayManager({
       { label: 'OpenAI', value: 'openai' },
       { label: 'Ollama', value: 'ollama' },
       { label: 'LM Studio', value: 'lmstudio' },
+      { label: 'LM Studio LAN', value: 'lmstudio-lan' },
       { label: 'Google Gemini', value: 'gemini' },
       { label: 'OpenRouter', value: 'openrouter' },
       { label: 'OnlySQ', value: 'onlysq' },

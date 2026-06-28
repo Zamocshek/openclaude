@@ -58,6 +58,7 @@ const PROVIDERS = [
   { value: 'groq', label: 'Groq', flag: 'openai', baseUrl: 'https://api.groq.com/openai/v1' },
   { value: 'ollama', label: 'Ollama', flag: 'openai', baseUrl: 'http://localhost:11434/v1', apiKey: 'ollama' },
   { value: 'lmstudio', label: 'LM Studio', flag: 'openai', baseUrl: 'http://localhost:1234/v1', apiKey: 'lm-studio' },
+  { value: 'lmstudio-lan', label: 'LM Studio LAN', flag: 'openai', baseUrl: 'http://192.168.187.1:1234/v1', apiKey: 'lm-studio', models: ['gemma-4-12b-obliterated'] },
   { value: 'anthropic', label: 'Anthropic', flag: 'anthropic' },
   { value: 'gemini', label: 'Google Gemini', flag: 'gemini' },
   { value: 'mistral', label: 'Mistral', flag: 'mistral' },
@@ -166,6 +167,7 @@ const DEFAULT_CONFIG = {
     maxTurns: 24,
     timeoutMs: 600000,
     permissionMode: 'bypassPermissions',
+    disableTools: false,
     availableTools: [],
     disallowedTools: [],
   },
@@ -518,6 +520,7 @@ function normalizeState(input) {
   state.runner.maxTurns = Math.max(1, Number(state.runner.maxTurns || 24))
   state.runner.timeoutMs = Math.max(1000, Number(state.runner.timeoutMs || 600000))
   state.runner.permissionMode = state.runner.permissionMode === 'bypassPermissions' ? 'bypassPermissions' : state.runner.permissionMode === 'acceptEdits' ? 'acceptEdits' : 'default'
+  state.runner.disableTools = Boolean(state.runner.disableTools)
   state.runner.availableTools = splitList(state.runner.availableTools || state.runner.tools)
   state.runner.disallowedTools = splitList(state.runner.disallowedTools)
   state.provider = normalizeProvider(state.provider || {})
@@ -640,6 +643,7 @@ function toEnvUpdates(state) {
     OPENCLAUDE_AGENT_RUNNER_MAX_TURNS: String(state.runner.maxTurns),
     OPENCLAUDE_AGENT_RUNNER_TIMEOUT_MS: String(state.runner.timeoutMs),
     OPENCLAUDE_AGENT_RUNNER_PERMISSION_MODE: state.runner.permissionMode,
+    OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS: state.runner.disableTools ? '1' : '0',
     OPENCLAUDE_AGENT_RUNNER_TOOLS: state.runner.availableTools.join(','),
     OPENCLAUDE_AGENT_RUNNER_DISALLOWED_TOOLS: state.runner.disallowedTools.join(','),
     OPENCLAUDE_AGENT_API_HOST_PORT: String(state.docker.apiHostPort),
@@ -2185,6 +2189,7 @@ function html() {
       <div class="grid" style="margin-top:12px">
         <label>Runner max turns<input id="runnerMaxTurns" type="number"></label>
         <label>Runner timeout ms<input id="runnerTimeoutMs" type="number"></label>
+        <label class="check"><input id="disableTools" type="checkbox"> Disable model tool calls</label>
         <label>Available tools<input id="availableTools" placeholder="empty = all, or Bash,Read,Write"></label>
         <label>Disallowed tools<input id="disallowedTools" placeholder="Bash,WebSearch"></label>
       </div>
@@ -2400,7 +2405,7 @@ function html() {
   <script>
     let state = null;
     const $ = id => document.getElementById(id);
-    const ids = ['language','provider','providerBaseUrl','providerModel','providerApiKey','apiEnabled','apiHost','apiPort','apiModel','apiKey','apiCors','autoAccept','runnerMaxTurns','runnerTimeoutMs','availableTools','disallowedTools','cronEnabled','cronTick','ouroEnabled','consciousnessEnabled','infiniteTasksEnabled','wakeupMin','wakeupMax','maxRounds','budgetFraction','telegramEnabled','botToken','homeChatId','allowedUserIds','allowedChatIds','mirrorApi','downloadFiles','transcribeAudio','maxDownloadBytes','maxUploadBytes','transcriptionProvider','transcriptionOpenAIModel','webuiHost','webuiPort','pythonCommand','webuiDataDir','openragEnabled','openragUrl','openragApiKey','openragUseAgentProvider','openragRepoDir','openragWorkspaceDir','openragFrontendPort','openragLangflowPort','openragDoclingPort','openragOpenSearchPassword','openragLangflowUser','openragLangflowPassword','openragLlmProvider','openragLlmModel','openragEmbeddingProvider','openragEmbeddingModel','openragOllamaEndpoint','openragMcpEnabled','openragMcpCommand','openragMcpArgs','openragMcpTimeout','camofoxEnabled','camofoxMcpEnabled','camofoxUrl','camofoxPort','camofoxAccessKey','camofoxApiKey','camofoxUserId','camofoxSessionKey','camofoxMcpTimeout','hindsightEnabled','hindsightMcpEnabled','hindsightUrl','hindsightBankId','hindsightApiKey','hindsightApiPort','hindsightUiPort','hindsightMcpTimeout','hindsightUseAgentProvider','hindsightLlmProvider','hindsightLlmModel','hindsightLlmBaseUrl','hindsightLlmApiKey','dockerProject','dockerApiPort','dockerWebuiPort','dockerUseMainProvider','dockerProvider','dockerProviderBaseUrl','dockerProviderModel','dockerProviderApiKey','dockerTelegramEnabled','dockerTelegramUseMain','dockerBotToken','dockerHomeChatId','dockerAllowedUserIds','dockerAllowedChatIds'];
+    const ids = ['language','provider','providerBaseUrl','providerModel','providerApiKey','apiEnabled','apiHost','apiPort','apiModel','apiKey','apiCors','autoAccept','runnerMaxTurns','runnerTimeoutMs','disableTools','availableTools','disallowedTools','cronEnabled','cronTick','ouroEnabled','consciousnessEnabled','infiniteTasksEnabled','wakeupMin','wakeupMax','maxRounds','budgetFraction','telegramEnabled','botToken','homeChatId','allowedUserIds','allowedChatIds','mirrorApi','downloadFiles','transcribeAudio','maxDownloadBytes','maxUploadBytes','transcriptionProvider','transcriptionOpenAIModel','webuiHost','webuiPort','pythonCommand','webuiDataDir','openragEnabled','openragUrl','openragApiKey','openragUseAgentProvider','openragRepoDir','openragWorkspaceDir','openragFrontendPort','openragLangflowPort','openragDoclingPort','openragOpenSearchPassword','openragLangflowUser','openragLangflowPassword','openragLlmProvider','openragLlmModel','openragEmbeddingProvider','openragEmbeddingModel','openragOllamaEndpoint','openragMcpEnabled','openragMcpCommand','openragMcpArgs','openragMcpTimeout','camofoxEnabled','camofoxMcpEnabled','camofoxUrl','camofoxPort','camofoxAccessKey','camofoxApiKey','camofoxUserId','camofoxSessionKey','camofoxMcpTimeout','hindsightEnabled','hindsightMcpEnabled','hindsightUrl','hindsightBankId','hindsightApiKey','hindsightApiPort','hindsightUiPort','hindsightMcpTimeout','hindsightUseAgentProvider','hindsightLlmProvider','hindsightLlmModel','hindsightLlmBaseUrl','hindsightLlmApiKey','dockerProject','dockerApiPort','dockerWebuiPort','dockerUseMainProvider','dockerProvider','dockerProviderBaseUrl','dockerProviderModel','dockerProviderApiKey','dockerTelegramEnabled','dockerTelegramUseMain','dockerBotToken','dockerHomeChatId','dockerAllowedUserIds','dockerAllowedChatIds'];
 
     function log(message) {
       const text = typeof message === 'string' ? message : JSON.stringify(message, null, 2);
@@ -2434,6 +2439,7 @@ function html() {
       $('autoAccept').checked = state.runner.permissionMode === 'bypassPermissions';
       $('runnerMaxTurns').value = state.runner.maxTurns || 24;
       $('runnerTimeoutMs').value = state.runner.timeoutMs || 600000;
+      $('disableTools').checked = !!state.runner.disableTools;
       $('availableTools').value = (state.runner.availableTools || []).join(',');
       $('disallowedTools').value = (state.runner.disallowedTools || []).join(',');
       $('cronEnabled').checked = state.cron.enabled !== false;
@@ -2533,7 +2539,7 @@ function html() {
         openRAG: { enabled: $('openragEnabled').checked, url: $('openragUrl').value, apiKey: $('openragApiKey').value, useAgentProvider: $('openragUseAgentProvider').checked, repoDir: $('openragRepoDir').value, workspaceDir: $('openragWorkspaceDir').value, frontendPort: Number($('openragFrontendPort').value), langflowPort: Number($('openragLangflowPort').value), doclingPort: Number($('openragDoclingPort').value), openSearchPassword: $('openragOpenSearchPassword').value, langflowSuperuser: $('openragLangflowUser').value, langflowSuperuserPassword: $('openragLangflowPassword').value, llmProvider: $('openragLlmProvider').value, llmModel: $('openragLlmModel').value, embeddingProvider: $('openragEmbeddingProvider').value, embeddingModel: $('openragEmbeddingModel').value, ollamaEndpoint: $('openragOllamaEndpoint').value, mcpEnabled: $('openragMcpEnabled').checked, mcpCommand: $('openragMcpCommand').value, mcpArgs: $('openragMcpArgs').value, mcpTimeoutSeconds: Number($('openragMcpTimeout').value) },
         camofox: { enabled: $('camofoxEnabled').checked, mcpEnabled: $('camofoxMcpEnabled').checked, url: $('camofoxUrl').value, port: Number($('camofoxPort').value), accessKey: $('camofoxAccessKey').value, apiKey: $('camofoxApiKey').value, userId: $('camofoxUserId').value, sessionKey: $('camofoxSessionKey').value, mcpTimeoutSeconds: Number($('camofoxMcpTimeout').value) },
         hindsight: { enabled: $('hindsightEnabled').checked, mcpEnabled: $('hindsightMcpEnabled').checked, url: $('hindsightUrl').value, apiKey: $('hindsightApiKey').value, bankId: $('hindsightBankId').value, apiPort: Number($('hindsightApiPort').value), uiPort: Number($('hindsightUiPort').value), mcpTimeoutSeconds: Number($('hindsightMcpTimeout').value), useAgentProvider: $('hindsightUseAgentProvider').checked, llmProvider: $('hindsightLlmProvider').value, llmModel: $('hindsightLlmModel').value, llmBaseUrl: $('hindsightLlmBaseUrl').value, llmApiKey: $('hindsightLlmApiKey').value },
-        runner: { cwd: state.rootDir, maxTurns: Number($('runnerMaxTurns').value), timeoutMs: Number($('runnerTimeoutMs').value), permissionMode: $('autoAccept').checked ? 'bypassPermissions' : 'default', availableTools: $('availableTools').value, disallowedTools: $('disallowedTools').value },
+        runner: { cwd: state.rootDir, maxTurns: Number($('runnerMaxTurns').value), timeoutMs: Number($('runnerTimeoutMs').value), permissionMode: $('autoAccept').checked ? 'bypassPermissions' : 'default', disableTools: $('disableTools').checked, availableTools: $('availableTools').value, disallowedTools: $('disallowedTools').value },
         docker: { projectName: $('dockerProject').value, apiHostPort: Number($('dockerApiPort').value), openWebUIHostPort: Number($('dockerWebuiPort').value), provider: { useMainProvider: $('dockerUseMainProvider').checked, provider: $('dockerProvider').value, baseUrl: $('dockerProviderBaseUrl').value, model: $('dockerProviderModel').value, apiKey: $('dockerProviderApiKey').value }, telegram: { enabled: $('dockerTelegramEnabled').checked, useMainTelegram: $('dockerTelegramUseMain').checked, botToken: $('dockerBotToken').value, homeChatId: $('dockerHomeChatId').value, allowedUserIds: $('dockerAllowedUserIds').value, allowedChatIds: $('dockerAllowedChatIds').value } },
         ui: { language: $('language').value || 'ru' }
       };
