@@ -885,6 +885,8 @@ export function buildCuratedMemorySystemInstructions(options: {
     '- Use exact substring updates. Prefer replace/remove when a memory is stale instead of adding a duplicate.',
     '- Never use Read/Edit/Write/Bash to inspect or modify agent-gateway memory files directly, including identity.md, scratchpad.md, USER.md, MEMORY.md, curated_memory.json, or files under /agent-gateway/memory/. The gateway already injects the current memory snapshot above and applies valid [MEMORY ...] directives after your response.',
     '- Never say you need direct file access to memory. If the user asks to remember something, answer normally and emit the appropriate [MEMORY ...] control line in the same response.',
+    `- If the current request uses explicit memory intent words such as "remember", "save to memory", "\u0437\u0430\u043f\u043e\u043c\u043d\u0438", "\u043f\u0430\u043c\u044f\u0442\u044c", or "\u0441\u043e\u0445\u0440\u0430\u043d\u0438", a valid [MEMORY ...] line is mandatory unless the user explicitly says not to use memory.`,
+    '- When Hindsight MCP tools are available, also retain the same durable fact with hindsight_retain; the [MEMORY ...] directive is still required for gateway MD/curated memory.',
     '- To request a memory write, emit one standalone control line. The gateway strips it from the visible response:',
     '[MEMORY action="add" target="memory" content="short durable fact" tags="tag1,tag2"]',
     '[MEMORY action="replace" target="user" old_text="exact old substring" content="replacement text"]',

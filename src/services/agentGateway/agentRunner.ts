@@ -98,8 +98,15 @@ const HINDSIGHT_APPEND_SYSTEM_PROMPT = [
   'Use Hindsight for long-term user preferences, project decisions, recurring failures, learned operating procedures, and agent self-knowledge that should survive across sessions.',
   'Before answering questions about prior decisions, remembered preferences, history, durable memory, or learned project behavior, call hindsight_recall when it is available.',
   'After completing meaningful work, learning a stable preference, fixing a recurring bug, or changing how this agent should operate, call hindsight_retain with compact content and useful tags.',
+  `When the user explicitly asks to remember/save memory, including words such as "remember", "save to memory", "\u0437\u0430\u043f\u043e\u043c\u043d\u0438", "\u043f\u0430\u043c\u044f\u0442\u044c", or "\u0441\u043e\u0445\u0440\u0430\u043d\u0438", call hindsight_retain when it is available and do not rely on a text claim alone.`,
   'Use hindsight_reflect for synthesis, background consciousness summaries, evolution reviews, and deeper analysis over retained memories.',
   'Do not claim that memory was read or saved unless the Hindsight tool call succeeded.',
+].join(' ')
+const DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT = [
+  'When running inside the Docker agent container and launching a web app or dev server, bind the server to 0.0.0.0 instead of 127.0.0.1.',
+  'Preferred exposed container ports are 3000-3010, 5173, 8000, and 8080.',
+  'The default host mappings are container 3000-3010 to http://localhost:13000-13010, container 5173 to http://localhost:15173, container 8000 to http://localhost:18000, and container 8080 to http://localhost:18080.',
+  'After starting a server, report the host URL the user can open.',
 ].join(' ')
 const IGNORABLE_STDERR_PATTERNS = [
   WINDOWS_SHUTDOWN_ASSERT_RE,
@@ -232,6 +239,7 @@ function getApiGatewayAppendSystemPrompt(config: AgentGatewayConfig): string {
   if (hasOpenRAG) parts.push(OPENRAG_APPEND_SYSTEM_PROMPT)
   parts.push(CAMOFOX_APPEND_SYSTEM_PROMPT)
   parts.push(HINDSIGHT_APPEND_SYSTEM_PROMPT)
+  parts.push(DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT)
   return parts.join('\n\n')
 }
 

@@ -2469,57 +2469,7 @@ export class TelegramAgentBridge {
     chatId: string,
     text: string,
   ): Promise<{ text: string; messages: string[] }> {
-    const processed = extractTelegramCronDirectives(text)
-    if (processed.directives.length === 0) {
-      return { text: processed.text, messages: [] }
-    }
-
-    const messages: string[] = []
-    for (const directive of processed.directives) {
-      try {
-        const timezone = directive.timezone || getTelegramCronTimezone()
-        const existing = (await listCronJobs(true)).find(job =>
-          job.name === directive.name
-          && job.origin?.platform === 'telegram'
-          && job.origin.chatId === chatId
-          && job.state !== 'completed'
-        )
-        if (!existing && directive.action === 'update') {
-          throw new Error(`cron job ${directive.name} was not found for this Telegram chat`)
-        }
-        const input: Record<string, unknown> = {
-          name: directive.name,
-          timezone,
-          mode: directive.mode ?? 'message',
-          deliver: 'origin',
-          origin: { platform: 'telegram', chatId },
-        }
-        if (directive.prompt !== undefined) input.prompt = directive.prompt
-        if (directive.schedule !== undefined) input.schedule = directive.schedule
-        const job = existing
-          ? await updateCronJob(existing.id, { ...input, enabled: true })
-          : await createCronJob(input)
-
-        if (!job) {
-          throw new Error(`cron job ${directive.name} was not saved`)
-        }
-
-        messages.push([
-          existing || directive.action === 'update' ? 'Telegram cron updated:' : 'Telegram cron scheduled:',
-          `${job.name} (${job.id})`,
-          `schedule: ${job.scheduleDisplay}`,
-          `mode: ${job.mode ?? 'agent'}`,
-          ...(job.timezone ? [`timezone: ${job.timezone}`] : []),
-          `next: ${job.nextRunAt ?? 'none'}`,
-        ].join('\n'))
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        await recordTelegramError(chatId, 'cron-directive', message)
-        messages.push(`Telegram cron create failed: ${message}`)
-      }
-    }
-
-    return { text: processed.text, messages }
+    return applyTelegramCronDirectivesForChat(chatId, text)
   }
 
   private async tryHandleCronStyleFeedback(
@@ -3807,6 +3757,10 @@ function normalizeTelegramCommand(text: string): string {
   return [normalizedCommand, ...rest].join(' ').trim()
 }
 
+export function hasTelegramMemoryIntent(text: string): boolean {
+  return /(?:\b(?:remember|memorize|save(?:\s+this)?|save\s+to\s+memory|store(?:\s+this)?|memory|forget)\b|\u0437\u0430\u043f\u043e\u043c\u043d|\u043f\u0430\u043c\u044f\u0442|\u0441\u043e\u0445\u0440\u0430\u043d|\u0437\u0430\u0444\u0438\u043a\u0441|\u0437\u0430\u043f\u0438\u0448|\u0437\u0430\u0431\u0443\u0434|\u0443\u0434\u0430\u043b[^\n]{0,40}\u043f\u0430\u043c\u044f\u0442)/iu.test(text)
+}
+
 function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000))
   const hours = Math.floor(totalSeconds / 3600)
@@ -3862,6 +3816,17 @@ export function buildTelegramAgentPrompt(input: {
     )
   }
 
+  if (input.memoryWriteProtocol && hasTelegramMemoryIntent(input.text)) {
+    lines.push(
+      '',
+      'Explicit memory intent detected in the current Telegram message.',
+      '- A [MEMORY ...] control line is mandatory unless the user explicitly says not to use memory.',
+      '- Also call hindsight_retain when Hindsight MCP tools are available; the [MEMORY ...] line is still required for gateway MD/curated memory.',
+      '- If you create or update user-visible markdown files, do that as a separate filesystem action and still emit [MEMORY ...] for durable recall.',
+      '- Do not answer that something was remembered unless the memory directive or a real memory/tool write succeeded.',
+    )
+  }
+
   // Inject reflection context (recent task reflections) if available
   if (input.reflectionContext) {
     lines.push('', input.reflectionContext)
@@ -3900,9 +3865,10 @@ export function buildTelegramAgentPrompt(input: {
     'If the Telegram user asks to create, update, or remember a reminder, alarm, cron job, recurring task, or scheduled notification for this Telegram chat, emit a standalone bridge control line.',
     `Create static reminder example: [TELEGRAM_CRON_CREATE name="short-stable-name" schedule="0 22 * * *" timezone="${telegramCronTimezone}" mode="message" prompt="22:00 - reminder text without emojis unless requested."]`,
     'Update existing reminder example: [TELEGRAM_CRON_UPDATE name="existing-job-name" mode="message" prompt="Updated reminder text without emojis unless requested."]',
+    'TELEGRAM_CRON_CREATE is idempotent for this chat: if a live job with the same name exists, the gateway updates it; if it does not exist, the gateway creates it. Prefer CREATE with the full schedule when creating, rescheduling, repairing, or recreating a reminder.',
     'Use mode="message" for normal reminders so the gateway sends the text directly without running an LLM or tools. Use mode="agent" only for genuinely dynamic scheduled research/status tasks.',
     'Use standard 5-field cron in the timezone attribute. Use the exact minute/hour the user requested; do not invent offsets such as :07 unless the user asked for them. Recurring Telegram cron jobs are persistent and do not have a 7-day limit.',
-    'If the user reacts to a Cronjob Response and asks to change wording, style, emojis, time, or content, update the matching existing job by name with [TELEGRAM_CRON_UPDATE ...].',
+    'If the user reacts to a Cronjob Response and asks to change wording, style, emojis, time, or content, update the matching existing job by name with [TELEGRAM_CRON_UPDATE ...] only when that job name is visible in the replied-to message or cron jobs list. If you are unsure the job exists, emit TELEGRAM_CRON_CREATE with the full schedule instead of UPDATE.',
     'Do not call the built-in CronCreate tool for Telegram reminders. Do not read, edit, write, cat, tee, sed, or redirect into /agent-gateway/cron-jobs.json or any cron-jobs.json file. Never claim a Telegram reminder was created or updated unless a TELEGRAM_CRON_CREATE or TELEGRAM_CRON_UPDATE directive was emitted for the bridge to apply.',
   )
 
@@ -4093,7 +4059,7 @@ async function buildTelegramCronContext(chatId: string): Promise<string> {
 
   return [
     '## Telegram gateway cron jobs for this chat',
-    'These jobs are managed by the gateway. Use TELEGRAM_CRON_UPDATE to modify them.',
+    'These jobs are managed by the gateway. Use TELEGRAM_CRON_UPDATE only for listed jobs; use TELEGRAM_CRON_CREATE with a full schedule to repair or recreate missing jobs.',
     ...jobs.map(formatTelegramCronContextJob),
   ].join('\n')
 }
@@ -4156,6 +4122,75 @@ export function getTelegramCronTimezone(): string {
     process.env.OPENCLAUDE_TELEGRAM_CRON_TIMEZONE?.trim()
     || process.env.TZ?.trim()
     || 'Europe/Simferopol'
+  )
+}
+
+export async function applyTelegramCronDirectivesForChat(
+  chatId: string,
+  text: string,
+): Promise<{ text: string; messages: string[] }> {
+  const processed = extractTelegramCronDirectives(text)
+  if (processed.directives.length === 0) {
+    return { text: processed.text, messages: [] }
+  }
+
+  const messages: string[] = []
+  for (const directive of processed.directives) {
+    try {
+      const existing = await findActiveTelegramCronJob(chatId, directive.name)
+      const timezone = directive.timezone || (existing ? undefined : getTelegramCronTimezone())
+
+      if (!existing && directive.action === 'update' && !directive.schedule) {
+        messages.push([
+          'Telegram cron update skipped:',
+          `${directive.name} was not found for this Telegram chat.`,
+          'Emit TELEGRAM_CRON_CREATE with a schedule to recreate missing reminders.',
+        ].join('\n'))
+        continue
+      }
+
+      const input: Record<string, unknown> = {
+        mode: directive.mode ?? 'message',
+        deliver: 'origin',
+        origin: { platform: 'telegram', chatId },
+      }
+      if (!existing || existing.name === directive.name) input.name = directive.name
+      if (timezone !== undefined) input.timezone = timezone
+      if (directive.prompt !== undefined) input.prompt = directive.prompt
+      if (directive.schedule !== undefined) input.schedule = directive.schedule
+
+      const job = existing
+        ? await updateCronJob(existing.id, { ...input, enabled: true })
+        : await createCronJob(input)
+
+      if (!job) {
+        throw new Error(`cron job ${directive.name} was not saved`)
+      }
+
+      messages.push([
+        existing ? 'Telegram cron updated:' : 'Telegram cron scheduled:',
+        `${job.name} (${job.id})`,
+        `schedule: ${job.scheduleDisplay}`,
+        `mode: ${job.mode ?? 'agent'}`,
+        ...(job.timezone ? [`timezone: ${job.timezone}`] : []),
+        `next: ${job.nextRunAt ?? 'none'}`,
+      ].join('\n'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await recordTelegramError(chatId, 'cron-directive', message)
+      messages.push(`Telegram cron directive failed: ${message}`)
+    }
+  }
+
+  return { text: processed.text, messages }
+}
+
+async function findActiveTelegramCronJob(chatId: string, name: string): Promise<CronJob | undefined> {
+  return (await listCronJobs(true)).find(job =>
+    (job.name === name || job.id === name)
+    && job.origin?.platform === 'telegram'
+    && job.origin.chatId === chatId
+    && job.state !== 'completed'
   )
 }
 

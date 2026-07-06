@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import {
+  applyTelegramCronDirectivesForChat,
   buildTelegramAgentPrompt,
   buildTelegramAgentRecoveryPrompt,
   buildTelegramBotCommands,
@@ -21,6 +25,7 @@ import {
   getTelegramAgentRecoveryAttemptLimit,
   getTelegramQueuePosition,
   getTelegramProviderShortcut,
+  hasTelegramMemoryIntent,
   applyTelegramResearchMode,
   repairLikelyMojibakeText,
   summarizeAgentProgressChunk,
@@ -28,6 +33,23 @@ import {
   selectLargestPhoto,
   type TelegramAttachment,
 } from './telegram.js'
+import { listCronJobs } from './cron.js'
+
+async function withTempGatewayState<T>(fn: (stateDir: string) => Promise<T>): Promise<T> {
+  const previousStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+  const stateDir = await mkdtemp(join(tmpdir(), 'openclaude-agent-gateway-telegram-'))
+  process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = stateDir
+  try {
+    return await fn(stateDir)
+  } finally {
+    if (previousStateDir === undefined) {
+      delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    } else {
+      process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousStateDir
+    }
+    await rm(stateDir, { recursive: true, force: true })
+  }
+}
 
 describe('agent gateway Telegram bridge helpers', () => {
   test('builds Telegram help text and bot command menu from one command list', () => {
@@ -285,6 +307,22 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(prompt).toContain('Never claim a memory write succeeded')
   })
 
+  test('adds mandatory memory instructions for explicit Russian memory requests', () => {
+    const text = '\u0417\u0430\u043f\u043e\u043c\u043d\u0438: \u044f \u0442\u0440\u0435\u043d\u0438\u0440\u0443\u044e\u0441\u044c \u043a\u0430\u0436\u0434\u044b\u0439 \u0434\u0435\u043d\u044c'
+    const prompt = buildTelegramAgentPrompt({
+      chatId: '42',
+      messageId: 7,
+      text,
+      attachments: [],
+      memoryWriteProtocol: 'Persistent memory tool protocol:',
+    })
+
+    expect(hasTelegramMemoryIntent(text)).toBe(true)
+    expect(prompt).toContain('Explicit memory intent detected')
+    expect(prompt).toContain('A [MEMORY ...] control line is mandatory')
+    expect(prompt).toContain('hindsight_retain')
+  })
+
   test('instructs Telegram agents to schedule reminders through the bridge protocol', () => {
     const prompt = buildTelegramAgentPrompt({
       chatId: '42',
@@ -299,6 +337,8 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(prompt).toContain('without running an LLM or tools')
     expect(prompt).toContain('timezone="')
     expect(prompt).toContain('Use the exact minute/hour the user requested')
+    expect(prompt).toContain('TELEGRAM_CRON_CREATE is idempotent')
+    expect(prompt).toContain('If you are unsure the job exists')
     expect(prompt).toContain('Do not call the built-in CronCreate tool')
     expect(prompt).toContain('Do not read, edit, write')
     expect(prompt).toContain('/agent-gateway/cron-jobs.json')
@@ -338,6 +378,80 @@ describe('agent gateway Telegram bridge helpers', () => {
         prompt: '22:00 - время ежедневной тренировки. Не пропускай.',
       },
     ])
+  })
+
+  test('skips missing Telegram cron updates without failing the agent response', async () => {
+    await withTempGatewayState(async () => {
+      const result = await applyTelegramCronDirectivesForChat(
+        '42',
+        '[TELEGRAM_CRON_UPDATE name="pharma-mon-0907" mode="message" prompt="09:00 - pharma protocol."]',
+      )
+
+      expect(result.text).toBe('')
+      expect(result.messages.join('\n')).toContain('Telegram cron update skipped:')
+      expect(result.messages.join('\n')).toContain('pharma-mon-0907 was not found')
+      expect(result.messages.join('\n')).not.toContain('failed')
+      expect(await listCronJobs(true)).toHaveLength(0)
+    })
+  })
+
+  test('updates existing Telegram cron jobs when the directive uses the job id as its name key', async () => {
+    await withTempGatewayState(async stateDir => {
+      await writeFile(join(stateDir, 'cron-jobs.json'), `${JSON.stringify({
+        jobs: [
+          {
+            id: 'pharma-mon-0907',
+            name: 'pharma reminder monday morning',
+            prompt: 'old text',
+            schedule: { kind: 'cron', expr: '7 9 * * 1', display: '7 9 * * 1' },
+            scheduleDisplay: '7 9 * * 1',
+            timezone: 'Europe/Simferopol',
+            repeat: { completed: 1 },
+            enabled: true,
+            state: 'scheduled',
+            deliver: 'origin',
+            origin: { platform: 'telegram', chatId: '42' },
+            createdAt: '2026-07-01T00:00:00.000Z',
+            nextRunAt: '2099-01-01T00:00:00.000Z',
+            mode: 'message',
+          },
+        ],
+        updatedAt: '2026-07-01T00:00:00.000Z',
+      }, null, 2)}\n`, 'utf8')
+
+      const result = await applyTelegramCronDirectivesForChat(
+        '42',
+        '[TELEGRAM_CRON_UPDATE name="pharma-mon-0907" mode="message" prompt="09:00 - updated pharma protocol."]',
+      )
+
+      const jobs = await listCronJobs(true)
+      expect(result.messages.join('\n')).toContain('Telegram cron updated:')
+      expect(result.messages.join('\n')).not.toContain('not found')
+      expect(jobs).toHaveLength(1)
+      expect(jobs[0]?.id).toBe('pharma-mon-0907')
+      expect(jobs[0]?.name).toBe('pharma reminder monday morning')
+      expect(jobs[0]?.prompt).toBe('09:00 - updated pharma protocol.')
+    })
+  })
+
+  test('creates missing Telegram cron updates when the directive includes a full schedule', async () => {
+    await withTempGatewayState(async () => {
+      const result = await applyTelegramCronDirectivesForChat(
+        '42',
+        '[TELEGRAM_CRON_UPDATE name="pharma-mon-0907" schedule="2099-01-01T00:00:00.000Z" timezone="Europe/Amsterdam" mode="message" prompt="09:00 - pharma protocol."]',
+      )
+
+      const jobs = await listCronJobs(true)
+      expect(result.messages.join('\n')).toContain('Telegram cron scheduled:')
+      expect(jobs).toHaveLength(1)
+      expect(jobs[0]).toMatchObject({
+        name: 'pharma-mon-0907',
+        scheduleDisplay: 'once at 2099-01-01T00:00:00.000Z',
+        timezone: 'Europe/Amsterdam',
+        mode: 'message',
+        origin: { platform: 'telegram', chatId: '42' },
+      })
+    })
   })
 
   test('parses Telegram agent recovery retry limits', () => {
