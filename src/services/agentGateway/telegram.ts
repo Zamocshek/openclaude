@@ -3,7 +3,7 @@ import { basename, extname, join } from 'path'
 import { randomUUID } from 'crypto'
 import type { AgentGatewayConfig } from './config.js'
 import { getAgentGatewayStateDir, updateAgentGatewayConfig } from './config.js'
-import { createCronJob, deleteCronJob, getCronJob, getCronJobsPath, listCronJobs, pauseCronJob, resumeCronJob, runCronJobNow } from './cron.js'
+import { createCronJob, deleteCronJob, getCronJob, getCronJobsPath, listCronJobs, pauseCronJob, resumeCronJob, runCronJobNow, updateCronJob, type CronJob, type CronJobMode } from './cron.js'
 import { runOpenClaudeAgent, redactAgentText, type AgentRunResult } from './agentRunner.js'
 import { detectTranscriptionTool, transcribeAudio } from './transcription.js'
 import {
@@ -14,6 +14,7 @@ import {
   loadIdentity,
   loadPatterns,
   appendChatLog,
+  loadChatLogTranscript,
   loadDialogueBlocks,
 } from './memory.js'
 import { loadRecentReflections, buildReflectionContextSection } from './reflection.js'
@@ -23,6 +24,13 @@ import type { EvolutionResult, EvolutionType } from './evolution.js'
 import { buildSelfEditPrompt, selfRead, selfWrite, selfEdit, selfList, gitStatus, gitDiff, gitCommit, gitLog, gitReset } from './selfEdit.js'
 import { runInfiniteTask } from './infiniteTask.js'
 import { isCodexAlias } from '../api/providerConfig.js'
+import { getContextWindowForModel } from '../../utils/context.js'
+import { parseHumanLimit } from '../../utils/limitParsing.js'
+import {
+  getConversationContextMaxChars,
+  getConversationContextTurnLimit,
+  selectTextBlocksWithinCharBudget,
+} from './conversationContext.js'
 
 export type TelegramFileRef = {
   file_id: string
@@ -47,8 +55,10 @@ export type TelegramMessage = {
   message_id: number
   text?: string
   caption?: string
+  date?: number
   chat?: { id: number | string; type?: string; title?: string }
   from?: { id: number | string; username?: string; first_name?: string }
+  reply_to_message?: TelegramMessage
   photo?: TelegramPhotoSize[]
   document?: TelegramFileRef
   video?: TelegramFileRef
@@ -85,6 +95,8 @@ type ActiveTelegramTask = {
   progress?: TelegramTaskProgress
 }
 
+export type TelegramResearchMode = 'bio' | 'social' | 'code'
+
 export type TelegramGetFileResult = {
   file_id: string
   file_unique_id?: string
@@ -104,14 +116,33 @@ export type TelegramAttachment = {
   localPath?: string
   transcript?: string
   transcriptPath?: string
+  encodingRepair?: string
   downloadError?: string
   transcriptionError?: string
+}
+
+export type TelegramReplyContext = {
+  messageId: number
+  chatId?: string
+  from?: TelegramMessage['from']
+  text?: string
+  attachmentSummary?: string
+  date?: number
 }
 
 export type TelegramSendDirective = {
   path: string
   caption?: string
   kind?: 'image' | 'document' | 'auto'
+}
+
+export type TelegramCronCreateDirective = {
+  action: 'create' | 'update'
+  name: string
+  schedule?: string
+  prompt?: string
+  timezone?: string
+  mode?: CronJobMode
 }
 
 export type IncomingAttachmentCandidate = {
@@ -150,6 +181,54 @@ type TelegramBotCommand = {
   description: string
 }
 
+type RecentChatLogEntry = Record<string, unknown>
+
+export type TelegramProviderShortcut = {
+  command: string
+  provider: string
+  model: string
+  description: string
+}
+
+const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
+  {
+    command: '/gpt55',
+    provider: 'codex',
+    model: 'gpt-5.5',
+    description: 'switch to Codex GPT-5.5',
+  },
+  {
+    command: '/codex',
+    provider: 'codex',
+    model: 'gpt-5.5',
+    description: 'switch to Codex GPT-5.5',
+  },
+  {
+    command: '/dsflash',
+    provider: 'deepseek',
+    model: 'deepseek-v4-flash',
+    description: 'switch to DeepSeek V4 Flash',
+  },
+  {
+    command: '/dspro',
+    provider: 'deepseek',
+    model: 'deepseek-v4-pro',
+    description: 'switch to DeepSeek V4 Pro',
+  },
+  {
+    command: '/gemma',
+    provider: 'lmstudio-lan',
+    model: 'gemma-4-12b-obliterated',
+    description: 'switch to LM Studio Gemma 4 12B Obliterated',
+  },
+  {
+    command: '/gemmacoder',
+    provider: 'lmstudio-lan',
+    model: 'huihui-gemma-4-12b-coder-fable5-composer2.5-v1-abliterated',
+    description: 'switch to LM Studio Huihui Gemma Coder',
+  },
+]
+
 const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
   {
     title: 'Basics',
@@ -167,9 +246,24 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/provider', description: 'show active provider, model, and API endpoint', botDescription: 'Show or switch provider/model' },
       { syntax: '/provider models', description: 'load models from the active OpenAI-compatible endpoint' },
       { syntax: '/provider set <provider> <model> [base_url] [api_key]', description: 'switch provider/model for next agent runs' },
+      ...TELEGRAM_PROVIDER_SHORTCUTS.map(shortcut => ({
+        syntax: shortcut.command,
+        description: shortcut.description,
+      })),
+      { syntax: '/context', description: 'show effective context window for the active model', botDescription: 'Show or set context window' },
+      { syntax: '/context auto|1m|<tokens>', description: 'set manual context window or return to model auto mode' },
       { syntax: '/model <model>', description: 'switch model for next agent runs' },
       { syntax: '/baseurl <url>', description: 'switch OpenAI-compatible base URL' },
       { syntax: '/apikey <key>', description: 'store provider API key for next runs' },
+    ],
+  },
+  {
+    title: 'Research modes',
+    commands: [
+      { syntax: '/bio [prompt]', description: 'biology scientist mode for research tasks', botDescription: 'Biology research mode' },
+      { syntax: '/social [prompt]', description: 'defensive social-engineering analysis mode' },
+      { syntax: '/code [prompt]', description: 'scientific coding, MVP, and test-building mode' },
+      { syntax: '/mode off', description: 'clear the active research mode for this chat' },
     ],
   },
   {
@@ -266,6 +360,16 @@ export function buildTelegramBotCommands(): TelegramBotCommand[] {
     }))
 }
 
+export function getTelegramProviderShortcut(commandText: string): TelegramProviderShortcut | undefined {
+  const command = commandText
+    .trim()
+    .split(/\s+/u)[0]
+    ?.replace(/@[A-Za-z0-9_]+$/u, '')
+    .toLowerCase()
+  if (!command) return undefined
+  return TELEGRAM_PROVIDER_SHORTCUTS.find(shortcut => shortcut.command === command)
+}
+
 function parseTelegramBotCommandName(syntax: string): string | undefined {
   const command = syntax.trim().split(/\s+/, 1)[0]?.replace(/^\//, '')
   if (!command || !/^[a-z0-9_]{1,32}$/.test(command)) return undefined
@@ -278,6 +382,11 @@ export class TelegramAgentBridge {
   private offset = 0
   /** Active AbortControllers per chatId — for /stop */
   private activeTasks = new Map<string, ActiveTelegramTask>()
+  /** FIFO agent task queue per chatId. Commands still run immediately. */
+  private taskQueues = new Map<string, Promise<void>>()
+  private queuedTaskCounts = new Map<string, number>()
+  private queueEpoch = 0
+  private chatModes = new Map<string, TelegramResearchMode>()
   /** Last prompt per chatId — for /retry */
   private lastPrompts = new Map<string, { prompt: string; messageId: number }>()
 
@@ -303,6 +412,14 @@ export class TelegramAgentBridge {
 
   stop(): void {
     this.stopped = true
+    this.queueEpoch++
+    for (const task of this.activeTasks.values()) {
+      task.progress?.dispose()
+      task.controller.abort()
+    }
+    this.activeTasks.clear()
+    this.taskQueues.clear()
+    this.queuedTaskCounts.clear()
   }
 
   async sendHomeMessage(text: string): Promise<void> {
@@ -411,7 +528,7 @@ export class TelegramAgentBridge {
     prompt: string,
     phase = 'Running agent',
     options?: { suppressObservers?: boolean },
-  ): Promise<Awaited<ReturnType<typeof runOpenClaudeAgent>>> {
+  ): Promise<AgentRunResult> {
     if (this.activeTasks.has(chatId)) {
       throw new Error('A task is already running. Use /stop first.')
     }
@@ -424,17 +541,15 @@ export class TelegramAgentBridge {
       progress,
     })
 
-    let result: Awaited<ReturnType<typeof runOpenClaudeAgent>> | undefined
+    let result: AgentRunResult | undefined
     try {
-      progress.setPhase(phase)
-      result = await runOpenClaudeAgent({
+      result = await this.runAgentWithRecovery({
+        chatId,
         prompt,
-        config: this.config,
-        signal: controller.signal,
+        phase,
+        controller,
+        progress,
         suppressObservers: options?.suppressObservers,
-        streamEvents: true,
-        onProgress: event => progress.addEvent(event),
-        onStdout: chunk => progress.observeStdout(chunk),
       })
     } finally {
       if (this.activeTasks.get(chatId)?.controller === controller) {
@@ -456,6 +571,127 @@ export class TelegramAgentBridge {
     }
 
     return result
+  }
+
+  private async runAgentWithRecovery(input: {
+    chatId: string
+    prompt: string
+    phase: string
+    controller: AbortController
+    progress: TelegramTaskProgress
+    suppressObservers?: boolean
+  }): Promise<AgentRunResult> {
+    const recovery = getTelegramAgentRecoveryAttemptLimit()
+    let recoveryAttempt = 0
+    let currentPrompt = input.prompt
+    const repeatedFailures = new Map<string, number>()
+
+    while (true) {
+      const isRecovery = recoveryAttempt > 0
+      input.progress.setPhase(
+        isRecovery
+          ? formatTelegramRecoveryPhase(recoveryAttempt, recovery.maxRecoveryAttempts)
+          : input.phase,
+      )
+      if (isRecovery) {
+        input.progress.addEvent(
+          `recovery attempt ${recoveryAttempt}${recovery.maxRecoveryAttempts === null ? '' : `/${recovery.maxRecoveryAttempts}`}`,
+        )
+      }
+
+      const startedAt = Date.now()
+      const result = await runOpenClaudeAgent({
+        prompt: currentPrompt,
+        config: this.config,
+        signal: input.controller.signal,
+        suppressObservers: input.suppressObservers,
+        streamEvents: true,
+        onProgress: event => input.progress.addEvent(event),
+        onStdout: chunk => input.progress.observeStdout(chunk),
+      }).catch(error => buildAgentExceptionResult(error, Date.now() - startedAt))
+
+      if (input.controller.signal.aborted || result.exitCode === 0) {
+        return result
+      }
+
+      await recordTelegramError(
+        input.chatId,
+        recoveryAttempt === 0 ? 'agent-run-attempt' : `agent-run-recovery-${recoveryAttempt}`,
+        result,
+      )
+
+      const signature = getAgentRecoveryFailureSignature(result)
+      const repeatedCount = (repeatedFailures.get(signature) ?? 0) + 1
+      repeatedFailures.set(signature, repeatedCount)
+      if (repeatedCount >= getTelegramAgentRepeatedFailureLimit()) {
+        return withRepeatedFailureDiagnostic(result, repeatedCount)
+      }
+
+      if (
+        recovery.maxRecoveryAttempts !== null
+        && recoveryAttempt >= recovery.maxRecoveryAttempts
+      ) {
+        return result
+      }
+
+      recoveryAttempt += 1
+      currentPrompt = buildTelegramAgentRecoveryPrompt({
+        originalPrompt: input.prompt,
+        previousResult: result,
+        recoveryAttempt,
+        maxRecoveryAttempts: recovery.maxRecoveryAttempts,
+      })
+    }
+  }
+
+  private async enqueueChatTask(
+    chatId: string,
+    label: string,
+    run: () => Promise<void>,
+  ): Promise<void> {
+    const waitingBefore = this.queuedTaskCounts.get(chatId) ?? 0
+    const epoch = this.queueEpoch
+    const position = getTelegramQueuePosition({
+      active: this.activeTasks.has(chatId),
+      waiting: waitingBefore,
+    })
+    this.queuedTaskCounts.set(chatId, waitingBefore + 1)
+
+    if (position > 0) {
+      await this.sendMessage(chatId, formatTelegramQueueNotice(position, label))
+    }
+
+    const previous = this.taskQueues.get(chatId) ?? Promise.resolve()
+    const next = previous
+      .catch(() => {
+        // The previous task already reported its own error. Keep the FIFO alive.
+      })
+      .then(async () => {
+        if (epoch !== this.queueEpoch || this.stopped) return
+        const remaining = Math.max(
+          0,
+          (this.queuedTaskCounts.get(chatId) ?? 1) - 1,
+        )
+        if (remaining === 0) this.queuedTaskCounts.delete(chatId)
+        else this.queuedTaskCounts.set(chatId, remaining)
+
+        if (position > 0) {
+          await this.sendMessage(chatId, `Starting queued task: ${label}`)
+        }
+        await run()
+      })
+
+    let tracked: Promise<void>
+    tracked = next.finally(() => {
+      if (this.taskQueues.get(chatId) === tracked) {
+        this.taskQueues.delete(chatId)
+      }
+      if ((this.queuedTaskCounts.get(chatId) ?? 0) <= 0) {
+        this.queuedTaskCounts.delete(chatId)
+      }
+    })
+    this.taskQueues.set(chatId, tracked)
+    await tracked
   }
 
   async sendFile(
@@ -578,8 +814,36 @@ export class TelegramAgentBridge {
       return
     }
 
+    const providerShortcut = getTelegramProviderShortcut(commandText)
+    if (providerShortcut) {
+      await this.handleProviderShortcutCommand(chatId, providerShortcut)
+      return
+    }
+
     if (text === '/provider' || text.startsWith('/provider ')) {
       await this.handleProviderCommand(chatId, text.slice('/provider'.length).trim())
+      return
+    }
+
+    if (commandText === '/context' || commandText.startsWith('/context ')) {
+      await this.handleContextCommand(chatId, commandText.slice('/context'.length).trim())
+      return
+    }
+
+    if (commandText === '/mode off') {
+      this.chatModes.delete(chatId)
+      await this.sendMessage(chatId, 'Research mode cleared for this chat.')
+      return
+    }
+
+    const researchMode = getTelegramResearchMode(commandText)
+    if (researchMode) {
+      await this.handleResearchModeCommand(
+        chatId,
+        message,
+        researchMode,
+        commandText.slice(`/${researchMode}`.length).trim(),
+      )
       return
     }
 
@@ -780,28 +1044,75 @@ export class TelegramAgentBridge {
 
     const audioCandidate = getAudioTranscriptionCandidate(message)
     if (audioCandidate && this.config.telegram.transcribeAudio) {
-      await this.handleAudioMessage(chatId, message, text, audioCandidate)
+      await this.enqueueChatTask(
+        chatId,
+        `${audioCandidate.type} message ${message.message_id}`,
+        () => this.handleAudioMessage(chatId, message, text, audioCandidate),
+      )
       return
     }
 
-    if (this.activeTasks.has(chatId)) {
-      await this.sendMessage(chatId, 'A task is already running. Use /stop first.')
-      return
-    }
+    await this.enqueueChatTask(
+      chatId,
+      buildTelegramQueueLabel(text, message),
+      () => this.handleQueuedTextMessage(chatId, message, text),
+    )
+  }
 
+  private async handleQueuedTextMessage(
+    chatId: string,
+    message: TelegramMessage,
+    text: string,
+    modeOverride?: TelegramResearchMode,
+  ): Promise<void> {
+    const effectiveText = applyTelegramResearchMode(
+      modeOverride ?? this.chatModes.get(chatId),
+      text,
+    )
     const attachments = await this.collectAttachments(message, chatId)
-    if (!text && attachments.length === 0) return
+    if (!effectiveText && attachments.length === 0) return
+
+    const providerProfile = await loadProviderProfile()
+    const replyContext = buildTelegramReplyContext(message)
+    const conversationTranscript = await buildTelegramConversationTranscript(chatId, {
+      excludeMessageId: message.message_id,
+      model: providerProfile.model,
+    })
 
     // Log the incoming message to chat log (for dialogue consolidation)
     await appendChatLog({
       direction: 'in',
-      text: text || '(attachments only)',
+      text: effectiveText || '(attachments only)',
       chatId,
       messageId: message.message_id,
       username: message.from?.username,
+      ...(replyContext
+        ? {
+            replyToMessageId: replyContext.messageId,
+            replyToText: replyContext.text?.slice(0, 1000),
+            replyToAttachmentSummary: replyContext.attachmentSummary,
+            replyToUsername: replyContext.from?.username,
+          }
+        : {}),
     })
 
-    const providerProfile = await loadProviderProfile()
+    const bridgeHandled = await this.tryHandleCronStyleFeedback(
+      chatId,
+      effectiveText,
+      conversationTranscript,
+      replyContext,
+    )
+    if (bridgeHandled) {
+      await appendChatLog({
+        direction: 'out',
+        text: bridgeHandled,
+        chatId,
+        exitCode: 0,
+      })
+      await this.sendMessage(chatId, bridgeHandled)
+      return
+    }
+
     const progressStartedAt = Date.now()
     const progressPhase = 'Running Telegram request'
 
@@ -852,23 +1163,24 @@ export class TelegramAgentBridge {
       chatId,
       messageId: message.message_id,
       from: message.from,
-      text,
+      text: effectiveText,
       attachments,
       config: this.config,
+      conversationTranscript,
+      replyContext,
     })
 
     // Save for /retry
     this.lastPrompts.set(chatId, { prompt, messageId: message.message_id })
 
-    let result: Awaited<ReturnType<typeof runOpenClaudeAgent>>
+    let result: AgentRunResult
     try {
-      result = await runOpenClaudeAgent({
+      result = await this.runAgentWithRecovery({
+        chatId,
         prompt,
-        config: this.config,
-        signal: controller.signal,
-        streamEvents: true,
-        onProgress: event => progress.addEvent(event),
-        onStdout: chunk => progress.observeStdout(chunk),
+        phase: 'Running Telegram request',
+        controller,
+        progress,
       })
     } finally {
       if (this.activeTasks.get(chatId)?.controller === controller) {
@@ -953,14 +1265,32 @@ export class TelegramAgentBridge {
       ]
         .filter(Boolean)
         .join('\n')
+      const effectiveAgentText = applyTelegramResearchMode(
+        this.chatModes.get(chatId),
+        agentText,
+      )
+      const providerProfile = await loadProviderProfile()
+      const replyContext = buildTelegramReplyContext(message)
+      const conversationTranscript = await buildTelegramConversationTranscript(chatId, {
+        excludeMessageId: message.message_id,
+        model: providerProfile.model,
+      })
 
       // Log the transcribed voice message to chat log
       await appendChatLog({
         direction: 'in',
-        text: `[${candidate.type} transcribed] ${agentText.slice(0, 500)}`,
+        text: `[${candidate.type} transcribed] ${effectiveAgentText.slice(0, 500)}`,
         chatId,
         messageId: message.message_id,
         username: message.from?.username,
+        ...(replyContext
+          ? {
+              replyToMessageId: replyContext.messageId,
+              replyToText: replyContext.text?.slice(0, 1000),
+              replyToAttachmentSummary: replyContext.attachmentSummary,
+              replyToUsername: replyContext.from?.username,
+            }
+          : {}),
       })
 
       // Run the agent with the transcribed text
@@ -968,9 +1298,11 @@ export class TelegramAgentBridge {
         chatId,
         messageId: message.message_id,
         from: message.from,
-        text: agentText,
+        text: effectiveAgentText,
         attachments: [attachment],
         config: this.config,
+        conversationTranscript,
+        replyContext,
       })
       const result = await this.runAgentWithProgress(
         chatId,
@@ -1021,6 +1353,31 @@ export class TelegramAgentBridge {
     }
   }
 
+  private async handleResearchModeCommand(
+    chatId: string,
+    message: TelegramMessage,
+    mode: TelegramResearchMode,
+    body: string,
+  ): Promise<void> {
+    if (!body) {
+      this.chatModes.set(chatId, mode)
+      await this.sendMessage(
+        chatId,
+        `Research mode set: /${mode}\nSend /mode off to clear it.`,
+      )
+      return
+    }
+
+    await this.enqueueChatTask(
+      chatId,
+      `/${mode}: ${body.slice(0, 80)}`,
+      () => this.handleQueuedTextMessage(chatId, {
+        ...message,
+        text: body,
+      }, body, mode),
+    )
+  }
+
   private async handleProviderCommand(
     chatId: string,
     commandBody: string,
@@ -1049,7 +1406,9 @@ export class TelegramAgentBridge {
         return
       }
       const previous = await loadProviderProfile()
-      const profile = buildTelegramProviderProfileUpdate(previous, parsed)
+      const profile = await hydrateShortcutProviderProfile(
+        buildTelegramProviderProfileUpdate(previous, parsed),
+      )
       await saveProviderProfile(profile)
       await this.sendMessage(
         chatId,
@@ -1074,9 +1433,70 @@ export class TelegramAgentBridge {
         '/provider set deepseek deepseek-v4-pro',
         '/provider set codex gpt-5.5',
         '/provider set lmstudio-lan gemma-4-12b-obliterated',
+        '',
+        'Short switches:',
+        ...TELEGRAM_PROVIDER_SHORTCUTS.map(shortcut => `${shortcut.command} - ${shortcut.provider}/${shortcut.model}`),
         '/model <model>',
         '/baseurl <url>',
         '/apikey <key>',
+      ].join('\n'),
+    )
+  }
+
+  private async handleProviderShortcutCommand(
+    chatId: string,
+    shortcut: TelegramProviderShortcut,
+  ): Promise<void> {
+    const previous = await loadProviderProfile()
+    const profile = await hydrateShortcutProviderProfile(
+      buildTelegramProviderProfileUpdate(previous, {
+        provider: shortcut.provider,
+        model: shortcut.model,
+      }),
+    )
+    await saveProviderProfile(profile)
+    await this.sendMessage(
+      chatId,
+      [
+        `Switched: ${shortcut.command}`,
+        '',
+        formatProviderProfile(profile),
+        '',
+        profile.provider === 'lmstudio-lan'
+          ? 'LM Studio Gemma profiles run with model tools disabled because the current LM Studio templates reject OpenAI tool schemas.'
+          : 'Model tools are enabled for this provider.',
+      ].join('\n'),
+    )
+  }
+
+  private async handleContextCommand(chatId: string, commandBody: string): Promise<void> {
+    const body = commandBody.trim()
+    if (!body || ['show', 'status'].includes(body.toLowerCase())) {
+      await this.sendMessage(chatId, await formatContextWindowStatus())
+      return
+    }
+
+    const update = normalizeTelegramContextWindow(body)
+    if (!update) {
+      await this.sendMessage(
+        chatId,
+        'Usage: /context auto | /context 1m | /context <tokens>\nExamples: /context auto, /context 512k, /context 1000000, /context unlimited',
+      )
+      return
+    }
+
+    const updates = contextWindowEnv(update.value)
+    await updateProjectEnvFile(updates)
+    applyRuntimeEnvUpdates(updates)
+
+    await this.sendMessage(
+      chatId,
+      [
+        update.value
+          ? `Context window set to ${formatTokenCount(update.tokens)} tokens for next agent runs.`
+          : 'Context window returned to auto model/provider mode for next agent runs.',
+        '',
+        await formatContextWindowStatus(),
       ].join('\n'),
     )
   }
@@ -1219,16 +1639,18 @@ export class TelegramAgentBridge {
     }
 
     try {
+      const timezone = getTelegramCronTimezone()
       const job = await createCronJob({
         name: prompt.slice(0, 50),
         prompt,
         schedule,
+        timezone,
         deliver: 'origin',
         origin: { platform: 'telegram', chatId },
       })
       await this.sendMessage(
         chatId,
-        `Scheduled job ${job.id}: ${job.scheduleDisplay}`,
+        `Scheduled job ${job.id}: ${job.scheduleDisplay}${timezone ? ` (${timezone})` : ''}`,
       )
     } catch (error) {
       await this.sendMessage(chatId, `Could not schedule job: ${String(error)}`)
@@ -1422,6 +1844,8 @@ export class TelegramAgentBridge {
     const evolution = await loadEvolutionState()
     const consciousness = runtime?.consciousness
     const uptimeMs = runtime ? Date.now() - runtime.startedAt : 0
+    const queuedTelegramTasks = [...this.queuedTaskCounts.values()]
+      .reduce((sum, count) => sum + count, 0)
 
     const lines = [
       'OpenClaude gateway status',
@@ -1431,6 +1855,7 @@ export class TelegramAgentBridge {
       `Telegram: ${runtime?.telegram ? 'running' : this.config.telegram.enabled ? 'configured' : 'off'}`,
       `Cron: ${runtime?.cron ? 'running' : this.config.cron.enabled ? 'configured' : 'off'}`,
       `Active Telegram tasks: ${this.activeTasks.size}`,
+      `Queued Telegram tasks: ${queuedTelegramTasks}`,
       `Cron jobs for this chat: ${chatJobs.length} (${chatJobs.filter(job => job.enabled).length} enabled)`,
       '',
       `Ouroboros: ${this.config.ouroboros.enabled ? 'enabled' : 'off'}`,
@@ -1451,6 +1876,9 @@ export class TelegramAgentBridge {
       task.controller.abort()
     }
     this.activeTasks.clear()
+    this.taskQueues.clear()
+    this.queuedTaskCounts.clear()
+    this.queueEpoch++
     await this.sendMessage(chatId, 'PANIC: active tasks aborted. Stopping gateway runtime.')
     await this.acknowledgeTelegramUpdates()
     await stopAgentGateway()
@@ -1462,6 +1890,9 @@ export class TelegramAgentBridge {
       task.controller.abort()
     }
     this.activeTasks.clear()
+    this.taskQueues.clear()
+    this.queuedTaskCounts.clear()
+    this.queueEpoch++
     await this.sendMessage(chatId, 'Restarting gateway runtime.')
     await this.acknowledgeTelegramUpdates()
     await restartAgentGateway()
@@ -1878,25 +2309,21 @@ export class TelegramAgentBridge {
       return
     }
 
-    // Check if a task is already running
-    if (this.activeTasks.has(chatId)) {
-      await this.sendMessage(chatId, 'A task is already running. Use /stop first.')
-      return
-    }
+    await this.enqueueChatTask(chatId, 'retry last task', async () => {
+      const result = await this.runAgentWithProgress(
+        chatId,
+        last.prompt,
+        'Retrying last task',
+      )
 
-    const result = await this.runAgentWithProgress(
-      chatId,
-      last.prompt,
-      'Retrying last task',
-    )
+      if (result.exitCode !== 0) {
+        await recordTelegramError(chatId, 'agent-run-retry', result)
+        await this.sendMessage(chatId, formatAgentFailureForTelegram(result))
+        return
+      }
 
-    if (result.exitCode !== 0) {
-      await recordTelegramError(chatId, 'agent-run-retry', result)
-      await this.sendMessage(chatId, formatAgentFailureForTelegram(result))
-      return
-    }
-
-    await this.deliverAgentText(chatId, result.text, '(No response generated)')
+      await this.deliverAgentText(chatId, result.text, '(No response generated)')
+    })
   }
 
   private async handleInfiniteTaskCommand(
@@ -1912,11 +2339,18 @@ export class TelegramAgentBridge {
       await this.sendMessage(chatId, 'Infinite task mode is disabled. Enable it in /agent-gateway first.')
       return
     }
-    if (this.activeTasks.has(chatId)) {
-      await this.sendMessage(chatId, 'A task is already running. Use /stop first.')
-      return
-    }
 
+    await this.enqueueChatTask(
+      chatId,
+      `infinite task: ${trimmedGoal.slice(0, 80)}`,
+      () => this.runQueuedInfiniteTask(chatId, trimmedGoal),
+    )
+  }
+
+  private async runQueuedInfiniteTask(
+    chatId: string,
+    trimmedGoal: string,
+  ): Promise<void> {
     const taskId = `task_${randomUUID().replace(/-/g, '')}`
     const controller = new AbortController()
     const progress = await this.createTaskProgress(
@@ -1998,10 +2432,16 @@ export class TelegramAgentBridge {
     text: string,
     fallback?: string,
   ): Promise<void> {
-    const memoryProcessed = await this.applyAgentMemoryDirectives(chatId, text)
-    const parsed = extractTelegramSendDirectives(memoryProcessed)
-    if (parsed.text.trim()) {
-      await this.sendMessage(chatId, parsed.text)
+    const repairedText = repairLikelyMojibakeText(text)
+    const memoryProcessed = await this.applyAgentMemoryDirectives(chatId, repairedText)
+    const cronProcessed = await this.applyAgentCronDirectives(chatId, memoryProcessed)
+    const parsed = extractTelegramSendDirectives(cronProcessed.text)
+    const visibleText = [
+      parsed.text.trim(),
+      ...cronProcessed.messages,
+    ].filter(Boolean).join('\n\n')
+    if (visibleText.trim()) {
+      await this.sendMessage(chatId, visibleText)
     }
 
     for (const directive of parsed.directives) {
@@ -2020,9 +2460,102 @@ export class TelegramAgentBridge {
       }
     }
 
-    if (!parsed.text.trim() && parsed.directives.length === 0 && fallback) {
+    if (!visibleText.trim() && parsed.directives.length === 0 && fallback) {
       await this.sendMessage(chatId, fallback)
     }
+  }
+
+  private async applyAgentCronDirectives(
+    chatId: string,
+    text: string,
+  ): Promise<{ text: string; messages: string[] }> {
+    const processed = extractTelegramCronDirectives(text)
+    if (processed.directives.length === 0) {
+      return { text: processed.text, messages: [] }
+    }
+
+    const messages: string[] = []
+    for (const directive of processed.directives) {
+      try {
+        const timezone = directive.timezone || getTelegramCronTimezone()
+        const existing = (await listCronJobs(true)).find(job =>
+          job.name === directive.name
+          && job.origin?.platform === 'telegram'
+          && job.origin.chatId === chatId
+          && job.state !== 'completed'
+        )
+        if (!existing && directive.action === 'update') {
+          throw new Error(`cron job ${directive.name} was not found for this Telegram chat`)
+        }
+        const input: Record<string, unknown> = {
+          name: directive.name,
+          timezone,
+          mode: directive.mode ?? 'message',
+          deliver: 'origin',
+          origin: { platform: 'telegram', chatId },
+        }
+        if (directive.prompt !== undefined) input.prompt = directive.prompt
+        if (directive.schedule !== undefined) input.schedule = directive.schedule
+        const job = existing
+          ? await updateCronJob(existing.id, { ...input, enabled: true })
+          : await createCronJob(input)
+
+        if (!job) {
+          throw new Error(`cron job ${directive.name} was not saved`)
+        }
+
+        messages.push([
+          existing || directive.action === 'update' ? 'Telegram cron updated:' : 'Telegram cron scheduled:',
+          `${job.name} (${job.id})`,
+          `schedule: ${job.scheduleDisplay}`,
+          `mode: ${job.mode ?? 'agent'}`,
+          ...(job.timezone ? [`timezone: ${job.timezone}`] : []),
+          `next: ${job.nextRunAt ?? 'none'}`,
+        ].join('\n'))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await recordTelegramError(chatId, 'cron-directive', message)
+        messages.push(`Telegram cron create failed: ${message}`)
+      }
+    }
+
+    return { text: processed.text, messages }
+  }
+
+  private async tryHandleCronStyleFeedback(
+    chatId: string,
+    text: string,
+    conversationTranscript: string,
+    replyContext?: TelegramReplyContext,
+  ): Promise<string | undefined> {
+    if (!isEmojiRemovalFeedback(text)) return undefined
+
+    const jobName = extractLastCronJobName(
+      [replyContext?.text, conversationTranscript].filter(Boolean).join('\n'),
+    )
+    if (!jobName) return undefined
+
+    const existing = (await listCronJobs(true)).find(job =>
+      job.name === jobName
+      && job.origin?.platform === 'telegram'
+      && job.origin.chatId === chatId
+      && job.state !== 'completed'
+    )
+    if (!existing) return undefined
+
+    const prompt = reminderMessageWithoutEmoji(existing)
+    const updated = await updateCronJob(existing.id, {
+      prompt,
+      mode: 'message',
+      enabled: true,
+    })
+    if (!updated) return undefined
+
+    return [
+      `Обновил cron ${updated.name}.`,
+      'Убрал emoji из текста и перевел напоминание в direct message mode, без запуска агента/tools при срабатывании.',
+      `Текущий текст: ${prompt}`,
+    ].join('\n')
   }
 
   private async applyAgentMemoryDirectives(
@@ -2073,6 +2606,7 @@ export class TelegramAgentBridge {
             chatId,
             message.message_id,
           )
+          await maybeRepairDownloadedTextAttachment(attachment)
           await recordTelegramAttachment(chatId, message.message_id, attachment)
         } catch (error) {
           attachment.downloadError = String(error)
@@ -2215,6 +2749,236 @@ export class TelegramAgentBridge {
 
 type TelegramProgressStatus = 'running' | 'completed' | 'failed' | 'stopped'
 
+export function getTelegramQueuePosition(input: {
+  active: boolean
+  waiting: number
+}): number {
+  return (input.active ? 1 : 0) + Math.max(0, input.waiting)
+}
+
+export function formatTelegramQueueNotice(
+  position: number,
+  label: string,
+): string {
+  return `Queued #${position}: ${label}\nIt will run automatically after the current Telegram task finishes.`
+}
+
+function buildTelegramQueueLabel(
+  text: string,
+  message: TelegramMessage,
+): string {
+  const normalized = text.replace(/\s+/gu, ' ').trim()
+  if (normalized) return normalized.slice(0, 80)
+  const attachmentTypes = getAttachmentCandidates(message)
+    .map(candidate => candidate.type)
+    .join(', ')
+  return attachmentTypes ? `attachments: ${attachmentTypes}` : `message ${message.message_id}`
+}
+
+function getTelegramResearchMode(
+  commandText: string,
+): TelegramResearchMode | undefined {
+  const command = commandText.split(/\s+/u)[0]
+  if (command === '/bio' || command === '/social' || command === '/code') {
+    return command.slice(1) as TelegramResearchMode
+  }
+  return undefined
+}
+
+export function applyTelegramResearchMode(
+  mode: TelegramResearchMode | undefined,
+  text: string,
+): string {
+  if (!mode) return text
+  const instruction = TELEGRAM_RESEARCH_MODE_PROMPTS[mode]
+  return [
+    `Active Telegram research mode: /${mode}`,
+    instruction,
+    '',
+    'User request:',
+    text || '(no text; user sent attachments)',
+  ].join('\n')
+}
+
+const TELEGRAM_RESEARCH_MODE_PROMPTS: Record<TelegramResearchMode, string> = {
+  bio: 'Act as a careful biology research assistant. Use scientific framing, note uncertainty, distinguish evidence from speculation, and avoid medical diagnosis or unsafe wet-lab instructions.',
+  social: 'Act as a defensive social-engineering research analyst. Analyze manipulation patterns, risks, countermeasures, and response strategy in a scientific format. Do not provide instructions for deception, stalking, coercion, credential theft, or harm.',
+  code: 'Act as a pragmatic scientific coding agent. Prioritize runnable MVPs, tests, scripts, data workflows, and clear verification steps.',
+}
+
+type TelegramAgentRecoveryLimit = {
+  maxRecoveryAttempts: number | null
+  source: string
+}
+
+const DEFAULT_TELEGRAM_AGENT_RECOVERY_ATTEMPTS = 5
+const DEFAULT_TELEGRAM_AGENT_REPEATED_FAILURE_LIMIT = 3
+const TELEGRAM_AGENT_RECOVERY_ATTEMPT_ENV_KEYS = [
+  'OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_ATTEMPTS',
+  'OPENCLAUDE_AGENT_RECOVERY_ATTEMPTS',
+]
+const TELEGRAM_AGENT_REPEATED_FAILURE_ENV_KEYS = [
+  'OPENCLAUDE_TELEGRAM_AGENT_REPEATED_FAILURE_LIMIT',
+  'OPENCLAUDE_AGENT_REPEATED_FAILURE_LIMIT',
+]
+
+export function getTelegramAgentRecoveryAttemptLimit(
+  env: NodeJS.ProcessEnv = process.env,
+): TelegramAgentRecoveryLimit {
+  for (const key of TELEGRAM_AGENT_RECOVERY_ATTEMPT_ENV_KEYS) {
+    const raw = env[key]
+    if (raw === undefined || raw.trim() === '') continue
+    const normalized = raw.trim().toLowerCase()
+    if (['0', 'unlimited', 'infinite', 'forever'].includes(normalized)) {
+      return { maxRecoveryAttempts: null, source: key }
+    }
+    const parsed = Number.parseInt(normalized, 10)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return { maxRecoveryAttempts: parsed, source: key }
+    }
+  }
+  return {
+    maxRecoveryAttempts: DEFAULT_TELEGRAM_AGENT_RECOVERY_ATTEMPTS,
+    source: 'default',
+  }
+}
+
+export function getTelegramAgentRepeatedFailureLimit(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  for (const key of TELEGRAM_AGENT_REPEATED_FAILURE_ENV_KEYS) {
+    const raw = env[key]
+    if (raw === undefined || raw.trim() === '') continue
+    const parsed = Number.parseInt(raw.trim(), 10)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, parsed)
+    }
+  }
+  return DEFAULT_TELEGRAM_AGENT_REPEATED_FAILURE_LIMIT
+}
+
+export function getAgentRecoveryFailureSignature(result: AgentRunResult): string {
+  return [
+    result.failureKind || 'unknown',
+    normalizeRecoverySignatureText(result.diagnostic || ''),
+    normalizeRecoverySignatureText(result.stderr || ''),
+  ].join('\n').slice(0, 2_000)
+}
+
+function normalizeRecoverySignatureText(text: string): string {
+  return redactAgentText(text)
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/gu, '<iso-date>')
+    .replace(/\b\d+(?:\.\d+)?s\b/gu, '<seconds>')
+    .replace(/\b\d+ms\b/gu, '<ms>')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 900)
+}
+
+function withRepeatedFailureDiagnostic(
+  result: AgentRunResult,
+  repeatedCount: number,
+): AgentRunResult {
+  return {
+    ...result,
+    diagnostic: [
+      `Repeated the same agent failure ${repeatedCount} times; recovery stopped to avoid a blind loop.`,
+      result.diagnostic || '',
+    ].filter(Boolean).join('\n\n'),
+  }
+}
+
+function formatTelegramRecoveryPhase(
+  attempt: number,
+  maxRecoveryAttempts: number | null,
+): string {
+  if (maxRecoveryAttempts === null) {
+    return `Recovery attempt ${attempt} (Stop to abort)`
+  }
+  return `Recovery attempt ${attempt}/${maxRecoveryAttempts}`
+}
+
+export function buildTelegramAgentRecoveryPrompt(input: {
+  originalPrompt: string
+  previousResult: AgentRunResult
+  recoveryAttempt: number
+  maxRecoveryAttempts: number | null
+}): string {
+  const maxLabel = input.maxRecoveryAttempts === null
+    ? 'unlimited until Telegram Stop'
+    : String(input.maxRecoveryAttempts)
+  return [
+    'The previous OpenClaude agent run failed before completing the Telegram task.',
+    'Continue the same task. Treat the failure below as runtime feedback, not as a reason to stop.',
+    '',
+    'Recovery rules:',
+    '- Analyze the exact failure and choose another route.',
+    '- Do not repeat the same failing command, path, file edit, MCP call, or provider action.',
+    '- If the failure was a permission/sensitive-file/tool error, do not ask the user for permission and do not edit that sensitive file directly. Use the gateway API, Telegram bridge directives, repository code, or another available route.',
+    '- If a probe command returned non-zero because a path was absent, keep searching through known project/runtime paths instead of treating that probe as fatal.',
+    '- Keep working until the original request is handled, the user presses Stop, or every practical route is exhausted.',
+    '- If recovery is truly impossible, return a concise final answer with the concrete blocker and the next actionable fix.',
+    '',
+    `Recovery attempt: ${input.recoveryAttempt} / ${maxLabel}`,
+    '',
+    'Previous failure:',
+    formatTelegramAgentFailureForRecovery(input.previousResult),
+    '',
+    'Original Telegram task prompt:',
+    input.originalPrompt,
+  ].join('\n')
+}
+
+export function formatTelegramAgentFailureForRecovery(result: AgentRunResult): string {
+  const lines: string[] = []
+  if (result.timedOut) {
+    lines.push(`Timed out after ${formatDuration(result.durationMs || 0)}.`)
+  } else {
+    lines.push(`Exit code: ${result.exitCode}.`)
+  }
+  if (result.failureKind) {
+    lines.push(`Failure kind: ${result.failureKind}.`)
+  }
+  if (result.diagnostic) {
+    lines.push('', 'Diagnostic:', limitRecoveryText(result.diagnostic, 2_500))
+  }
+  const activity = result.activity?.slice(-12) || []
+  if (activity.length > 0) {
+    lines.push('', 'Recent activity:')
+    for (const event of activity) {
+      lines.push(`- ${limitRecoveryText(event, 500)}`)
+    }
+  }
+  const stderr = result.stderr.trim()
+  if (stderr) {
+    lines.push('', 'Stderr:', limitRecoveryText(stderr, 2_000))
+  }
+  const visibleText = stripMemoryDirectiveLines(result.text).trim()
+  if (visibleText) {
+    lines.push('', 'Partial visible response:', limitRecoveryText(visibleText, 1_500))
+  }
+  return lines.join('\n').slice(0, 8_000)
+}
+
+function limitRecoveryText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, Math.max(0, maxChars - 24)).trimEnd()}\n[truncated for recovery]`
+}
+
+function buildAgentExceptionResult(error: unknown, durationMs: number): AgentRunResult {
+  const message = summarizeTelegramError(error)
+  return {
+    text: '',
+    stderr: message,
+    exitCode: 1,
+    timedOut: false,
+    durationMs,
+    activity: [`runner exception: ${message.split('\n')[0]?.slice(0, 300) || 'unknown error'}`],
+    failureKind: 'execution',
+    diagnostic: `The agent runner threw before returning a normal result.\n${message.slice(0, 2000)}`,
+  }
+}
+
 function formatAgentFailurePhase(result: AgentRunResult): string {
   if (result.timedOut) {
     return `Timed out after ${formatDuration(result.durationMs || 0)}. Diagnostic sent below.`
@@ -2308,6 +3072,25 @@ type ProviderInfo = {
   apiKey?: string
 }
 
+const CONTEXT_WINDOW_ENV_KEYS = [
+  'OPENCLAUDE_CONTEXT_WINDOW_TOKENS',
+  'OPENCLAUDE_MAX_CONTEXT_TOKENS',
+  'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+]
+
+const CONTEXT_WINDOW_STATUS_ENV_KEYS = [
+  ...CONTEXT_WINDOW_ENV_KEYS,
+  'CLAUDE_CODE_USE_OPENAI',
+  'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_MISTRAL',
+  'CLAUDE_CODE_USE_GITHUB',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+]
+
+const TELEGRAM_UNLIMITED_CONTEXT_WINDOW = 1_000_000
+
 const TELEGRAM_PROVIDER_PRESETS: ProviderInfo[] = [
   { value: 'openai-compatible', flag: 'openai' },
   { value: 'codex', flag: 'openai' },
@@ -2328,6 +3111,97 @@ const TELEGRAM_PROVIDER_PRESETS: ProviderInfo[] = [
 
 function getTelegramProviderInfo(provider: string): ProviderInfo {
   return TELEGRAM_PROVIDER_PRESETS.find(item => item.value === provider) || TELEGRAM_PROVIDER_PRESETS[0]!
+}
+
+async function formatContextWindowStatus(): Promise<string> {
+  const env = {
+    ...process.env,
+    ...(await readProjectEnvFile()),
+  }
+  const profile = await loadProviderProfile()
+  const configured = getConfiguredContextWindowValue(env)
+  const manualTokens = parseHumanLimit(configured, {
+    unlimitedValue: TELEGRAM_UNLIMITED_CONTEXT_WINDOW,
+  })
+  const model = profile.model || env.OPENAI_MODEL || env.OPENCLAUDE_MODEL || ''
+  const effectiveTokens = withTemporaryEnv(env, () => getContextWindowForModel(model || 'unknown-model'))
+
+  return [
+    'Context window',
+    `Mode: ${manualTokens === undefined ? 'auto (model/provider)' : 'manual'}`,
+    `Configured: ${configured || 'auto'}`,
+    `Effective: ${formatTokenCount(effectiveTokens)} tokens`,
+    `Provider: ${profile.provider}`,
+    `Model: ${model || 'not set'}`,
+    '',
+    'Use /context auto, /context 1m, /context unlimited, or /context <tokens>.',
+  ].join('\n')
+}
+
+function getConfiguredContextWindowValue(
+  env: Record<string, string | undefined>,
+): string {
+  for (const key of CONTEXT_WINDOW_ENV_KEYS) {
+    const value = env[key]?.trim()
+    if (value) return value
+  }
+  return ''
+}
+
+function normalizeTelegramContextWindow(
+  value: string,
+): { value: string; tokens: number } | null {
+  const trimmed = value.trim()
+  const normalized = trimmed.toLowerCase()
+  if (['auto', 'default', 'model', 'inherit', 'clear', 'off'].includes(normalized)) {
+    return { value: '', tokens: 0 }
+  }
+
+  const tokens = parseHumanLimit(trimmed, {
+    unlimitedValue: TELEGRAM_UNLIMITED_CONTEXT_WINDOW,
+  })
+  if (tokens === undefined) return null
+  return { value: String(tokens), tokens }
+}
+
+function contextWindowEnv(value: string): Record<string, string> {
+  return {
+    OPENCLAUDE_CONTEXT_WINDOW_TOKENS: value,
+    OPENCLAUDE_MAX_CONTEXT_TOKENS: value,
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: value,
+  }
+}
+
+function applyRuntimeEnvUpdates(updates: Record<string, string>): void {
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === '') delete process.env[key]
+    else process.env[key] = value
+  }
+}
+
+function withTemporaryEnv<T>(
+  env: Record<string, string | undefined>,
+  run: () => T,
+): T {
+  const previous = new Map<string, string | undefined>()
+  for (const key of CONTEXT_WINDOW_STATUS_ENV_KEYS) {
+    previous.set(key, process.env[key])
+    const value = env[key]
+    if (value === undefined || value === '') delete process.env[key]
+    else process.env[key] = value
+  }
+  try {
+    return run()
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+function formatTokenCount(tokens: number): string {
+  return tokens.toLocaleString('en-US')
 }
 
 async function loadProviderProfile(): Promise<AgentProviderProfile> {
@@ -2366,6 +3240,7 @@ async function loadProviderProfile(): Promise<AgentProviderProfile> {
       (isOpenAI ? env.OPENAI_MODEL : env[`${info.flag.toUpperCase()}_MODEL`]) ||
       '',
     apiKey:
+      providerSpecificApiKey(provider, env) ||
       (provider === 'codex' ? env.CODEX_API_KEY : '') ||
       env.OPENCLAUDE_API_KEY ||
       (isOpenAI ? env.OPENAI_API_KEY : env[`${info.flag.toUpperCase()}_API_KEY`]) ||
@@ -2388,10 +3263,25 @@ function normalizeProviderProfile(input: Partial<AgentProviderProfile>): AgentPr
 async function saveProviderProfile(profile: AgentProviderProfile): Promise<void> {
   const updates = providerProfileEnv(profile)
   await updateProjectEnvFile(updates)
-  for (const [key, value] of Object.entries(updates)) {
-    if (value === '') delete process.env[key]
-    else process.env[key] = value
+  applyRuntimeEnvUpdates(updates)
+}
+
+async function hydrateShortcutProviderProfile(profile: AgentProviderProfile): Promise<AgentProviderProfile> {
+  if (profile.apiKey) return profile
+  const env = {
+    ...process.env,
+    ...(await readProjectEnvFile()),
   }
+  const apiKey = providerSpecificApiKey(profile.provider, env)
+  return apiKey ? { ...profile, apiKey } : profile
+}
+
+function providerSpecificApiKey(provider: string, env: Record<string, string | undefined>): string {
+  if (provider === 'codex') return env.CODEX_API_KEY || ''
+  if (provider === 'deepseek') {
+    return env.DEEPSEEK_API_KEY || env.OPENCLAUDE_DEEPSEEK_API_KEY || ''
+  }
+  return ''
 }
 
 function providerProfileEnv(profile: AgentProviderProfile): Record<string, string> {
@@ -2432,6 +3322,10 @@ function providerProfileEnv(profile: AgentProviderProfile): Record<string, strin
     updates.OPENAI_BASE_URL = profile.baseUrl
     updates.OPENAI_MODEL = profile.model
     updates.OPENAI_API_KEY = profile.apiKey
+    if (profile.provider === 'deepseek' && profile.apiKey) {
+      updates.DEEPSEEK_API_KEY = profile.apiKey
+      updates.OPENCLAUDE_DEEPSEEK_API_KEY = profile.apiKey
+    }
   } else if (info.flag === 'anthropic') {
     updates.ANTHROPIC_BASE_URL = profile.baseUrl
     updates.ANTHROPIC_MODEL = profile.model
@@ -2935,9 +3829,12 @@ export function buildTelegramAgentPrompt(input: {
   from?: TelegramMessage['from']
   text: string
   attachments: TelegramAttachment[]
+  conversationTranscript?: string
+  replyContext?: TelegramReplyContext
   memoryContext?: string
   memoryWriteProtocol?: string
   reflectionContext?: string
+  cronContext?: string
 }): string {
   const lines = [
     'Telegram request received by the OpenClaude agent bridge.',
@@ -2957,13 +3854,57 @@ export function buildTelegramAgentPrompt(input: {
   }
 
   if (input.memoryWriteProtocol) {
-    lines.push('', input.memoryWriteProtocol)
+    lines.push(
+      '',
+      input.memoryWriteProtocol,
+      '',
+      'For Telegram requests that ask to remember durable facts, use the [MEMORY ...] protocol above. Do not read, edit, write, cat, tee, sed, or redirect into memory files such as identity.md, scratchpad.md, USER.md, MEMORY.md, curated_memory.json, or any /agent-gateway/memory/ path. Never say you need direct access to identity.md. Never claim a memory write succeeded unless the [MEMORY ...] directive was emitted for the gateway to apply.',
+    )
   }
 
   // Inject reflection context (recent task reflections) if available
   if (input.reflectionContext) {
     lines.push('', input.reflectionContext)
   }
+
+  if (input.conversationTranscript) {
+    lines.push(
+      '',
+      input.conversationTranscript,
+      '',
+      'Use the Telegram conversation transcript above as the immediate dialogue context. If the user asks about earlier messages in this chat, answer from that transcript instead of saying history is unavailable.',
+    )
+  }
+
+  if (input.replyContext) {
+    lines.push(
+      '',
+      formatTelegramReplyContext(input.replyContext),
+      '',
+      'The current Telegram message is an explicit reply to the message above. Treat that replied-to message as the primary target of the user request, especially when it is a cron/job/progress message with context separate from the normal dialogue. Still use the broader Telegram conversation transcript for surrounding context.',
+    )
+  }
+
+  if (input.cronContext) {
+    lines.push(
+      '',
+      input.cronContext,
+      '',
+      'Use the Telegram gateway cron jobs list above for existing reminder updates. Do not inspect cron storage files to discover jobs.',
+    )
+  }
+
+  const telegramCronTimezone = getTelegramCronTimezone()
+  lines.push(
+    '',
+    'If the Telegram user asks to create, update, or remember a reminder, alarm, cron job, recurring task, or scheduled notification for this Telegram chat, emit a standalone bridge control line.',
+    `Create static reminder example: [TELEGRAM_CRON_CREATE name="short-stable-name" schedule="0 22 * * *" timezone="${telegramCronTimezone}" mode="message" prompt="22:00 - reminder text without emojis unless requested."]`,
+    'Update existing reminder example: [TELEGRAM_CRON_UPDATE name="existing-job-name" mode="message" prompt="Updated reminder text without emojis unless requested."]',
+    'Use mode="message" for normal reminders so the gateway sends the text directly without running an LLM or tools. Use mode="agent" only for genuinely dynamic scheduled research/status tasks.',
+    'Use standard 5-field cron in the timezone attribute. Use the exact minute/hour the user requested; do not invent offsets such as :07 unless the user asked for them. Recurring Telegram cron jobs are persistent and do not have a 7-day limit.',
+    'If the user reacts to a Cronjob Response and asks to change wording, style, emojis, time, or content, update the matching existing job by name with [TELEGRAM_CRON_UPDATE ...].',
+    'Do not call the built-in CronCreate tool for Telegram reminders. Do not read, edit, write, cat, tee, sed, or redirect into /agent-gateway/cron-jobs.json or any cron-jobs.json file. Never claim a Telegram reminder was created or updated unless a TELEGRAM_CRON_CREATE or TELEGRAM_CRON_UPDATE directive was emitted for the bridge to apply.',
+  )
 
   lines.push(
     '',
@@ -3000,6 +3941,8 @@ export async function buildTelegramAgentPromptWithMemory(input: {
   text: string
   attachments: TelegramAttachment[]
   config?: AgentGatewayConfig
+  conversationTranscript?: string
+  replyContext?: TelegramReplyContext
 }): Promise<string> {
   const memoryOptions = input.config
     ? {
@@ -3008,9 +3951,10 @@ export async function buildTelegramAgentPromptWithMemory(input: {
         writeApproval: input.config.memory.writeApproval,
       }
     : undefined
-  const [memoryContext, reflectionContext] = await Promise.all([
+  const [memoryContext, reflectionContext, cronContext] = await Promise.all([
     buildMemoryContextSection(memoryOptions).catch(() => ''),
     buildReflectionContextSection().catch(() => ''),
+    buildTelegramCronContext(input.chatId).catch(() => ''),
   ])
   const memoryWriteProtocol = buildCuratedMemorySystemInstructions(memoryOptions)
 
@@ -3019,7 +3963,270 @@ export async function buildTelegramAgentPromptWithMemory(input: {
     memoryContext: memoryContext || undefined,
     memoryWriteProtocol: memoryWriteProtocol || undefined,
     reflectionContext: reflectionContext || undefined,
+    cronContext: cronContext || undefined,
   })
+}
+
+export function buildTelegramReplyContext(
+  message: TelegramMessage,
+): TelegramReplyContext | undefined {
+  const replied = message.reply_to_message
+  if (!replied) return undefined
+
+  const text = getTelegramMessageText(replied)
+  const attachmentSummary = summarizeTelegramMessageAttachments(replied)
+  if (!text && !attachmentSummary) {
+    return {
+      messageId: replied.message_id,
+      chatId: replied.chat?.id === undefined ? undefined : String(replied.chat.id),
+      from: replied.from,
+      date: replied.date,
+    }
+  }
+
+  return {
+    messageId: replied.message_id,
+    chatId: replied.chat?.id === undefined ? undefined : String(replied.chat.id),
+    from: replied.from,
+    ...(text ? { text } : {}),
+    ...(attachmentSummary ? { attachmentSummary } : {}),
+    date: replied.date,
+  }
+}
+
+export function formatTelegramReplyContext(context: TelegramReplyContext): string {
+  const lines = ['## Telegram replied-to message context']
+  lines.push(`Replied-to message ID: ${context.messageId}`)
+  if (context.chatId) lines.push(`Replied-to chat ID: ${context.chatId}`)
+  if (context.from) lines.push(`Replied-to from: ${formatTelegramSender(context.from)}`)
+  if (context.date) {
+    lines.push(`Replied-to date: ${new Date(context.date * 1000).toISOString()}`)
+  }
+  if (context.attachmentSummary) {
+    lines.push(`Replied-to attachments: ${context.attachmentSummary}`)
+  }
+  lines.push('Replied-to text:')
+  lines.push(context.text || '(no text)')
+  return lines.join('\n')
+}
+
+async function buildTelegramConversationTranscript(
+  chatId: string,
+  options: { excludeMessageId?: number | string; model?: string } = {},
+): Promise<string> {
+  const entries = await loadChatLogTranscript({
+    chatId,
+    limit: getTelegramConversationTurnLimit(),
+    excludeMessageId: options.excludeMessageId,
+  })
+  return formatTelegramConversationTranscript(entries, {
+    maxChars: getTelegramConversationMaxChars(options.model),
+  })
+}
+
+export function formatTelegramConversationTranscript(
+  entries: RecentChatLogEntry[],
+  options: { maxChars?: number } = {},
+): string {
+  const maxChars = Math.max(1_000, options.maxChars ?? Number.MAX_SAFE_INTEGER)
+  const lines = entries
+    .map(formatTelegramConversationTranscriptEntry)
+    .filter(Boolean)
+  if (lines.length === 0) return ''
+
+  const selected = selectTextBlocksWithinCharBudget(lines, maxChars)
+
+  return [
+    '## Telegram conversation transcript',
+    'The transcript below is from this same Telegram chat before the current message, oldest to newest.',
+    ...selected,
+  ].join('\n')
+}
+
+function formatTelegramConversationTranscriptEntry(entry: RecentChatLogEntry): string {
+  const text = String(entry.text ?? '').trim()
+  if (!text) return ''
+  const direction = String(entry.direction ?? '')
+  const role = direction === 'out' ? 'Assistant' : 'User'
+  const messageId = entry.messageId === undefined ? '' : ` #${String(entry.messageId)}`
+  const username = typeof entry.username === 'string' && entry.username
+    ? ` @${entry.username}`
+    : ''
+  const status = direction === 'out' && Number(entry.exitCode ?? 0) !== 0
+    ? ' failed'
+    : ''
+  return `${role}${messageId}${username}${status}:\n${text}`
+}
+
+function formatTelegramSender(from: TelegramMessage['from']): string {
+  if (!from) return 'unknown'
+  if (from.username) return `@${from.username}`
+  return String(from.first_name || from.id || 'unknown')
+}
+
+function getTelegramConversationTurnLimit(): number {
+  return getConversationContextTurnLimit([
+    'OPENCLAUDE_TELEGRAM_CONTEXT_TURNS',
+    'OPENCLAUDE_TELEGRAM_RECENT_HISTORY_LIMIT',
+  ])
+}
+
+function getTelegramConversationMaxChars(model?: string): number {
+  return getConversationContextMaxChars({
+    model,
+    envNames: [
+      'OPENCLAUDE_TELEGRAM_CONTEXT_CHARS',
+      'OPENCLAUDE_TELEGRAM_RECENT_HISTORY_MAX_CHARS',
+    ],
+  })
+}
+
+async function buildTelegramCronContext(chatId: string): Promise<string> {
+  const jobs = (await listCronJobs(true))
+    .filter(job =>
+      job.origin?.platform === 'telegram'
+      && job.origin.chatId === chatId
+      && job.state !== 'completed'
+    )
+    .slice(0, 20)
+  if (jobs.length === 0) return ''
+
+  return [
+    '## Telegram gateway cron jobs for this chat',
+    'These jobs are managed by the gateway. Use TELEGRAM_CRON_UPDATE to modify them.',
+    ...jobs.map(formatTelegramCronContextJob),
+  ].join('\n')
+}
+
+function formatTelegramCronContextJob(job: CronJob): string {
+  return [
+    `- id: ${job.id}`,
+    `  name: ${job.name}`,
+    `  state: ${job.state}`,
+    `  schedule: ${job.scheduleDisplay}`,
+    `  timezone: ${job.timezone || 'default'}`,
+    `  mode: ${job.mode ?? 'agent'}`,
+    `  next: ${job.nextRunAt ?? 'none'}`,
+    `  prompt: ${job.prompt.replace(/\s+/g, ' ').slice(0, 500)}`,
+  ].join('\n')
+}
+
+function isEmojiRemovalFeedback(text: string): boolean {
+  const normalized = text.toLowerCase()
+  return /(смайл|эмодз|emoji)/i.test(normalized)
+    && /(убер|удал|без|заеб|достал|надоел|не\s+надо|не\s+нужн)/i.test(normalized)
+}
+
+function extractLastCronJobName(text: string): string | undefined {
+  let result: string | undefined
+  const pattern = /Cronjob Response:\s*([^\r\n]+)/gi
+  for (const match of text.matchAll(pattern)) {
+    const name = match[1]?.trim()
+    if (name) result = name
+  }
+  return result
+}
+
+function reminderMessageWithoutEmoji(job: CronJob): string {
+  const name = job.name.toLowerCase()
+  const prompt = job.prompt
+  if (name.includes('workout') || /трениров/i.test(prompt)) {
+    return '22:00 - время ежедневной тренировки. Не пропускай.'
+  }
+
+  let text = prompt
+  const reminderMatch = text.match(/(?:напоминание|reminder)[^:]*:\s*(.+)$/i)
+  if (reminderMatch?.[1]) text = reminderMatch[1]
+  text = text.replace(/Ответь только.*$/i, '')
+  return stripEmoji(text)
+    .replace(/[—–]/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([.,:;!?])/g, '$1')
+    .trim()
+}
+
+function stripEmoji(text: string): string {
+  return text
+    .replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '')
+    .replace(/\s+/g, ' ')
+}
+
+export function getTelegramCronTimezone(): string {
+  return (
+    process.env.OPENCLAUDE_TELEGRAM_CRON_TIMEZONE?.trim()
+    || process.env.TZ?.trim()
+    || 'Europe/Simferopol'
+  )
+}
+
+export function extractTelegramCronDirectives(text: string): {
+  text: string
+  directives: TelegramCronCreateDirective[]
+} {
+  const directives: TelegramCronCreateDirective[] = []
+  const cleanedLines: string[] = []
+  const controlPattern = /^\s*\[TELEGRAM_CRON_(CREATE|UPDATE)\s+(.+)\]\s*$/i
+
+  for (const line of text.split(/\r?\n/)) {
+    const controlMatch = line.match(controlPattern)
+    if (!controlMatch) {
+      cleanedLines.push(line)
+      continue
+    }
+
+    const action = String(controlMatch[1] || '').toLowerCase() === 'update'
+      ? 'update'
+      : 'create'
+    const attrs = parseTelegramControlAttributes(controlMatch[2] || '')
+    const schedule = (attrs.schedule || attrs.cron || '').trim()
+    const prompt = (attrs.prompt || attrs.text || '').trim()
+    const name = (attrs.name || prompt.slice(0, 50) || 'telegram reminder').trim()
+    const timezone = (attrs.timezone || attrs.tz || '').trim()
+    const mode = normalizeTelegramCronDirectiveMode(attrs.mode || attrs.kind || attrs.direct)
+    if (name && (schedule || prompt || timezone || mode)) {
+      directives.push({
+        action,
+        name,
+        ...(schedule ? { schedule } : {}),
+        ...(prompt ? { prompt } : {}),
+        ...(timezone ? { timezone } : {}),
+        ...(mode ? { mode } : {}),
+      })
+    }
+  }
+
+  return {
+    text: cleanedLines.join('\n').trim(),
+    directives,
+  }
+}
+
+function normalizeTelegramCronDirectiveMode(value: string | undefined): CronJobMode | undefined {
+  const normalized = value?.trim().toLowerCase()
+  if (!normalized) return undefined
+  if (['message', 'text', 'static', 'direct', 'reminder'].includes(normalized)) {
+    return 'message'
+  }
+  if (['agent', 'model', 'llm', 'dynamic'].includes(normalized)) {
+    return 'agent'
+  }
+  return undefined
+}
+
+function parseTelegramControlAttributes(input: string): Record<string, string> {
+  const attrs: Record<string, string> = {}
+  const pattern =
+    /([A-Za-z_][A-Za-z0-9_-]*)=(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s\]]+))/g
+  for (const match of input.matchAll(pattern)) {
+    const key = match[1]?.trim()
+    const value = match[2] ?? match[3] ?? match[4] ?? ''
+    if (key) attrs[key] = unescapeTelegramControlAttribute(value)
+  }
+  return attrs
+}
+
+function unescapeTelegramControlAttribute(value: string): string {
+  return value.replace(/\\(["'\\])/g, '$1')
 }
 
 export function extractTelegramSendDirectives(text: string): {
@@ -3130,6 +4337,17 @@ export function getAttachmentCandidates(
   return candidates
 }
 
+function summarizeTelegramMessageAttachments(message: TelegramMessage): string {
+  const candidates = getAttachmentCandidates(message)
+  if (candidates.length === 0) return ''
+  return candidates
+    .map(candidate => {
+      const name = candidate.file.file_name ? `:${candidate.file.file_name}` : ''
+      return `${candidate.type}${name}`
+    })
+    .join(', ')
+}
+
 export function getAudioTranscriptionCandidate(
   message: TelegramMessage,
 ): IncomingAttachmentCandidate | undefined {
@@ -3226,7 +4444,100 @@ export async function listTelegramStoredFiles(
 }
 
 function getTelegramMessageText(message: TelegramMessage | undefined): string {
-  return (message?.text || message?.caption || '').trim()
+  return repairLikelyMojibakeText(message?.text || message?.caption || '').trim()
+}
+
+let windows1251EncodeMap: Map<string, number> | undefined
+const WINDOWS_1251_EXTENDED_CHARS = [
+  '\u0402', '\u0403', '\u201A', '\u0453', '\u201E', '\u2026', '\u2020', '\u2021',
+  '\u20AC', '\u2030', '\u0409', '\u2039', '\u040A', '\u040C', '\u040B', '\u040F',
+  '\u0452', '\u2018', '\u2019', '\u201C', '\u201D', '\u2022', '\u2013', '\u2014',
+  '\u0098', '\u2122', '\u0459', '\u203A', '\u045A', '\u045C', '\u045B', '\u045F',
+  '\u00A0', '\u040E', '\u045E', '\u0408', '\u00A4', '\u0490', '\u00A6', '\u00A7',
+  '\u0401', '\u00A9', '\u0404', '\u00AB', '\u00AC', '\u00AD', '\u00AE', '\u0407',
+  '\u00B0', '\u00B1', '\u0406', '\u0456', '\u0491', '\u00B5', '\u00B6', '\u00B7',
+  '\u0451', '\u2116', '\u0454', '\u00BB', '\u0458', '\u0405', '\u0455', '\u0457',
+]
+
+function getWindows1251EncodeMap(): Map<string, number> {
+  if (windows1251EncodeMap) return windows1251EncodeMap
+  const map = new Map<string, number>()
+  for (let byte = 0; byte <= 0x7F; byte += 1) {
+    map.set(String.fromCharCode(byte), byte)
+  }
+  WINDOWS_1251_EXTENDED_CHARS.forEach((char, index) => {
+    if (!map.has(char)) map.set(char, 0x80 + index)
+  })
+  for (let byte = 0xC0; byte <= 0xFF; byte += 1) {
+    map.set(String.fromCharCode(0x0410 + byte - 0xC0), byte)
+  }
+  windows1251EncodeMap = map
+  return map
+}
+
+export function repairLikelyMojibakeText(text: string): string {
+  if (!text) return text
+  const originalScore = scoreUtf8AsWindows1251Mojibake(text)
+  if (originalScore < 3) return text
+
+  const encoded = encodeWindows1251(text)
+  if (!encoded) return text
+
+  let repaired: string
+  try {
+    repaired = new TextDecoder('utf-8', { fatal: true }).decode(encoded)
+  } catch {
+    return text
+  }
+
+  if (!repaired || repaired === text) return text
+  if (scoreUtf8AsWindows1251Mojibake(repaired) >= originalScore) return text
+  return repaired
+}
+
+function encodeWindows1251(text: string): Uint8Array | undefined {
+  const map = getWindows1251EncodeMap()
+  const bytes: number[] = []
+  for (const char of text) {
+    const byte = map.get(char)
+    if (byte === undefined) return undefined
+    bytes.push(byte)
+  }
+  return Uint8Array.from(bytes)
+}
+
+function scoreUtf8AsWindows1251Mojibake(text: string): number {
+  return [
+    ...text.matchAll(/[РС][\u0080-\u00BF\u0400-\u045F]/gu),
+    ...text.matchAll(/в[€Ђ„…†‡‰‹ЊЋЏ™њћџ]/gu),
+    ...text.matchAll(/[Вв]Â?[«»]|Â|Ð|Ñ|Ã|â|ðŸ|рџ/gu),
+    ...text.matchAll(/\uFFFD/gu),
+  ].length
+}
+
+async function maybeRepairDownloadedTextAttachment(
+  attachment: TelegramAttachment,
+): Promise<void> {
+  if (!attachment.localPath || !isLikelyTextAttachment(attachment)) return
+  const fileStat = await stat(attachment.localPath)
+  if (!fileStat.isFile() || fileStat.size > 1_000_000) return
+
+  const raw = await readFile(attachment.localPath, 'utf8')
+  const repaired = repairLikelyMojibakeText(raw)
+  if (repaired === raw) return
+
+  await writeFile(attachment.localPath, repaired, 'utf8')
+  attachment.encodingRepair = 'utf8-as-windows1251-mojibake'
+}
+
+function isLikelyTextAttachment(attachment: TelegramAttachment): boolean {
+  const mime = attachment.mimeType?.toLowerCase() || ''
+  if (mime.startsWith('text/')) return true
+  if (['application/json', 'application/xml', 'application/yaml'].includes(mime)) {
+    return true
+  }
+  const extension = extname(attachment.fileName || attachment.localPath || '').toLowerCase()
+  return ['.txt', '.md', '.json', '.jsonl', '.csv', '.tsv', '.log', '.xml', '.yaml', '.yml'].includes(extension)
 }
 
 function telegramFilesIndexPath(): string {
@@ -3298,6 +4609,9 @@ function formatAttachmentForPrompt(attachment: TelegramAttachment): string {
     lines.push(`  prompt_reference: @${attachment.localPath}`)
   }
   if (attachment.transcriptPath) lines.push(`  transcript_path: ${attachment.transcriptPath}`)
+  if (attachment.encodingRepair) {
+    lines.push(`  encoding_repair: ${attachment.encodingRepair}`)
+  }
   if (attachment.transcript) {
     lines.push('  transcript:')
     for (const line of attachment.transcript.split(/\r?\n/)) {

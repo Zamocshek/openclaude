@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 
 const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('node:fs')
+const { createRequire } = require('node:module')
 const { dirname, resolve } = require('node:path')
+
+function runtimeRequire() {
+  return existsSync('/app/package.json') ? createRequire('/app/package.json') : require
+}
+
+async function importRuntimeModule(specifier) {
+  return import(runtimeRequire().resolve(specifier))
+}
 
 function hydrateEnvFromDotEnv() {
   const envPath = resolve(process.cwd(), '.env')
@@ -402,9 +411,9 @@ async function main() {
     { StdioServerTransport },
     types,
   ] = await Promise.all([
-    import('@modelcontextprotocol/sdk/server/index.js'),
-    import('@modelcontextprotocol/sdk/server/stdio.js'),
-    import('@modelcontextprotocol/sdk/types.js'),
+    importRuntimeModule('@modelcontextprotocol/sdk/server/index.js'),
+    importRuntimeModule('@modelcontextprotocol/sdk/server/stdio.js'),
+    importRuntimeModule('@modelcontextprotocol/sdk/types.js'),
   ])
 
   const { CallToolRequestSchema, ListToolsRequestSchema } = types

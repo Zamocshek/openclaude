@@ -1,12 +1,8 @@
 import { feature } from 'bun:bundle'
 import { getFeatureValue_CACHED_WITH_REFRESH } from '../../services/analytics/growthbook.js'
-import { DEFAULT_CRON_JITTER_CONFIG } from '../../utils/cronTasks.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 
 const KAIROS_CRON_REFRESH_MS = 5 * 60 * 1000
-
-export const DEFAULT_MAX_AGE_DAYS =
-  DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs / (24 * 60 * 60 * 1000)
 
 /**
  * Unified gate for the cron scheduling system.
@@ -71,7 +67,7 @@ export function buildCronCreatePrompt(durableEnabled: boolean): string {
   const durabilitySection = durableEnabled
     ? `## Durability
 
-By default (durable: false) the job lives only in this Claude session — nothing is written to disk, and the job is gone when Claude exits. Pass durable: true to write to .claude/scheduled_tasks.json so the job survives restarts. Only use durable: true when the user explicitly asks for the task to persist ("keep doing this every day", "set this up permanently"). Most "remind me in 5 minutes" / "check back in an hour" requests should stay session-only.`
+By default (durable: false) the job lives only in this Claude session — nothing is written to disk, and the job is gone when Claude exits. Pass durable: true to write to .claude/scheduled_tasks.json so the job survives restarts. Use durable: true when the user asks for a recurring reminder, permanent task, or anything that should keep working after restart ("keep doing this every day", "set this up permanently", "every Monday"). Most "remind me in 5 minutes" / "check back in an hour" requests should stay session-only.`
     : `## Session-only
 
 Jobs live only in this Claude session — nothing is written to disk, and the job is gone when Claude exits.`
@@ -111,7 +107,7 @@ ${durabilitySection}
 
 Jobs only fire while the REPL is idle (not mid-query). ${durableRuntimeNote}The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.
 
-Recurring tasks auto-expire after ${DEFAULT_MAX_AGE_DAYS} days — they fire one final time, then are deleted. This bounds session lifetime. Tell the user about the ${DEFAULT_MAX_AGE_DAYS}-day limit when scheduling recurring jobs.
+Recurring tasks do not auto-expire by default. They keep running until cancelled with ${CRON_DELETE_TOOL_NAME}. Tell the user the job is permanent only when durable: true was used; otherwise say it is session-only.
 
 Returns a job ID you can pass to ${CRON_DELETE_TOOL_NAME}.`
 }

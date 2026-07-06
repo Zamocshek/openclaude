@@ -15,7 +15,7 @@
         "scripts/release/openrag-mcp-bridge.cjs"
       ],
       "env": {
-        "OPENRAG_URL": "http://localhost:3000",
+        "OPENRAG_URL": "${OPENRAG_URL}",
         "OPENRAG_API_KEY": "${OPENRAG_API_KEY}",
         "OPENRAG_MCP_TIMEOUT": "60"
       }
@@ -26,7 +26,7 @@
         "scripts/release/camofox-mcp-bridge.cjs"
       ],
       "env": {
-        "CAMOFOX_URL": "http://localhost:9377",
+        "CAMOFOX_URL": "${CAMOFOX_URL}",
         "CAMOFOX_MCP_USER_ID": "openclaude-agent",
         "CAMOFOX_MCP_SESSION_KEY": "default",
         "CAMOFOX_MCP_TIMEOUT": "60",
@@ -40,7 +40,7 @@
         "scripts/release/hindsight-mcp-bridge.cjs"
       ],
       "env": {
-        "HINDSIGHT_URL": "http://localhost:8888",
+        "HINDSIGHT_URL": "${HINDSIGHT_URL}",
         "HINDSIGHT_BANK_ID": "openclaude-agent",
         "HINDSIGHT_MCP_TIMEOUT": "60",
         "HINDSIGHT_API_KEY": "${HINDSIGHT_API_KEY}"

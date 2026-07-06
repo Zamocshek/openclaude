@@ -120,9 +120,11 @@ export const getSystemContext = memoize(
     const startTime = Date.now()
     logForDiagnosticsNoPII('info', 'system_context_started')
 
-    // Skip git status in CCR (unnecessary overhead on resume) or when git instructions are disabled
+    // Skip git status in CCR (unnecessary overhead on resume), in bare/simple
+    // script mode, or when git instructions are disabled.
     const gitStatus =
       isEnvTruthy(process.env.CLAUDE_CODE_REMOTE) ||
+      isBareMode() ||
       !shouldIncludeGitInstructions()
         ? null
         : await getGitStatus()

@@ -76,6 +76,19 @@ describe('agent gateway prompt builder', () => {
     expect(args).toContain('stream-json')
   })
 
+  test('enables non-interactive full access for bypass permission mode', () => {
+    const config = getDefaultAgentGatewayConfig()
+    config.runner.permissionMode = 'bypassPermissions'
+    config.runner.cwd = 'C:\\workspace'
+
+    const args = buildAgentArgs(config)
+
+    expect(args).toContain('--allow-dangerously-skip-permissions')
+    expect(args).toContain('--dangerously-skip-permissions')
+    expect(args).toContain('--add-dir')
+    expect(args).toContain('C:\\workspace')
+  })
+
   test('adds OpenRAG usage guidance when RAG integration is configured', () => {
     const config = getDefaultAgentGatewayConfig()
     config.openRAG.enabled = true
@@ -258,6 +271,42 @@ describe('agent gateway prompt builder', () => {
     expect(env.MCPR_TOKEN).toBe('fresh-token')
     expect(env.MCPR_HOST).toBe('127.0.0.1')
     expect(env.MCPR_PORT).toBe('3282')
+  })
+
+  test('keeps Docker MCP endpoints over host dotenv localhost values', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-docker-mcp-env-'))
+    await writeFile(
+      join(cwd, '.env'),
+      [
+        'MCPR_TOKEN=file-token',
+        'MCPR_HOST=127.0.0.1',
+        'MCPR_PORT=3282',
+        'OPENRAG_URL=http://localhost:3000',
+        'CAMOFOX_URL=http://localhost:9377',
+        'HINDSIGHT_URL=http://localhost:8888',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const env = buildAgentChildEnv(
+      {
+        OPENCLAUDE_DOCKER_RUN_AS_ROOT: '1',
+        MCPR_TOKEN: 'runtime-token',
+        MCPR_HOST: 'host.docker.internal',
+        MCPR_PORT: '3282',
+        OPENRAG_URL: 'http://host.docker.internal:3000',
+        CAMOFOX_URL: 'http://host.docker.internal:9377',
+        HINDSIGHT_URL: 'http://host.docker.internal:8888',
+      },
+      cwd,
+    )
+
+    expect(env.MCPR_TOKEN).toBe('runtime-token')
+    expect(env.MCPR_HOST).toBe('host.docker.internal')
+    expect(env.OPENRAG_URL).toBe('http://host.docker.internal:3000')
+    expect(env.CAMOFOX_URL).toBe('http://host.docker.internal:9377')
+    expect(env.HINDSIGHT_URL).toBe('http://host.docker.internal:8888')
+    expect(env.MCP_TIMEOUT).toBe('5000')
   })
 
   test('can prefer dotenv provider profile for long-running gateway children', async () => {

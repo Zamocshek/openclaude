@@ -4,22 +4,31 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { getDefaultAgentGatewayConfig, type AgentGatewayConfig } from './config.js'
 
-const runOpenClaudeAgent = mock(async (options: {
+type MockAgentRunOptions = {
   prompt: string
   onStdout?: (chunk: string) => void
-}) => {
-  options.onStdout?.(`mock response: ${options.prompt}`)
+}
+
+function successfulAgentResult(text: string) {
   return {
-    text: `mock response: ${options.prompt}`,
+    text,
     stderr: '',
     exitCode: 0,
     timedOut: false,
   }
-})
+}
+
+const defaultRunOpenClaudeAgent = async (options: MockAgentRunOptions) => {
+  options.onStdout?.(`mock response: ${options.prompt}`)
+  return successfulAgentResult(`mock response: ${options.prompt}`)
+}
+
+const runOpenClaudeAgent = mock(defaultRunOpenClaudeAgent)
 
 mock.module('./agentRunner.js', () => ({
   runOpenClaudeAgent,
   addAgentRunObserver: () => () => {},
+  redactAgentText: (text: string) => text,
   normalizeMessageContent: (content: unknown) =>
     typeof content === 'string' ? content : String(content ?? ''),
   buildPromptFromChatMessages: (messages: Array<Record<string, unknown>>) => {
@@ -85,6 +94,28 @@ function testConfig(overrides?: Partial<AgentGatewayConfig>): AgentGatewayConfig
   }
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve
+    reject = nextReject
+  })
+  return { promise, resolve, reject }
+}
+
+async function waitFor(
+  condition: () => boolean,
+  timeoutMs = 1000,
+): Promise<void> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    if (condition()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('Timed out waiting for condition')
+}
+
 describe('AgentApiServer', () => {
   let server: import('./apiServer.js').AgentApiServer | undefined
   let previousGatewayStateDir: string | undefined
@@ -92,6 +123,7 @@ describe('AgentApiServer', () => {
 
   beforeEach(async () => {
     runOpenClaudeAgent.mockClear()
+    runOpenClaudeAgent.mockImplementation(defaultRunOpenClaudeAgent)
     previousGatewayStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
     tempGatewayStateDir = await mkdtemp(join(tmpdir(), 'openclaude-api-server-'))
     process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = tempGatewayStateDir
@@ -343,6 +375,83 @@ describe('AgentApiServer', () => {
     expect(secondBody.choices[0]?.message.content).toContain('now beta')
   })
 
+  test('restores OpenWebUI-style chat history from persistent chat log', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const first = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-OpenWebUI-Chat-Id': 'owui-chat-a',
+      },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'where is odessa' }],
+      }),
+    })
+    expect(first.status).toBe(200)
+
+    await server.stop()
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const second = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-OpenWebUI-Chat-Id': 'owui-chat-a',
+      },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'what did I ask before?' }],
+      }),
+    })
+    expect(second.status).toBe(200)
+    const secondBody = await second.json() as {
+      choices: Array<{ message: { content: string } }>
+    }
+    expect(secondBody.choices[0]?.message.content).toContain('where is odessa')
+    expect(secondBody.choices[0]?.message.content).toContain('what did I ask before?')
+    const lastRun = runOpenClaudeAgent.mock.calls.at(-1)?.[0]
+    expect(lastRun?.prompt).toContain('where is odessa')
+  })
+
+  test('restores OpenWebUI transcript older than a short recent slice', async () => {
+    const { appendChatLog } = await import('./memory.js')
+    for (let index = 1; index <= 40; index++) {
+      await appendChatLog({
+        direction: index % 2 === 0 ? 'out' : 'in',
+        source: 'api',
+        endpoint: 'chat.completions',
+        sessionId: 'owui-long-chat',
+        text: `historic turn ${index}`,
+      })
+    }
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const response = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-OpenWebUI-Chat-Id': 'owui-long-chat',
+      },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'use the full transcript' }],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const lastRun = runOpenClaudeAgent.mock.calls.at(-1)?.[0]
+    expect(lastRun?.prompt).toContain('historic turn 1')
+    expect(lastRun?.prompt).toContain('historic turn 40')
+  })
+
   test('chains Responses API calls with previous_response_id and named conversations', async () => {
     const { AgentApiServer } = await import('./apiServer.js')
     server = new AgentApiServer({ config: testConfig() })
@@ -387,6 +496,125 @@ describe('AgentApiServer', () => {
     expect(third.status).toBe(200)
     const thirdBody = await third.json() as { previous_response_id: string }
     expect(thirdBody.previous_response_id).toBe(firstBody.id)
+  })
+
+  test('queues concurrent chat completions and preserves session history', async () => {
+    const pending: Array<{
+      prompt: string
+      resolve: (value: ReturnType<typeof successfulAgentResult>) => void
+    }> = []
+    runOpenClaudeAgent.mockImplementation(async (options: MockAgentRunOptions) => {
+      const deferred = createDeferred<ReturnType<typeof successfulAgentResult>>()
+      pending.push({ prompt: options.prompt, resolve: deferred.resolve })
+      return deferred.promise
+    })
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const sessionId = 'api-queue-session'
+    const first = fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Hermes-Session-Id': sessionId,
+      },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'first queued turn' }],
+      }),
+    })
+    await waitFor(() => pending.length === 1)
+
+    const second = fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Hermes-Session-Id': sessionId,
+      },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'second queued turn' }],
+      }),
+    })
+    await waitFor(() => pending.length === 1)
+
+    const queuedStatus = await fetch(`${server.url}/api/queue/status`)
+    expect(queuedStatus.status).toBe(200)
+    const queuedStatusBody = await queuedStatus.json() as {
+      active: { label: string } | null
+      waiting: number
+    }
+    expect(queuedStatusBody.active?.label).toBe(`chat.completions:${sessionId}`)
+    expect(queuedStatusBody.waiting).toBe(1)
+
+    pending[0]!.resolve(successfulAgentResult('first queued answer'))
+    const firstResponse = await first
+    expect(firstResponse.status).toBe(200)
+    expect(firstResponse.headers.get('x-hermes-queue-position')).toBe('1')
+
+    await waitFor(() => pending.length === 2)
+    expect(pending[1]!.prompt).toContain('first queued turn')
+    expect(pending[1]!.prompt).toContain('first queued answer')
+    expect(pending[1]!.prompt).toContain('second queued turn')
+
+    pending[1]!.resolve(successfulAgentResult('second queued answer'))
+    const secondResponse = await second
+    expect(secondResponse.status).toBe(200)
+    expect(secondResponse.headers.get('x-hermes-queue-position')).toBe('2')
+    const secondBody = await secondResponse.json() as {
+      choices: Array<{ message: { content: string } }>
+    }
+    expect(secondBody.choices[0]?.message.content).toBe('second queued answer')
+  })
+
+  test('accepts async runs while another API task is active and starts them from the queue', async () => {
+    const pending: Array<{
+      prompt: string
+      resolve: (value: ReturnType<typeof successfulAgentResult>) => void
+    }> = []
+    runOpenClaudeAgent.mockImplementation(async (options: MockAgentRunOptions) => {
+      const deferred = createDeferred<ReturnType<typeof successfulAgentResult>>()
+      pending.push({ prompt: options.prompt, resolve: deferred.resolve })
+      return deferred.promise
+    })
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const active = fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'active api task' }],
+      }),
+    })
+    await waitFor(() => pending.length === 1)
+
+    const runResponse = await fetch(`${server.url}/v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'queued async run' }),
+    })
+    expect(runResponse.status).toBe(202)
+    const runBody = await runResponse.json() as {
+      status: string
+      queue_position: number
+    }
+    expect(runBody.status).toBe('queued')
+    expect(runBody.queue_position).toBe(2)
+    expect(pending).toHaveLength(1)
+
+    pending[0]!.resolve(successfulAgentResult('active task done'))
+    expect((await active).status).toBe(200)
+
+    await waitFor(() => pending.length === 2)
+    expect(pending[1]!.prompt).toContain('queued async run')
+    pending[1]!.resolve(successfulAgentResult('queued run done'))
+    await waitFor(() => pending.length === 2)
   })
 
   test('allows public or tunnel bind only when an API key is set', async () => {

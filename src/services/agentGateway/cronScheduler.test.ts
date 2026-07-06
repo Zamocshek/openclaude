@@ -79,6 +79,36 @@ describe('agent gateway cron scheduler runtime', () => {
     expect(output).toContain('Report scheduler status')
     expect(output).toContain('scheduler ok')
   })
+
+  test('keeps recurring jobs without repeat limits scheduled after repeated runs', async () => {
+    const { getDefaultAgentGatewayConfig } = await import('./config.js')
+    const { createCronJob, getCronJob, runCronJobNow, triggerCronJob } =
+      await import('./cron.js')
+    const config = getDefaultAgentGatewayConfig()
+
+    const job = await createCronJob({
+      name: 'persistent reminder',
+      prompt: 'Run persistent reminder',
+      schedule: 'every 1h',
+      deliver: 'local',
+    })
+
+    expect(job.repeat?.times).toBeUndefined()
+
+    await triggerCronJob(job.id)
+    await runCronJobNow(job.id, config)
+    const afterFirstRun = await getCronJob(job.id)
+    expect(afterFirstRun?.enabled).toBe(true)
+    expect(afterFirstRun?.state).toBe('scheduled')
+    expect(afterFirstRun?.repeat).toEqual({ times: undefined, completed: 1 })
+
+    await triggerCronJob(job.id)
+    await runCronJobNow(job.id, config)
+    const afterSecondRun = await getCronJob(job.id)
+    expect(afterSecondRun?.enabled).toBe(true)
+    expect(afterSecondRun?.state).toBe('scheduled')
+    expect(afterSecondRun?.repeat).toEqual({ times: undefined, completed: 2 })
+  })
 })
 
 async function waitFor(

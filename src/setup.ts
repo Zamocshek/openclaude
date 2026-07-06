@@ -392,7 +392,9 @@ export async function setup(
       typeof process.getuid === 'function' &&
       process.getuid() === 0 &&
       process.env.IS_SANDBOX !== '1' &&
-      !isEnvTruthy(process.env.CLAUDE_CODE_BUBBLEWRAP)
+      !isEnvTruthy(process.env.CLAUDE_CODE_BUBBLEWRAP) &&
+      !isEnvTruthy(process.env.OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS) &&
+      !isEnvTruthy(process.env.CLAUDE_CODE_ALLOW_ROOT_BYPASS_PERMISSIONS)
     ) {
       // biome-ignore lint/suspicious/noConsole:: intentional console output
       console.error(

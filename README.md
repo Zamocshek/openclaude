@@ -62,12 +62,17 @@ Telegram:
 - `/provider`, `/provider models`,
   `/provider set <provider> <model> [base_url] [api_key]` - inspect or switch
   the provider and model used by the next agent runs
+- `/gpt55`, `/codex`, `/dsflash`, `/dspro`, `/gemma`, `/gemmacoder` - quick
+  switches for Codex GPT-5.5, DeepSeek V4 Flash/Pro, and the LM Studio Gemma
+  profiles
 - `/provider set lmstudio-lan gemma-4-12b-obliterated` - switch Telegram
   inference to the LAN LM Studio server at `http://192.168.187.1:1234/v1`
   and enable no-tools runner mode for models whose LM Studio template rejects
   OpenAI tool schemas.
 - `/model <model>`, `/baseurl <url>`, `/apikey <key>` - update the active
   OpenAI-compatible provider profile
+- `/context`, `/context auto|1m|<tokens>` - inspect or override the effective
+  context window for the active model; `unlimited` maps to the 1M client window
 - `/stop`, `/retry` - abort or retry the current Telegram inference task
 - `/files`, `/transcribe`, `/errors [n]` - inspect downloaded files,
   transcription availability, and recent gateway errors

@@ -6,7 +6,11 @@ import {
   isAgentGatewayEnabled,
   loadAgentGatewayConfig,
 } from './config.js'
-import { startCronScheduler, type CronSchedulerHandle } from './cron.js'
+import {
+  startCronScheduler,
+  type CronJob,
+  type CronSchedulerHandle,
+} from './cron.js'
 import { TelegramAgentBridge } from './telegram.js'
 import {
   createBackgroundConsciousness,
@@ -29,6 +33,22 @@ let runtime: AgentGatewayRuntime | null = null
 
 export function getAgentGatewayRuntime(): AgentGatewayRuntime | null {
   return runtime
+}
+
+export function resolveCronTelegramTarget(
+  config: AgentGatewayConfig,
+  job: CronJob,
+): string | undefined {
+  if (job.deliver === 'origin') {
+    return job.origin?.platform === 'telegram' ? job.origin.chatId : undefined
+  }
+  if (job.deliver === 'telegram') {
+    return (
+      config.telegram.homeChatId ||
+      (job.origin?.platform === 'telegram' ? job.origin.chatId : undefined)
+    )
+  }
+  return undefined
 }
 
 export async function startAgentGatewayFromConfig(): Promise<AgentGatewayRuntime | null> {
@@ -74,7 +94,7 @@ export async function startAgentGatewayFromConfig(): Promise<AgentGatewayRuntime
   if (config.cron.enabled) {
     nextRuntime.cron = startCronScheduler(config, async (content, job) => {
       if (!nextRuntime.telegram) return
-      const target = job.origin?.chatId || config.telegram.homeChatId
+      const target = resolveCronTelegramTarget(config, job)
       if (!target) return
       await nextRuntime.telegram.sendMessage(
         target,

@@ -2,9 +2,22 @@
 set -e
 
 CONFIG_DIR="${CLAUDE_CONFIG_DIR:-/home/node/.openclaude}"
+CONFIG_FILE="$CONFIG_DIR/.claude.json"
 LEGACY_CONFIG_FILE="${CLAUDE_LEGACY_CONFIG_FILE:-/home/node/.claude.json}"
 mkdir -p "$CONFIG_DIR"
-chown node:node "$CONFIG_DIR" 2>/dev/null || true
+export CLAUDE_CONFIG_DIR="$CONFIG_DIR"
+
+is_truthy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+RUN_AS_ROOT="${OPENCLAUDE_DOCKER_RUN_AS_ROOT:-0}"
+if ! is_truthy "$RUN_AS_ROOT"; then
+  chown node:node "$CONFIG_DIR" 2>/dev/null || true
+fi
 
 unset_empty_env() {
   name="$1"
@@ -72,20 +85,38 @@ normalize_provider_env
 
 export OPENCLAUDE_AGENT_GATEWAY_COMMAND="${OPENCLAUDE_AGENT_GATEWAY_COMMAND:-node /app/dist/cli.mjs}"
 
+latest_backup="$(ls -1t "$CONFIG_DIR"/backups/.claude.json.backup.* 2>/dev/null | head -n 1 || true)"
+if [ ! -f "$CONFIG_FILE" ]; then
+  if [ -n "$latest_backup" ] && [ -f "$latest_backup" ]; then
+    cp "$latest_backup" "$CONFIG_FILE"
+  else
+    printf '{}\n' > "$CONFIG_FILE"
+  fi
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+  if ! is_truthy "$RUN_AS_ROOT"; then
+    chown node:node "$CONFIG_FILE" 2>/dev/null || true
+  fi
+fi
+
 if [ ! -f "$LEGACY_CONFIG_FILE" ]; then
-  latest_backup="$(ls -1t "$CONFIG_DIR"/backups/.claude.json.backup.* 2>/dev/null | head -n 1 || true)"
-  if [ -f "$CONFIG_DIR/.claude.json" ]; then
-    cp "$CONFIG_DIR/.claude.json" "$LEGACY_CONFIG_FILE"
+  if [ -f "$CONFIG_FILE" ]; then
+    cp "$CONFIG_FILE" "$LEGACY_CONFIG_FILE"
   elif [ -n "$latest_backup" ] && [ -f "$latest_backup" ]; then
     cp "$latest_backup" "$LEGACY_CONFIG_FILE"
   else
     printf '{}\n' > "$LEGACY_CONFIG_FILE"
   fi
   chmod 600 "$LEGACY_CONFIG_FILE" 2>/dev/null || true
-  chown node:node "$LEGACY_CONFIG_FILE" 2>/dev/null || true
+  if ! is_truthy "$RUN_AS_ROOT"; then
+    chown node:node "$LEGACY_CONFIG_FILE" 2>/dev/null || true
+  fi
 fi
 
 if [ "$(id -u)" = "0" ]; then
+  if is_truthy "$RUN_AS_ROOT"; then
+    export HOME="${HOME:-/root}"
+    exec node /app/dist/cli.mjs "$@"
+  fi
   exec gosu node node /app/dist/cli.mjs "$@"
 fi
 

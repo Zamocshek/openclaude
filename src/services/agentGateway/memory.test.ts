@@ -10,6 +10,7 @@ import {
   curatedMemoryMarkdownPath,
   CuratedMemoryError,
   ensureMemoryFiles,
+  getCuratedMemoryLimit,
   getCuratedMemoryStatus,
   loadPendingCuratedMemoryActions,
   listCuratedMemoryEntries,
@@ -19,6 +20,17 @@ import {
   replaceCuratedMemoryText,
   searchCuratedMemory,
 } from './memory.js'
+
+const MEMORY_LIMIT_ENV_KEYS = [
+  'OPENCLAUDE_MEMORY_MAX_CHARS',
+  'OPENCLAUDE_USER_MEMORY_MAX_CHARS',
+  'OPENCLAUDE_SCRATCHPAD_MAX_BLOCKS',
+  'OPENCLAUDE_DIALOGUE_CONTEXT_BLOCKS',
+  'OPENCLAUDE_DIALOGUE_BLOCK_MAX_CHARS',
+  'OPENCLAUDE_MEMORY_BIBLE_MAX_CHARS',
+  'OPENCLAUDE_MEMORY_ARCHITECTURE_MAX_CHARS',
+  'OPENCLAUDE_MEMORY_REPO_GUIDE_MAX_CHARS',
+]
 
 async function withGatewayMemoryState<T>(
   run: (stateDir: string) => Promise<T>,
@@ -38,7 +50,43 @@ async function withGatewayMemoryState<T>(
   }
 }
 
+async function withMemoryEnv<T>(
+  updates: Record<string, string | undefined>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map<string, string | undefined>()
+  for (const key of MEMORY_LIMIT_ENV_KEYS) {
+    previous.set(key, process.env[key])
+  }
+  try {
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    return await run()
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
 describe('agent gateway curated memory', () => {
+  test('uses expanded default memory limits', async () => {
+    await withMemoryEnv(
+      Object.fromEntries(MEMORY_LIMIT_ENV_KEYS.map(key => [key, undefined])),
+      async () => {
+        await withGatewayMemoryState(async () => {
+          await ensureMemoryFiles()
+          const status = await getCuratedMemoryStatus()
+          expect(status.usage.memory.limit).toBe(1_000_000)
+          expect(status.usage.user.limit).toBe(512_000)
+        })
+      },
+    )
+  })
+
   test('stores, searches, replaces, removes, and renders bounded memory files', async () => {
     await withGatewayMemoryState(async () => {
       await ensureMemoryFiles()
@@ -184,13 +232,29 @@ describe('agent gateway curated memory', () => {
   })
 
   test('enforces Hermes-style per-file character limits', async () => {
-    await withGatewayMemoryState(async () => {
-      await expect(
-        addCuratedMemoryEntry({
+    await withMemoryEnv({ OPENCLAUDE_MEMORY_MAX_CHARS: '32' }, async () => {
+      await withGatewayMemoryState(async () => {
+        await expect(
+          addCuratedMemoryEntry({
+            kind: 'memory',
+            content: 'x'.repeat(33),
+          }),
+        ).rejects.toThrow(/would exceed the limit/)
+      })
+    })
+  })
+
+  test('accepts unlimited memory limit overrides', async () => {
+    await withMemoryEnv({ OPENCLAUDE_MEMORY_MAX_CHARS: 'unlimited' }, async () => {
+      await withGatewayMemoryState(async () => {
+        const added = await addCuratedMemoryEntry({
           kind: 'memory',
-          content: 'x'.repeat(2201),
-        }),
-      ).rejects.toThrow(/would exceed the limit/)
+          content: 'x'.repeat(3000),
+        })
+
+        expect(added.added).toBe(true)
+        expect(getCuratedMemoryLimit('memory')).toBe(Number.MAX_SAFE_INTEGER)
+      })
     })
   })
 })

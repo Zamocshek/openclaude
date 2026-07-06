@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.0](https://github.com/Gitlawb/openclaude/compare/v0.3.0...v0.4.0) (2026-07-06)
+
+
+### Features
+
+* **telegram:** provider switching commands (/provider, /model, /baseurl, /apikey)
+* **telegram:** quick model switches (/gpt55, /codex, /dsflash, /dspro, /gemma, /gemmacoder)
+* **telegram:** error diagnostics with /errors command
+* **telegram:** agent recovery with configurable retry attempts
+* **telegram:** configurable cron timezone support
+* **telegram:** expanded file handling and transcription improvements
+* **api:** context window management (/context command)
+* **memory:** configurable memory limits and expanded scratchpad (200 blocks)
+* **docker:** root user + privileged mode for Docker deployments
+* **docker:** MCP timeout and DeepSeek API key env var support
+* **docker:** context window configuration env vars
+* **mcp:** Docker MCPR host override support
+* **cron:** timezone-aware scheduling
+* **tests:** comprehensive tests for Telegram, API, cron, and memory modules
+
+
+### Bug Fixes
+
+* **consciousness:** add minimum content guard to prevent empty scratchpad blocks
+
 ## [0.3.0](https://github.com/Gitlawb/openclaude/compare/v0.2.3...v0.3.0) (2026-04-14)
 
 

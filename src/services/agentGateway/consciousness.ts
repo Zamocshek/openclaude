@@ -184,7 +184,13 @@ function parseConsciousnessResponse(text: string): ConsciousnessResult {
   // Extract scratchpad append
   const scratchpadMatch = text.match(/\[SCRATCHPAD\]\s*([\s\S]*?)(?=\[|$)/)
   if (scratchpadMatch) {
-    result.scratchpadAppend = scratchpadMatch[1]!.trim()
+    const raw = scratchpadMatch[1]!.trim()
+    // Guard against empty/incomplete LLM output: strip bare markdown markers
+    // and require at least 20 chars of substantive content
+    const cleaned = raw.replace(/^(?:#{1,6}\s*|[-*_]{3,}\s*)*$/gm, '').trim()
+    if (cleaned.length >= 20) {
+      result.scratchpadAppend = cleaned
+    }
   }
 
   // Extract wakeup adjustment

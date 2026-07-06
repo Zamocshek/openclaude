@@ -195,12 +195,18 @@ Inference and providers:
 - `/provider models` - load models from the active OpenAI-compatible endpoint.
 - `/provider set <provider> <model> [base_url] [api_key]` - switch
   provider/model for next agent runs.
+- `/gpt55`, `/codex`, `/dsflash`, `/dspro`, `/gemma`, `/gemmacoder` - quick
+  switches for Codex GPT-5.5, DeepSeek V4 Flash/Pro, and the LM Studio Gemma
+  profiles.
 - `/provider set lmstudio-lan gemma-4-12b-obliterated` - switch to the LAN
   LM Studio preset at `http://192.168.187.1:1234/v1` and enable no-tools
   runner mode for models whose LM Studio template rejects OpenAI tool schemas.
 - `/model <model>` - switch model for next agent runs.
 - `/baseurl <url>` - switch OpenAI-compatible base URL.
 - `/apikey <key>` - store provider API key for next runs.
+- `/context` - show effective context window for the active model.
+- `/context auto|1m|<tokens>` - set a manual context window or return to
+  model/provider auto mode; `unlimited` maps to the 1M client window.
 
 Tasks and files:
 

@@ -4,7 +4,11 @@ import { dirname, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import stripAnsi from 'strip-ansi'
 import { isInBundledMode } from '../../utils/bundledMode.js'
-import type { AgentGatewayConfig } from './config.js'
+import {
+  getAgentGatewayStateDir,
+  type AgentGatewayConfig,
+} from './config.js'
+import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 export type AgentRunOptions = {
   prompt: string
@@ -103,6 +107,7 @@ const IGNORABLE_STDERR_PATTERNS = [
   /^\(Use `node --trace-deprecation .*$/i,
   /^\[web-search\]\s+/i,
 ]
+const DEFAULT_FIRST_OUTPUT_PROGRESS_MS = 60_000
 
 export function addAgentRunObserver(observer: AgentRunObserver): () => void {
   agentRunObservers.add(observer)
@@ -169,6 +174,7 @@ export function buildAgentArgs(
 ): string[] {
   const args = [
     '--print',
+    '--bare',
     ...(options.streamEvents ? ['--verbose'] : []),
     '--output-format',
     options.streamEvents ? 'stream-json' : 'text',
@@ -177,11 +183,21 @@ export function buildAgentArgs(
     '--max-turns',
     String(config.runner.maxTurns),
   ]
+  const mcpConfigPath = config.runner.cwd
+    ? resolve(config.runner.cwd, '.mcp.json')
+    : ''
+  if (mcpConfigPath && existsSync(mcpConfigPath)) {
+    args.push('--mcp-config', mcpConfigPath)
+  }
 
   if (config.runner.permissionMode === 'acceptEdits') {
     args.push('--permission-mode', 'acceptEdits')
   } else if (config.runner.permissionMode === 'bypassPermissions') {
+    args.push('--allow-dangerously-skip-permissions')
     args.push('--dangerously-skip-permissions')
+    for (const dir of getAgentGatewayAllowedDirs(config)) {
+      args.push('--add-dir', dir)
+    }
   }
 
   if (config.runner.disableTools) {
@@ -195,6 +211,16 @@ export function buildAgentArgs(
   }
 
   return args
+}
+
+function getAgentGatewayAllowedDirs(config: AgentGatewayConfig): string[] {
+  const dirs = [
+    config.runner.cwd,
+    process.cwd(),
+    getClaudeConfigHomeDir(),
+    getAgentGatewayStateDir(),
+  ]
+  return [...new Set(dirs.filter((dir): dir is string => Boolean(dir)))]
 }
 
 function getApiGatewayAppendSystemPrompt(config: AgentGatewayConfig): string {
@@ -238,6 +264,10 @@ export function buildAgentChildEnv(
   cwd: string = process.cwd(),
 ): NodeJS.ProcessEnv {
   const dotEnv = parseDotEnvFile(cwd)
+  const preferRuntimeMcpEnv =
+    isEnvTruthy(baseEnv.OPENCLAUDE_DOCKER_RUN_AS_ROOT) ||
+    isEnvTruthy(baseEnv.OPENCLAUDE_AGENT_GATEWAY_PREFER_RUNTIME_MCP_ENV) ||
+    isEnvTruthy(baseEnv.OPENCLAUDE_DOCKER_TELEGRAM_ENABLED)
   const childEnv: NodeJS.ProcessEnv = {
     ...dotEnv,
     ...baseEnv,
@@ -250,6 +280,8 @@ export function buildAgentChildEnv(
     'MCPR_TOKEN',
     'MCPR_HOST',
     'MCPR_PORT',
+    'MCP_TIMEOUT',
+    'MCP_TOOL_TIMEOUT',
     'OPENRAG_URL',
     'OPENRAG_API_KEY',
     'OPENRAG_MCP_TIMEOUT',
@@ -269,7 +301,10 @@ export function buildAgentChildEnv(
     'HINDSIGHT_BANK_ID',
     'HINDSIGHT_MCP_TIMEOUT',
   ]) {
-    if (dotEnv[key]) {
+    if (
+      dotEnv[key] &&
+      !(preferRuntimeMcpEnv && isConcreteEnvValue(baseEnv[key]))
+    ) {
       childEnv[key] = dotEnv[key]
     }
   }
@@ -279,6 +314,18 @@ export function buildAgentChildEnv(
     'OPENCLAUDE_BASE_URL',
     'OPENCLAUDE_MODEL',
     'OPENCLAUDE_API_KEY',
+    'OPENCLAUDE_DEEPSEEK_API_KEY',
+    'OPENCLAUDE_CONTEXT_WINDOW_TOKENS',
+    'OPENCLAUDE_MAX_CONTEXT_TOKENS',
+    'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+    'OPENCLAUDE_MEMORY_MAX_CHARS',
+    'OPENCLAUDE_USER_MEMORY_MAX_CHARS',
+    'OPENCLAUDE_SCRATCHPAD_MAX_BLOCKS',
+    'OPENCLAUDE_DIALOGUE_CONTEXT_BLOCKS',
+    'OPENCLAUDE_DIALOGUE_BLOCK_MAX_CHARS',
+    'OPENCLAUDE_MEMORY_BIBLE_MAX_CHARS',
+    'OPENCLAUDE_MEMORY_ARCHITECTURE_MAX_CHARS',
+    'OPENCLAUDE_MEMORY_REPO_GUIDE_MAX_CHARS',
     'CLAUDE_CODE_USE_OPENAI',
     'CLAUDE_CODE_USE_GEMINI',
     'CLAUDE_CODE_USE_MISTRAL',
@@ -289,6 +336,7 @@ export function buildAgentChildEnv(
     'OPENAI_BASE_URL',
     'OPENAI_MODEL',
     'OPENAI_API_KEY',
+    'DEEPSEEK_API_KEY',
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_MODEL',
     'ANTHROPIC_API_KEY',
@@ -315,11 +363,22 @@ export function buildAgentChildEnv(
     }
   }
   if (childEnv.MCPR_TOKEN) {
-    childEnv.MCPR_HOST = childEnv.MCPR_HOST || '127.0.0.1'
+    childEnv.MCPR_HOST = childEnv.MCPR_HOST || (preferRuntimeMcpEnv ? 'host.docker.internal' : '127.0.0.1')
     childEnv.MCPR_PORT = childEnv.MCPR_PORT || '3282'
   }
+  childEnv.MCP_TIMEOUT = childEnv.MCP_TIMEOUT || '5000'
+  childEnv.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS =
+    childEnv.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS || '1'
   delete childEnv.OPENCLAUDE_AGENT_GATEWAY_SERVER
   return childEnv
+}
+
+function isEnvTruthy(value: string | undefined): boolean {
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim())
+}
+
+function isConcreteEnvValue(value: string | undefined): boolean {
+  return Boolean(value && value.trim() && !/^\$\{[A-Z0-9_]+\}$/i.test(value.trim()))
 }
 
 function killProcessTree(proc: ChildProcessWithoutNullStreams): void {
@@ -363,6 +422,7 @@ export function runOpenClaudeAgent(
     let timedOut = false
     let settled = false
     let timeoutTimer: ReturnType<typeof setTimeout>
+    let firstOutputTimer: ReturnType<typeof setTimeout> | undefined
     let forceResolveTimer: ReturnType<typeof setTimeout> | undefined
     const activity: string[] = []
     const seenProgress = new Set<string>()
@@ -382,6 +442,9 @@ export function runOpenClaudeAgent(
       while (activity.length > 60) activity.shift()
       options.onProgress?.(truncated)
     }
+    const firstOutputProgressMs = getFirstOutputProgressMs(options.config.runner.timeoutMs)
+    const killOnFirstOutputTimeout = shouldKillOnFirstOutputTimeout()
+    recordProgress('runtime starting')
 
     const handleStreamLine = (line: string) => {
       const trimmed = line.trim()
@@ -438,6 +501,7 @@ export function runOpenClaudeAgent(
       if (settled) return
       settled = true
       clearTimeout(timeoutTimer)
+      if (firstOutputTimer) clearTimeout(firstOutputTimer)
       if (forceResolveTimer) clearTimeout(forceResolveTimer)
       options.signal?.removeEventListener('abort', onAbort)
       if (options.streamEvents && streamLineBuffer.trim()) {
@@ -510,6 +574,10 @@ export function runOpenClaudeAgent(
     options.signal?.addEventListener('abort', onAbort, { once: true })
 
     proc.stdout.on('data', data => {
+      if (firstOutputTimer) {
+        clearTimeout(firstOutputTimer)
+        firstOutputTimer = undefined
+      }
       handleStdoutChunk(data.toString())
     })
 
@@ -529,9 +597,38 @@ export function runOpenClaudeAgent(
       killProcessTree(proc)
       forceResolveTimer = setTimeout(() => finish(1), 1000)
     }, options.config.runner.timeoutMs)
+    if (firstOutputProgressMs > 0 && firstOutputProgressMs < options.config.runner.timeoutMs) {
+      const scheduleFirstOutputProgress = (elapsedMs: number) => {
+        firstOutputTimer = setTimeout(() => {
+          recordProgress(`no model/tool output for ${formatDuration(elapsedMs)}`)
+          if (killOnFirstOutputTimeout) {
+            timedOut = true
+            stderr += `\nAgent produced no streamed model/tool output for ${formatDuration(elapsedMs)}. MCP startup or provider first-token latency is stuck.`
+            killProcessTree(proc)
+            forceResolveTimer = setTimeout(() => finish(1), 1000)
+            return
+          }
+          scheduleFirstOutputProgress(elapsedMs + firstOutputProgressMs)
+        }, firstOutputProgressMs)
+      }
+      scheduleFirstOutputProgress(firstOutputProgressMs)
+    }
 
     proc.stdin.end(options.prompt)
   })
+}
+
+function getFirstOutputProgressMs(totalTimeoutMs: number): number {
+  const raw = process.env.OPENCLAUDE_AGENT_RUNNER_FIRST_OUTPUT_TIMEOUT_MS
+  if (raw !== undefined) {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.min(parsed, totalTimeoutMs)
+  }
+  return Math.min(DEFAULT_FIRST_OUTPUT_PROGRESS_MS, totalTimeoutMs)
+}
+
+function shouldKillOnFirstOutputTimeout(): boolean {
+  return isEnvTruthy(process.env.OPENCLAUDE_AGENT_RUNNER_KILL_ON_FIRST_OUTPUT_TIMEOUT)
 }
 
 function parseStreamJsonLine(line: string): Record<string, unknown> | null {

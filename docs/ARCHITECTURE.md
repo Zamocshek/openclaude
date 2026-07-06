@@ -1,4 +1,4 @@
-# OpenClaude Agent v0.3.0 — Architecture & Reference
+# OpenClaude Agent v0.4.0 — Architecture & Reference
 
 This document describes every component, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.

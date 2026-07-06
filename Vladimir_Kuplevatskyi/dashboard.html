@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>НОВА — Симуляция Владимира Куплевацкого</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg-dark: #0a0a0f;
+  --bg-panel: #111118;
+  --bg-card: #16161f;
+  --bg-hover: #1e1e2a;
+  --border: #2a2a3a;
+  --border-glow: #3a3a5a;
+  --text: #c8c8d4;
+  --text-dim: #6a6a7a;
+  --text-bright: #f0f0ff;
+  --accent-cyan: #00e5ff;
+  --accent-purple: #b388ff;
+  --accent-red: #ff5252;
+  --accent-green: #69f0ae;
+  --accent-amber: #ffd740;
+  --accent-orange: #ff6e40;
+  --accent-pink: #ff4081;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-dark);
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-dark); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-glow); }
+#particles-canvas {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.4;
+}
+.app {
+  position: relative;
+  z-index: 1;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 20px;
+}
+.header {
+  text-align: center;
+  padding: 40px 20px 30px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 30px;
+  position: relative;
+}
+.header::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 200px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
+}
+.header h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 8px;
+}
+.header .subtitle {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  letter-spacing: 6px;
+  text-transform: uppercase;
+  font-weight: 300;
+}
+.header .version {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  padding: 2px 10px;
+  border-radius: 10px;
+  letter-spacing: 1px;
+}
+.header .date-badge {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  padding: 2px 10px;
+  border-radius: 10px;
+  letter-spacing: 1px;
+}
+.nav {
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 30px;
+  padding: 4px;
+  background: var(--bg-panel);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+}
+.nav-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  padding: 10px 18px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: var(--transition);
+  font-family: inherit;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+.nav-btn:hover { color: var(--text); background: var(--bg-hover); }
+.nav-btn.active {
+  color: var(--accent-cyan);
+  background: rgba(0,229,255,0.08);
+  box-shadow: inset 0 -2px 0 var(--accent-cyan);
+}
+.grid { display: none; gap: 20px; }
+.grid.active { display: grid; }
+.grid-2 { grid-template-columns: 1fr 1fr; }
+.grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+.grid-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+@media (max-width: 1024px) { .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 640px) { .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; } }
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  transition: var(--transition);
+  animation: fadeIn 0.5s ease forwards;
+}
+.card:hover { border-color: var(--border-glow); }
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.card-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.card-title .accent { color: var(--accent-cyan); }
+.card-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(42,42,58,0.5);
+}
+.stat-row:last-child { border-bottom: none; }
+.stat-label {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+.stat-value {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+}
+.stat-value.cyan { color: var(--accent-cyan); }
+.stat-value.purple { color: var(--accent-purple); }
+.stat-value.green { color: var(--accent-green); }
+.stat-value.amber { color: var(--accent-amber); }
+.stat-value.red { color: var(--accent-red); }
+.stat-value.pink { color: var(--accent-pink); }
+.stat-value.orange { color: var(--accent-orange); }
+.progress-bar {
+  width: 100%;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  margin: 4px 0;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 1s ease;
+  background: linear-gradient(90deg, var(--accent-cyan), var(--accent-purple));
+}
+.progress-fill.green { background: linear-gradient(90deg, var(--accent-green), #00c853); }
+.progress-fill.amber { background: linear-gradient(90deg, var(--accent-amber), #ffa000); }
+.progress-fill.red { background: linear-gradient(90deg, var(--accent-red), #d50000); }
+.progress-fill.purple { background: linear-gradient(90deg, var(--accent-purple), #7c4dff); }
+.progress-fill.pink { background: linear-gradient(90deg, var(--accent-pink), #ff4081); }
+.skill-tree { display: flex; flex-direction: column; gap: 12px; }
+.skill-node {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  transition: var(--transition);
+}
+.skill-node:hover { border-color: var(--accent-cyan); }
+.skill-node-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.skill-name { font-size: 0.85rem; font-weight: 600; color: var(--text); }
+.skill-level { font-size: 0.75rem; color: var(--text-dim); background: var(--bg-card); padding: 2px 8px; border-radius: 10px; }
+.skill-synergy { font-size: 0.7rem; color: var(--accent-purple); font-style: italic; margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(42,42,58,0.3); }
+.skill-tree-viz {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 16px;
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  margin-bottom: 12px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  white-space: pre;
+  overflow-x: auto;
+  line-height: 1.4;
+}
+.map-container {
+  width: 100%;
+  padding: 20px;
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.map-svg { width: 100%; height: auto; }
+.zone-node { cursor: pointer; transition: all 0.3s ease; }
+.zone-node:hover { filter: brightness(1.3); }
+.quest-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(42,42,58,0.3);
+}
+.quest-item:last-child { border-bottom: none; }
+.quest-type {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.quest-type.main { background: rgba(0,229,255,0.15); color: var(--accent-cyan); }
+.quest-type.side { background: rgba(179,136,255,0.15); color: var(--accent-purple); }
+.quest-type.daily { background: rgba(105,240,174,0.15); color: var(--accent-green); }
+.quest-type.challenge { background: rgba(255,107,64,0.15); color: var(--accent-orange); }
+.quest-body { flex: 1; }
+.quest-name { font-size: 0.85rem; font-weight: 600; color: var(--text); }
+.quest-desc { font-size: 0.75rem; color: var(--text-dim); margin-top: 2px; }
+.quest-reward { font-size: 0.7rem; color: var(--accent-amber); margin-top: 4px; }
+.achievement-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+.achievement-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  text-align: center;
+  transition: var(--transition);
+}
+.achievement-card:hover { border-color: var(--accent-cyan); }
+.achievement-card.locked { opacity: 0.4; }
+.achievement-card.unlocked { border-color: var(--accent-amber); box-shadow: 0 0 15px rgba(255,215,64,0.1); }
+.achievement-icon { font-size: 1.5rem; margin-bottom: 6px; }
+.achievement-name { font-size: 0.75rem; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.achievement-reward { font-size: 0.65rem; color: var(--accent-amber); }
+.habit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.habit-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  transition: var(--transition);
+}
+.habit-item:hover { border-color: var(--border-glow); }
+.habit-check {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border-glow);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  flex-shrink: 0;
+  background: none;
+  font-size: 0.6rem;
+  color: transparent;
+}
+.habit-check.checked { background: var(--accent-green); border-color: var(--accent-green); color: #000; }
+.habit-num { font-size: 0.7rem; color: var(--text-dim); width: 20px; flex-shrink: 0; text-align: right; }
+.habit-name { flex: 1; font-size: 0.8rem; }
+.habit-xp { font-size: 0.65rem; color: var(--accent-amber); }
+.habit-mandatory {
+  font-size: 0.55rem; color: var(--accent-red);
+  text-transform: uppercase; letter-spacing: 1px;
+  padding: 2px 6px; border: 1px solid var(--accent-red);
+  border-radius: 4px; opacity: 0.7;
+}
+.record-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(42,42,58,0.3);
+}
+.record-item:last-child { border-bottom: none; }
+.record-icon { font-size: 1.2rem; flex-shrink: 0; }
+.record-text { font-size: 0.85rem; }
+.record-text .highlight { color: var(--accent-cyan); font-weight: 600; }
+.record-text .goal { color: var(--accent-amber); }
+.timeline { position: relative; padding-left: 24px; }
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 6px; top: 0; bottom: 0;
+  width: 2px; background: var(--border);
+}
+.timeline-item {
+  position: relative;
+  padding: 8px 0 8px 16px;
+}
+.timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -22px; top: 14px;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 2px solid var(--border-glow);
+}
+.timeline-item.motivation::before { border-color: var(--accent-purple); }
+.timeline-item.habit::before { border-color: var(--accent-green); }
+.timeline-item.pharma::before { border-color: var(--accent-red); }
+.timeline-item.workout::before { border-color: var(--accent-orange); }
+.timeline-item.abstinence::before { border-color: var(--accent-cyan); }
+.timeline-time { font-size: 0.7rem; color: var(--text-dim); font-weight: 600; letter-spacing: 1px; }
+.timeline-text { font-size: 0.85rem; color: var(--text); margin-top: 2px; }
+.philosophy-quote {
+  padding: 16px;
+  background: var(--bg-panel);
+  border-left: 3px solid var(--accent-purple);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  margin: 12px 0;
+  font-style: italic;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+.philosophy-quote .author {
+  display: block;
+  margin-top: 8px;
+  font-style: normal;
+  font-size: 0.75rem;
+  color: var(--accent-purple);
+  font-weight: 600;
+}
+.title-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 12px; border-radius: 12px;
+  font-size: 0.7rem; font-weight: 600; letter-spacing: 1px;
+  text-transform: uppercase; border: 1px solid;
+}
+.title-badge.cyan { border-color: var(--accent-cyan); color: var(--accent-cyan); background: rgba(0,229,255,0.06); }
+.title-badge.purple { border-color: var(--accent-purple); color: var(--accent-purple); background: rgba(179,136,255,0.06); }
+.title-badge.amber { border-color: var(--accent-amber); color: var(--accent-amber); background: rgba(255,215,64,0.06); }
+.full-width { grid-column: 1 / -1; }
+.stat-sphere-container { display: flex; justify-content: center; align-items: center; padding: 10px; }
+.stat-sphere {
+  width: 180px; height: 180px;
+  border-radius: 50%;
+  border: 2px solid var(--border-glow);
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+}
+.stat-sphere-inner { text-align: center; }
+.stat-sphere-level {
+  font-size: 3rem; font-weight: 800;
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1;
+}
+.stat-sphere-label { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 2px; margin-top: 4px; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.cron-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 0; font-size: 0.8rem;
+  border-bottom: 1px solid rgba(42,42,58,0.3);
+}
+.cron-row:last-child { border-bottom: none; }
+.cron-name { color: var(--text); font-weight: 500; }
+.cron-time { color: var(--text-dim); }
+.cron-next { color: var(--accent-cyan); font-size: 0.7rem; }
+.badge-on { color: var(--accent-green); }
+.scanlines {
+  position: fixed; top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none; z-index: 9999;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+}
+@media (max-width: 640px) {
+  .app { padding: 10px; }
+  .header h1 { font-size: 1.5rem; letter-spacing: 2px; }
+  .header .version, .header .date-badge { display: none; }
+  .nav-btn { padding: 8px 12px; font-size: 0.7rem; }
+}
+</style>
+</head>
+<body>
+<div class="scanlines"></div>
+<canvas id="particles-canvas"></canvas>
+<div class="app">
+  <header class="header">
+    <span class="version">v0.1.0</span>
+    <span class="date-badge">СИМУЛЯЦИЯ ACTIVE</span>
+    <h1>НОВА</h1>
+    <div class="subtitle">RPG-симуляция Владимира Куплевацкого</div>
+  </header>
+  <nav class="nav" id="main-nav">
+    <button class="nav-btn active" data-tab="profile">Профиль</button>
+    <button class="nav-btn" data-tab="skills">Навыки</button>
+    <button class="nav-btn" data-tab="map">Карта</button>
+    <button class="nav-btn" data-tab="quests">Квесты</button>
+    <button class="nav-btn" data-tab="achievements">Достижения</button>
+    <button class="nav-btn" data-tab="habits">Привычки</button>
+    <button class="nav-btn" data-tab="records">Рекорды</button>
+    <button class="nav-btn" data-tab="schedule">Расписание</button>
+  </nav>
+
+  <!-- TAB 1: PROFILE -->
+  <div class="grid grid-4 active" id="tab-profile">
+    <div class="card full-width">
+      <div class="card-header">
+        <div class="card-title"><span class="accent">◆</span> Владимир Куплевацкий</div>
+        <span class="title-badge cyan">Уровень 0</span>
+      </div>
+      <div style="display:flex; gap:24px; flex-wrap:wrap; align-items:center;">
+        <div class="stat-sphere-container">
+          <div class="stat-sphere">
+            <div class="stat-sphere-inner">
+              <div class="stat-sphere-level">0</div>
+              <div class="stat-sphere-label">Уровень</div>
+            </div>
+          </div>
+        </div>
+        <div style="flex:1; min-width:200px;">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px 20px;">
+            <div class="stat-row" style="border:none; padding:4px 0;"><span class="stat-label">Ежемесячный доход</span><span class="stat-value amber">0</span></div>
+            <div class="stat-row" style="border:none; padding:4px 0;"><span class="stat-label">Баланс</span><span class="stat-value amber">0</span></div>
+            <div class="stat-row" style="border:none; padding:4px 0;"><span class="stat-label">Опыт (XP)</span><span class="stat-value cyan">0</span></div>
+            <div class="stat-row" style="border:none; padding:4px 0;"><span class="stat-label">До след. уровня</span><span class="stat-value">100</span></div>
+          </div>
+          <div style="margin-top:8px;">
+            <div style="display:flex; justify-content:space-between; font-size:0.7rem; color:var(--text-dim);"><span>Прогресс уровня</span><span>0 / 100 XP</span></div>
+            <div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>
+          </div>
+        </div>
+        <div style="text-align:right; border-left:1px solid var(--border); padding-left:20px;">
+          <div class="stat-label" style="font-size:0.7rem;">Воздержание</div>
+          <div class="stat-value cyan" style="font-size:2rem; line-height:1;">0</div>
+          <div class="stat-label" style="font-size:0.65rem;">дней</div>
+          <div class="stat-label" style="font-size:0.6rem; color:var(--text-dim);">старт 06.07.2026</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Характеристики</div></div>
+      <div>
+        <div class="stat-row"><span class="stat-label">Сила</span><span class="stat-value cyan">0 <span style="font-size:0.7rem;color:var(--text-dim);">/ 10</span></span></div>
+        <div class="stat-row"><span class="stat-label">Ловкость</span><span class="stat-value green">0 <span style="font-size:0.7rem;color:var(--text-dim);">/ 10</span></span></div>
+        <div class="stat-row"><span class="stat-label">Интеллект</span><span class="stat-value purple">0 <span style="font-size:0.7rem;color:var(--text-dim);">/ 10</span></span></div>
+        <div class="stat-row"><span class="stat-label">Сила воли</span><span class="stat-value amber">0 <span style="font-size:0.7rem;color:var(--text-dim);">/ 10</span></span></div>
+        <div class="stat-row"><span class="stat-label">Харизма</span><span class="stat-value pink">0 <span style="font-size:0.7rem;color:var(--text-dim);">/ 10</span></span></div>
+        <div class="stat-row"><span class="stat-label">Выносливость</span><span class="stat-value orange">0 <span style="font-size:0.7rem;color:var(--text-dim);">/ 10</span></span></div>
+      </div>
+      <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+        <div class="stat-row"><span class="stat-label">Очки характеристик</span><span class="stat-value">0</span></div>
+        <div class="stat-row"><span class="stat-label">Очки навыков</span><span class="stat-value">0</span></div>
+        <div class="stat-row"><span class="stat-label">Мировоззрение</span><span class="stat-value" style="font-size:0.8rem;">СВ 50 / ПО 50</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Боевые статы</div></div>
+      <div>
+        <div class="stat-row"><span class="stat-label">HP</span><span class="stat-value green">10</span></div>
+        <div class="stat-row"><span class="stat-label">Энергия</span><span class="stat-value cyan">10 <span style="font-size:0.7rem;color:var(--text-dim);">/ 10</span></span></div>
+        <div class="progress-bar" style="margin:4px 0 12px;"><div class="progress-fill green" style="width:100%"></div></div>
+        <div class="stat-row"><span class="stat-label">Fatigue</span><span class="stat-value amber">0</span></div>
+        <div class="stat-row"><span class="stat-label">Атака</span><span class="stat-value red">0</span></div>
+        <div class="stat-row"><span class="stat-label">Защита</span><span class="stat-value cyan">0</span></div>
+        <div class="stat-row"><span class="stat-label">Карма</span><span class="stat-value">0</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Инвентарь</div></div>
+      <div class="stat-row"><span class="stat-label">Голова</span><span class="stat-value" style="color:var(--text-dim);">—</span></div>
+      <div class="stat-row"><span class="stat-label">Тело</span><span class="stat-value" style="color:var(--text-dim);">—</span></div>
+      <div class="stat-row"><span class="stat-label">Ноги</span><span class="stat-value" style="color:var(--text-dim);">—</span></div>
+      <div class="stat-row"><span class="stat-label">Руки</span><span class="stat-value" style="color:var(--text-dim);">—</span></div>
+      <div class="stat-row"><span class="stat-label">Аксессуар</span><span class="stat-value" style="color:var(--text-dim);">—</span></div>
+      <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+        <div class="stat-label" style="font-size:0.65rem; margin-bottom:4px;">Титулы</div>
+        <span style="font-size:0.7rem; color:var(--text-dim);">—</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Учёба</div></div>
+      <div class="stat-row"><span class="stat-label">Физика</span><span class="stat-value">0 ч</span></div>
+      <div class="stat-row"><span class="stat-label">Математика</span><span class="stat-value">0 ч</span></div>
+      <div class="stat-row"><span class="stat-label">Английский</span><span class="stat-value">0 ч</span></div>
+      <div class="stat-row"><span class="stat-label">Биология</span><span class="stat-value">0 ч</span></div>
+      <div class="stat-row"><span class="stat-label">Книг прочитано</span><span class="stat-value">0</span></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Философия</div></div>
+      <div class="philosophy-quote" style="margin:0 0 12px;">
+        «Бог мёртв. Любовь мертва. Но как в игру верю.»
+        <span class="author">— Владимир Куплевацкий</span>
+      </div>
+      <div class="philosophy-quote" style="margin:0;">
+        «Психология и религия — одно великое целое. Молюсь своему богу и самому себе.»
+        <span class="author">— Владимир Куплевацкий</span>
+      </div>
+      <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+        <div class="stat-label" style="font-size:0.65rem;">Арбитраж · Программирование · Бизнес · Наука · Просветление · Доминация</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 2: SKILLS -->
+  <div class="grid grid-2" id="tab-skills">
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Программирование</div></div>
+      <div class="skill-tree-viz">
+Кодинг ─┬── ИИ/ML
+         └── Архитектура ПО
+
+Арбитраж трафика
+      </div>
+      <div class="skill-tree">
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Кодинг</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div><div class="skill-synergy">+25% скорость разработки</div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Архитектура ПО</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div><div class="skill-synergy">Требует: Кодинг ≥ 3</div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">ИИ/ML</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div><div class="skill-synergy">Требует: Кодинг ≥ 5</div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Арбитраж трафика</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div></div>
+        <div class="skill-node" style="border-color:var(--accent-purple);"><div class="skill-node-header"><span class="skill-name" style="color:var(--accent-purple);">⚡</span><span class="skill-level" style="color:var(--accent-purple);">Автоматизация</span></div><div style="font-size:0.7rem;color:var(--text-dim);">Кодинг (≥3) + Арбитраж (≥3) → пассивный доход</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Интеллект</div></div>
+      <div class="skill-tree-viz">
+Научная деятельность ─┬── Метафизика
+                       └── Стратегия
+      </div>
+      <div class="skill-tree">
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Научная деятельность</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill purple" style="width:0%"></div></div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Метафизика</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill purple" style="width:0%"></div></div><div class="skill-synergy">Требует: Интеллект ≥ 5</div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Стратегия</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill purple" style="width:0%"></div></div><div class="skill-synergy">Требует: Наука ≥ 3</div></div>
+        <div class="skill-node" style="border-color:var(--accent-amber);"><div class="skill-node-header"><span class="skill-name" style="color:var(--accent-amber);">⚡</span><span class="skill-level" style="color:var(--accent-amber);">Понимание</span></div><div style="font-size:0.7rem;color:var(--text-dim);">Наука (≥3) + Метафизика (≥3) → +15% к характ. при сложных задачах</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Физическое</div></div>
+      <div class="skill-tree-viz">
+Сила ─── Выносливость ─── Биохакинг
+      </div>
+      <div class="skill-tree">
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Сила</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill green" style="width:0%"></div></div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Выносливость</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill green" style="width:0%"></div></div><div class="skill-synergy">Требует: Сила ≥ 2</div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Биохакинг</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill green" style="width:0%"></div></div><div class="skill-synergy">Требует: Выносливость ≥ 3</div></div>
+        <div class="skill-node" style="border-color:var(--accent-cyan);"><div class="skill-node-header"><span class="skill-name" style="color:var(--accent-cyan);">⚡</span><span class="skill-level" style="color:var(--accent-cyan);">Атлет + Оптимизация</span></div><div style="font-size:0.7rem;color:var(--text-dim);">Сила(≥5)+Вын(≥5)→+20% физ | Биох(≥3)+Наука(≥3)→+10% фарма</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Доминация</div></div>
+      <div class="skill-tree-viz">
+Харизма ─┬── Социальная инженерия
+          └── Лидерство
+      </div>
+      <div class="skill-tree">
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Харизма</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill pink" style="width:0%"></div></div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Социальная инженерия</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill pink" style="width:0%"></div></div><div class="skill-synergy">Требует: Харизма ≥ 3</div></div>
+        <div class="skill-node"><div class="skill-node-header"><span class="skill-name">Лидерство</span><span class="skill-level">Ур. 0 (0/100)</span></div><div class="progress-bar"><div class="progress-fill pink" style="width:0%"></div></div><div class="skill-synergy">Требует: Харизма ≥ 5</div></div>
+        <div class="skill-node" style="border-color:var(--accent-red);"><div class="skill-node-header"><span class="skill-name" style="color:var(--accent-red);">⚡</span><span class="skill-level" style="color:var(--accent-red);">Манипуляция</span></div><div style="font-size:0.7rem;color:var(--text-dim);">Соц. инж. (≥3) + Стратегия (≥3) → двойной эффект соц. действий</div></div>
+      </div>
+    </div>
+    <div class="card full-width">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Пассивные навыки</div></div>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
+        <div class="skill-node" style="border-color:var(--accent-amber); opacity:0.5;">
+          <div class="skill-node-header"><span class="skill-name">Дисциплина</span><span class="skill-level" style="color:var(--accent-amber);">LOCKED</span></div>
+          <div style="font-size:0.7rem;color:var(--text-dim);">7+ streak воздержания → +10% к силе воли</div>
+        </div>
+        <div class="skill-node" style="border-color:var(--accent-purple); opacity:0.5;">
+          <div class="skill-node-header"><span class="skill-name">Осознанность</span><span class="skill-level" style="color:var(--accent-purple);">LOCKED</span></div>
+          <div style="font-size:0.7rem;color:var(--text-dim);">100 ч медитации → +5% XP всех действий</div>
+        </div>
+        <div class="skill-node" style="border-color:var(--accent-green); opacity:0.5;">
+          <div class="skill-node-header"><span class="skill-name">Регенерация</span><span class="skill-level" style="color:var(--accent-green);">LOCKED</span></div>
+          <div style="font-size:0.7rem;color:var(--text-dim);">Биохакинг ≥ 5 → +1 энергии/фаза</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 3: MAP -->
+  <div class="grid grid-2" id="tab-map">
+    <div class="card full-width">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Карта цифрового мира</div></div>
+      <div class="map-container">
+        <svg class="map-svg" viewBox="0 0 800 480" xmlns="http://www.w3.org/2000/svg">
+          <line x1="400" y1="60" x2="200" y2="160" stroke="#2a2a3a" stroke-width="2"/>
+          <line x1="400" y1="60" x2="400" y2="160" stroke="#2a2a3a" stroke-width="2"/>
+          <line x1="400" y1="60" x2="600" y2="160" stroke="#2a2a3a" stroke-width="2"/>
+          <line x1="200" y1="160" x2="100" y2="280" stroke="#2a2a3a" stroke-width="2"/>
+          <line x1="400" y1="160" x2="400" y2="280" stroke="#2a2a3a" stroke-width="2"/>
+          <line x1="600" y1="160" x2="700" y2="280" stroke="#2a2a3a" stroke-width="2"/>
+          <line x1="400" y1="160" x2="250" y2="280" stroke="#2a2a3a" stroke-width="2"/>
+          <line x1="500" y1="280" x2="650" y2="400" stroke="#2a2a3a" stroke-width="2" stroke-dasharray="6,4"/>
+          <line x1="100" y1="280" x2="150" y2="400" stroke="#2a2a3a" stroke-width="2" stroke-dasharray="6,4"/>
+          <rect x="340" y="30" width="120" height="50" rx="8" fill="#16161f" stroke="#00e5ff" stroke-width="1.5" class="zone-node"/>
+          <text x="400" y="55" class="zone-title" fill="#00e5ff" font-family="inherit" font-size="12" font-weight="600" text-anchor="middle">Home Base</text>
+          <text x="400" y="70" font-family="inherit" font-size="9" fill="#6a6a7a" text-anchor="middle">Энергия +2/фаза</text>
+          <rect x="140" y="140" width="120" height="50" rx="8" fill="#16161f" stroke="#ff6e40" stroke-width="1.5" class="zone-node"/>
+          <text x="200" y="165" font-family="inherit" font-size="12" font-weight="600" fill="#ff6e40" text-anchor="middle">Training</text>
+          <text x="200" y="180" font-family="inherit" font-size="9" fill="#6a6a7a" text-anchor="middle">XP x1.5 физ.</text>
+          <rect x="340" y="140" width="120" height="50" rx="8" fill="#16161f" stroke="#b388ff" stroke-width="1.5" class="zone-node"/>
+          <text x="400" y="165" font-family="inherit" font-size="12" font-weight="600" fill="#b388ff" text-anchor="middle">Study Hub</text>
+          <text x="400" y="180" font-family="inherit" font-size="9" fill="#6a6a7a" text-anchor="middle">XP x1.3 интел.</text>
+          <rect x="540" y="140" width="120" height="50" rx="8" fill="#16161f" stroke="#ffd740" stroke-width="1.5" class="zone-node"/>
+          <text x="600" y="165" font-family="inherit" font-size="12" font-weight="600" fill="#ffd740" text-anchor="middle">Market</text>
+          <text x="600" y="180" font-family="inherit" font-size="9" fill="#6a6a7a" text-anchor="middle">Доход x уровень</text>
+          <rect x="40" y="265" width="120" height="50" rx="8" fill="#16161f" stroke="#ff5252" stroke-width="1.5" class="zone-node"/>
+          <text x="100" y="290" font-family="inherit" font-size="12" font-weight="600" fill="#ff5252" text-anchor="middle">Arena</text>
+          <text x="100" y="305" font-family="inherit" font-size="9" fill="#6a6a7a" text-anchor="middle">XP x2.0 соц.</text>
+          <rect x="190" y="265" width="120" height="50" rx="8" fill="#16161f" stroke="#69f0ae" stroke-width="1.5" class="zone-node"/>
+          <text x="250" y="290" font-family="inherit" font-size="12" font-weight="600" fill="#69f0ae" text-anchor="middle">Temple</text>
+          <text x="250" y="305" font-family="inherit" font-size="9" fill="#6a6a7a" text-anchor="middle">+0.5 силы воли</text>
+          <rect x="340" y="265" width="120" height="50" rx="8" fill="#16161f" stroke="#ff4081" stroke-width="1.5" class="zone-node"/>
+          <text x="400" y="290" font-family="inherit" font-size="12" font-weight="600" fill="#ff4081" text-anchor="middle">Relations</text>
+          <text x="400" y="305" font-family="inherit" font-size="9" fill="#6a6a7a" text-anchor="middle">XP x1.5 соц.</text>
+          <rect x="590" y="265" width="120" height="50" rx="8" fill="#16161f" stroke="#69f0ae" stroke-width="1.5" class="zone-node"/>
+          <text x="650" y="290" font-family="inherit" font-size="12" font-weight="600" fill="#69f0ae" text-anchor="middle">Карпати</text>
+          <text x="650" y="305" font-family="inherit" font-size="9" fill="#6a6a7a" text-anchor="middle">Энергия +3</text>
+          <rect x="90" y="390" width="120" height="50" rx="8" fill="#16161f" stroke="#fff" stroke-width="1" stroke-dasharray="4,4" opacity="0.5" class="zone-node"/>
+          <text x="150" y="415" font-family="inherit" font-size="12" font-weight="600" fill="#fff" opacity="0.5" text-anchor="middle">The Void</text>
+          <text x="150" y="430" font-family="inherit" font-size="9" fill="#6a6a7a" opacity="0.5" text-anchor="middle">XP x3.0 (Ур.5+)</text>
+          <text x="780" y="475" font-family="inherit" font-size="8" fill="#6a6a7a" text-anchor="end">Каждая зона — модификаторы энергии/XP</text>
+        </svg>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Информация о зоне</div></div>
+      <div id="zone-info" style="font-size:0.85rem; color:var(--text-dim);">Кликни на зону на карте для деталей.</div>
+      <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
+        <div style="font-size:0.7rem; color:var(--text-dim); margin-bottom:8px;">Маршруты (в мин):</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px; font-size:0.75rem;">
+          <div>Home ↔ Training — 5</div>
+          <div>Home ↔ Study — 5</div>
+          <div>Home ↔ Market — 10</div>
+          <div>Home ↔ Temple — 5</div>
+          <div>Training ↔ Arena — 10</div>
+          <div>Study ↔ Temple — 5</div>
+          <div>Market ↔ Relations — 10</div>
+          <div>→ Карпати — 30</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Game Loop</div></div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+        <div style="background:var(--bg-panel);border-radius:var(--radius);padding:10px;text-align:center;">
+          <div style="font-size:0.6rem;color:var(--accent-cyan);text-transform:uppercase;">Утро</div>
+          <div style="font-size:0.75rem;margin-top:4px;">Планер + Добавки + Молитва</div>
+        </div>
+        <div style="background:var(--bg-panel);border-radius:var(--radius);padding:10px;text-align:center;">
+          <div style="font-size:0.6rem;color:var(--accent-amber);text-transform:uppercase;">День</div>
+          <div style="font-size:0.75rem;margin-top:4px;">Квесты + Работа + Доминация</div>
+        </div>
+        <div style="background:var(--bg-panel);border-radius:var(--radius);padding:10px;text-align:center;">
+          <div style="font-size:0.6rem;color:var(--accent-orange);text-transform:uppercase;">Вечер</div>
+          <div style="font-size:0.75rem;margin-top:4px;">Тренировка + Воздержание</div>
+        </div>
+        <div style="background:var(--bg-panel);border-radius:var(--radius);padding:10px;text-align:center;">
+          <div style="font-size:0.6rem;color:var(--accent-purple);text-transform:uppercase;">Ночь</div>
+          <div style="font-size:0.75rem;margin-top:4px;">Сон 22:00 + Восстановление</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;padding:8px;background:var(--bg-panel);border-radius:var(--radius);font-size:0.7rem;color:var(--text-dim);text-align:center;">
+        XP = N² x 100 | Streak x1.0-5.0 | 9 состояний
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 4: QUESTS -->
+  <div class="grid grid-2" id="tab-quests">
+    <div class="card full-width">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Ежедневные квесты</div><span style="font-size:0.7rem;color:var(--accent-red);">14 обязательный</span></div>
+      <div class="habit-list" id="daily-quest-list"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Воздержание — путь к свободе</div></div>
+      <div id="main-quests-1"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Физическая эволюция</div></div>
+      <div id="main-quests-2"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Империя</div></div>
+      <div id="main-quests-3"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Вызовы</div></div>
+      <div id="challenge-quests"></div>
+    </div>
+  </div>
+
+  <!-- TAB 5: ACHIEVEMENTS -->
+  <div class="grid grid-2" id="tab-achievements">
+    <div class="card full-width">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Достижения <span style="font-weight:400;font-size:0.7rem;color:var(--text-dim);">— 0 / 30+ разблокировано</span></div></div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">
+        <div class="achievement-card locked"><div class="achievement-icon">🏃</div><div class="achievement-name">Первый шаг</div><div class="achievement-reward">+5 XP</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">💪</div><div class="achievement-name">Регулярность</div><div class="achievement-reward">7 тренировок → +1 сила</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">🦾</div><div class="achievement-name">Железный</div><div class="achievement-reward">Первый рекорд → +2 силы</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">🐻</div><div class="achievement-name">Зверь</div><div class="achievement-reward">222 → +3 выносливость</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">🧘</div><div class="achievement-name">Садху</div><div class="achievement-reward">1 ч → +2 силы воли</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">📚</div><div class="achievement-name">Читатель</div><div class="achievement-reward">1 книга → +1 интеллект</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">🗓️</div><div class="achievement-name">Первая неделя</div><div class="achievement-reward">7 дн → +2 силы воли</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">🏅</div><div class="achievement-name">Месяц</div><div class="achievement-reward">30 дн → +5 силы воли</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">🎯</div><div class="achievement-name">Контактёр</div><div class="achievement-reward">5 контактов → +1 харизма</div></div>
+        <div class="achievement-card locked"><div class="achievement-icon">💵</div><div class="achievement-name">Первый доход</div><div class="achievement-reward">100 ед → +1 интеллект</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Скрытые</div></div>
+      <div class="achievement-card locked" style="margin-bottom:8px;"><div class="achievement-icon">❓</div><div class="achievement-name">Сделать то, чего боялся</div><div class="achievement-reward">+5 к силе воли</div></div>
+      <div class="achievement-card locked" style="margin-bottom:8px;"><div class="achievement-icon">❓</div><div class="achievement-name">Помочь без выгоды</div><div class="achievement-reward">+2 к карме</div></div>
+      <div class="achievement-card locked"><div class="achievement-icon">❓</div><div class="achievement-name">24 часа тишины</div><div class="achievement-reward">+3 к осознанности</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Побочные квесты</div></div>
+      <div class="quest-item"><div class="quest-type side">S</div><div class="quest-body"><div class="quest-name">Изучить основы физики</div><div class="quest-desc">10 часов</div></div></div>
+      <div class="quest-item"><div class="quest-type side">S</div><div class="quest-body"><div class="quest-name">Разговорный английский</div><div class="quest-desc">50 часов</div></div></div>
+      <div class="quest-item"><div class="quest-type side">S</div><div class="quest-body"><div class="quest-name">5 новых контактов</div></div></div>
+      <div class="quest-item"><div class="quest-type side">S</div><div class="quest-body"><div class="quest-name">Пассивный доход</div></div></div>
+    </div>
+  </div>
+
+  <!-- TAB 6: HABITS -->
+  <div class="grid grid-2" id="tab-habits">
+    <div class="card full-width">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Трекер привычек</div><span style="font-size:0.7rem;color:var(--text-dim);">3 в день · 14 обязательный</span></div>
+      <div class="habit-list" id="habit-full-list"></div>
+    </div>
+    <div class="card full-width">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Протокол воздержания</div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+        <div>
+          <div style="font-size:0.7rem;color:var(--accent-cyan);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">12 шагов</div>
+          <div id="abstinence-steps"></div>
+        </div>
+        <div>
+          <div style="font-size:0.7rem;color:var(--accent-amber);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Три НЕ</div>
+          <div style="font-size:0.8rem;">
+            <div style="padding:6px 0;border-bottom:1px solid rgba(42,42,58,0.3);">Не дотрагиваться</div>
+            <div style="padding:6px 0;border-bottom:1px solid rgba(42,42,58,0.3);">Не фантазировать</div>
+            <div style="padding:6px 0;">Не смотреть порно</div>
+          </div>
+          <div style="margin-top:12px;">
+            <div style="font-size:0.7rem;color:var(--accent-orange);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">При ломке</div>
+            <div style="font-size:0.75rem;color:var(--text-dim);">
+              1. Дыхание «Я разрешаю вдох»<br>
+              2. Спорт — направить энергию<br>
+              3. Осознанность
+            </div>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:0.7rem;color:var(--accent-red);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">При нарушении</div>
+          <div style="font-size:0.75rem;color:var(--text-dim);">
+            1. Дыхание животом<br>
+            2. «Мне это НЕ интересно»<br>
+            3. Кегель + втягивание живота<br>
+            4. Ганс с огнемётом
+          </div>
+          <div style="margin-top:12px;padding:8px;background:var(--bg-panel);border-radius:var(--radius);font-size:0.7rem;color:var(--text-dim);">
+            7д → +1 воля · 14д → перестройка · 21д → привычка<br>
+            30д → +3 воля · 90д → архитектура · 365д → свобода
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card full-width">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Ежедневная рутина воздержания</div></div>
+      <div id="abstinence-routine" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 20px;"></div>
+    </div>
+  </div>
+
+  <!-- TAB 7: RECORDS -->
+  <div class="grid grid-2" id="tab-records">
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Побитые рекорды</div></div>
+      <div class="record-item"><span class="record-icon">🏃</span><span class="record-text">Пробежал <span class="highlight">18 км</span></span></div>
+      <div class="record-item"><span class="record-icon">🧘</span><span class="record-text">Доска садху <span class="highlight">1 час</span> на ногах</span></div>
+      <div class="record-item"><span class="record-icon">🖐️</span><span class="record-text">Ладони садху <span class="highlight">4 мин</span> + 5 отжиманий</span></div>
+      <div class="record-item"><span class="record-icon">💪</span><span class="record-text"><span class="highlight">222</span> отжимания (20/мин x 10 мин)</span></div>
+      <div class="record-item"><span class="record-icon">🪵</span><span class="record-text"><span class="highlight">54</span> отжимания на садху</span></div>
+      <div class="record-item"><span class="record-icon">🔥</span><span class="record-text"><span class="highlight">120</span> отжиманий за 1 подход</span></div>
+      <div class="record-item"><span class="record-icon">⛓️</span><span class="record-text">Тяга на гвоздях <span class="highlight">100 кг</span></span></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Цели</div></div>
+      <div class="record-item"><span class="record-icon">🎯</span><span class="record-text"><span class="goal">2000</span> подтягиваний / 9 ч</span></div>
+      <div class="record-item"><span class="record-icon">🎯</span><span class="record-text"><span class="goal">1111</span> отжиманий / 49 мин</span></div>
+      <div class="record-item"><span class="record-icon">🎯</span><span class="record-text"><span class="goal">444</span> отжимания без отдыха</span></div>
+      <div class="record-item"><span class="record-icon">🎯</span><span class="record-text">Планка <span class="goal">4 часа</span></span></div>
+      <div class="record-item"><span class="record-icon">🎯</span><span class="record-text">Скакалка <span class="goal">2 часа</span></span></div>
+      <div class="record-item"><span class="record-icon">🎯</span><span class="record-text">Забег <span class="goal">42 км</span></span></div>
+      <div class="record-item"><span class="record-icon">🎯</span><span class="record-text">Забег <span class="goal">101 км</span></span></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Ориентир: Крис Бамстед</div></div>
+      <div style="background:var(--bg-panel);border-radius:var(--radius);padding:12px;margin-bottom:8px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:0.8rem;">
+          <div>Вес на сцене: <span style="color:var(--accent-cyan);">~102-104 кг</span></div>
+          <div>Рост: <span>183 см</span></div>
+          <div>Жим лёжа: <span style="color:var(--accent-cyan);">~180-190 кг</span></div>
+          <div>Становая: <span style="color:var(--accent-cyan);">~300 кг</span></div>
+          <div>Присед: <span style="color:var(--accent-cyan);">~260 кг</span></div>
+        </div>
+      </div>
+      <div style="font-size:0.7rem;color:var(--text-dim);">Классика + химия, но не монстр</div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Смелость и вызовы</div></div>
+      <div class="philosophy-quote" style="margin:0 0 12px;font-size:0.75rem;">
+        «It's only after we've lost everything that we're free to do anything.»
+        <span class="author">— Тайлер Дёрден</span>
+      </div>
+      <div class="quest-item"><div class="quest-type challenge">C</div><div class="quest-body"><div class="quest-name">Сделать то, чего боишься сегодня</div></div></div>
+      <div class="quest-item"><div class="quest-type challenge">C</div><div class="quest-body"><div class="quest-name">Подойти к незнакомцу — сказать что обычно не говоришь</div></div></div>
+      <div class="quest-item"><div class="quest-type challenge">C</div><div class="quest-body"><div class="quest-name">Выйти из зоны комфорта на 30 мин</div></div></div>
+      <div class="quest-item"><div class="quest-type challenge">C</div><div class="quest-body"><div class="quest-name">День без единого слова лжи</div></div></div>
+      <div class="quest-item"><div class="quest-type challenge">C</div><div class="quest-body"><div class="quest-name">Выдержать дискомфорт дольше обычного</div></div></div>
+    </div>
+  </div>
+
+  <!-- TAB 8: SCHEDULE -->
+  <div class="grid grid-2" id="tab-schedule">
+    <div class="card full-width">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Ежедневное расписание</div></div>
+      <div class="timeline" id="timeline-schedule"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Cron-задачи</div></div>
+      <div id="cron-jobs"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-title"><span class="accent">◆</span> Фарма-расписание</div></div>
+      <div class="stat-row"><span class="stat-label">Понедельник</span><span class="stat-value cyan">09:07</span></div>
+      <div class="stat-row"><span class="stat-label">Четверг</span><span class="stat-value cyan">19:07</span></div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+        <div class="stat-label" style="font-size:0.65rem;">Текущий стек:</div>
+        <div style="font-size:0.8rem;margin-top:4px;">
+          <div>Трен + Тест + Оралки/Мастерон</div>
+          <div>Пептиды: GHK-CU, MOTS-C, Ибутаморен</div>
+          <div>Страттера + Модафинил</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="text-align:center;padding:40px 20px 20px;border-top:1px solid var(--border);margin-top:40px;">
+    <div style="font-size:0.65rem;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;">НОВА · Симуляция Владимира Куплевацкого · v0.1.0</div>
+    <div style="font-size:0.6rem;color:var(--text-dim);margin-top:8px;opacity:0.5;">«Тот, кто имеет зачем жить, может выдержать почти любое как»</div>
+  </div>
+</div>
+
+<script>
+(function initParticles() {
+  const canvas = document.getElementById('particles-canvas');
+  const ctx = canvas.getContext('2d');
+  let particles = [], w, h;
+  function resize() { w = canvas.width = window.innerWidth; h = canvas.height = window.innerHeight; }
+  resize(); window.addEventListener('resize', resize);
+  for (let i = 0; i < 80; i++) particles.push({ x: Math.random()*w, y: Math.random()*h, vx: (Math.random()-0.5)*0.3, vy: (Math.random()-0.5)*0.3, r: Math.random()*1.5+0.5, a: Math.random()*0.4+0.1 });
+  function animate() {
+    ctx.clearRect(0,0,w,h);
+    particles.forEach(p => { p.x+=p.vx; p.y+=p.vy; if(p.x<0)p.x=w; if(p.x>w)p.x=0; if(p.y<0)p.y=h; if(p.y>h)p.y=0; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fillStyle=`rgba(0,229,255,${p.a})`; ctx.fill(); });
+    for(let i=0;i<particles.length;i++) for(let j=i+1;j<particles.length;j++) { const dx=particles[i].x-particles[j].x, dy=particles[i].y-particles[j].y, dist=Math.sqrt(dx*dx+dy*dy); if(dist<120) { ctx.beginPath(); ctx.moveTo(particles[i].x,particles[i].y); ctx.lineTo(particles[j].x,particles[j].y); ctx.strokeStyle=`rgba(0,229,255,${0.06*(1-dist/120)})`; ctx.lineWidth=0.5; ctx.stroke(); } }
+    requestAnimationFrame(animate);
+  }
+  animate();
+})();
+
+// Navigation
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.grid[id^="tab-"]').forEach(t=>t.classList.remove('active'));
+    const tab = document.getElementById('tab-'+btn.dataset.tab);
+    if (tab) tab.classList.add('active');
+    window.scrollTo({top:0,behavior:'smooth'});
+  });
+});
+
+// Data
+const dailyQuests = [
+  {num:1,name:'Холодный душ',xp:10,mandatory:false},{num:2,name:'3 литра воды',xp:5,mandatory:false},{num:3,name:'Гвоздестояние (1+)',xp:10,mandatory:false},
+  {num:4,name:'Зал / тренировка',xp:30,mandatory:false},{num:5,name:'Растяжка',xp:15,mandatory:false},{num:6,name:'Граундинг',xp:10,mandatory:false},
+  {num:7,name:'15-минутка',xp:15,mandatory:false},{num:8,name:'Скакалка',xp:20,mandatory:false},{num:9,name:'Отжимания/присед макс',xp:30,mandatory:false},
+  {num:10,name:'Сон 22:00-01:00',xp:20,mandatory:false},{num:11,name:'500+500',xp:50,mandatory:false},{num:12,name:'Рапэ + добавки',xp:10,mandatory:false},
+  {num:13,name:'3ч ходьба + солнце',xp:30,mandatory:false},{num:14,name:'ВОЗДЕРЖАНИЕ',xp:50,mandatory:true},{num:15,name:'АНТИО отчёты',xp:15,mandatory:false},
+  {num:16,name:'Медитация',xp:15,mandatory:false},{num:17,name:'Английский 2ч',xp:40,mandatory:false},{num:18,name:'Дейлики Сон-ДжинВу',xp:20,mandatory:false},
+  {num:19,name:'ЛуксМакс',xp:20,mandatory:false},{num:20,name:'Методика Берга',xp:15,mandatory:false},{num:21,name:'Чек-лист рост',xp:10,mandatory:false},
+  {num:22,name:'Качалка',xp:50,mandatory:false}
+];
+const abstinenceSteps = ['Признал бессилие','Нужна помощь извне','Поручить Высшей Силе','Оценил жизнь','Поделился с Богом','Готов к избавлению','Попросил исправить','Готов загладить вину','Возместил ущерб','Продолжаю самоанализ','Усиливаю контакт','Несу идею другим'];
+const abstinenceRoutine = ['Хобби: спорт/чтение','Молитва: прошу помочь','Признаюсь: я онанист','Поручаю Ему жизнь','Говорю как с Отцом','Прошу убрать изъяны','Готов загладить вину','Возмещаю вред','Постоянный контроль','Усиливаю контакт','Аффирмации','Блокнот утро','Блокнот вечер','Деэротизация','Читаю о вреде','АНТИО','Кегель','Спринт','Осознанность'];
+const timeline = [
+  {time:'07:00',text:'Мотивация — начало дня',type:'motivation'},{time:'08:00',text:'Протокол воздержания',type:'abstinence'},
+  {time:'09:00',text:'Добавки и спортпит',type:'habit'},{time:'09:07 (ПН)',text:'Уколы фармы',type:'pharma'},
+  {time:'12:00',text:'Мотивация — проверка',type:'motivation'},{time:'15:00',text:'Привычки — 3 минимум',type:'habit'},
+  {time:'17:00',text:'Мотивация — дожим',type:'motivation'},{time:'19:07 (ЧТ)',text:'Уколы фармы',type:'pharma'},
+  {time:'21:00',text:'Вечерний разбор',type:'motivation'},{time:'22:00',text:'Тренировка',type:'workout'},{time:'23:00',text:'Мотивация — итог',type:'motivation'}
+];
+const cronJobs = [
+  {name:'pharma-mon-0907',sched:'ПН 09:07',next:'2026-07-13'},{name:'pharma-thu-1907',sched:'ЧТ 19:07',next:'2026-07-09'},
+  {name:'workout-daily-2200',sched:'Ежедн 22:00',next:'2026-07-06'},{name:'supplements-daily-0900',sched:'Ежедн 09:00',next:'2026-07-07'},
+  {name:'habits-daily-1500',sched:'Ежедн 15:00',next:'2026-07-07'},{name:'abstinence-daily-0800',sched:'Ежедн 08:00',next:'2026-07-07'},
+  {name:'motivation-dawn-0700',sched:'Ежедн 07:00',next:'2026-07-07'},{name:'motivation-midday-1200',sched:'Ежедн 12:00',next:'2026-07-07'},
+  {name:'motivation-push-1700',sched:'Ежедн 17:00',next:'2026-07-06'},{name:'motivation-night-2100',sched:'Ежедн 21:00',next:'2026-07-06'},
+  {name:'motivation-whatif-2300',sched:'Ежедн 23:00',next:'2026-07-06'}
+];
+
+// Render
+document.getElementById('daily-quest-list').innerHTML = dailyQuests.map(q => `
+  <div class="habit-item">
+    <button class="habit-check" onclick="this.classList.toggle('checked');this.textContent=this.classList.contains('checked')?'✓':''"></button>
+    <span class="habit-num">${q.num}</span>
+    <span class="habit-name">${q.name}</span>
+    <span class="habit-xp">+${q.xp} XP</span>
+    ${q.mandatory?'<span class="habit-mandatory">ОБЯЗ</span>':''}
+  </div>`).join('');
+
+document.getElementById('habit-full-list').innerHTML = dailyQuests.map(q => `
+  <div class="habit-item">
+    <button class="habit-check" onclick="this.classList.toggle('checked');this.textContent=this.classList.contains('checked')?'✓':''"></button>
+    <span class="habit-num">${q.num}</span>
+    <span class="habit-name">${q.name}</span>
+    <span class="habit-xp">+${q.xp} XP</span>
+    ${q.mandatory?'<span class="habit-mandatory">ОБЯЗ</span>':''}
+  </div>`).join('');
+
+document.getElementById('abstinence-steps').innerHTML = abstinenceSteps.map((s,i) => `
+  <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:0.75rem;">
+    <span style="color:var(--text-dim);width:20px;flex-shrink:0;">${i+1}.</span>
+    <span>${s}</span>
+  </div>`).join('');
+
+document.getElementById('abstinence-routine').innerHTML = abstinenceRoutine.map(s => `
+  <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:0.75rem;">
+    <span style="color:var(--text-dim);">&#x25FB;</span>
+    <span>${s}</span>
+  </div>`).join('');
+
+document.getElementById('timeline-schedule').innerHTML = timeline.map(t => `
+  <div class="timeline-item ${t.type}">
+    <div class="timeline-time">${t.time}</div>
+    <div class="timeline-text">${t.text}</div>
+  </div>`).join('');
+
+document.getElementById('cron-jobs').innerHTML = cronJobs.map(j => `
+  <div class="cron-row">
+    <div><span class="cron-name">${j.name}</span><div class="cron-time">${j.sched}</div></div>
+    <div style="text-align:right;"><span class="badge-on">&#x25CF;</span><div class="cron-next">${j.next}</div></div>
+  </div>`).join('');
+
+const renderMain = (id, arr) => {
+  document.getElementById(id).innerHTML = arr.map(q => `
+    <div class="quest-item">
+      <div class="quest-type main">M</div>
+      <div class="quest-body">
+        <div class="quest-name">${q.n}. ${q.name}</div>
+        <div class="quest-reward">${q.r}</div>
+      </div>
+    </div>`).join('');
+};
+renderMain('main-quests-1', [
+  {n:'1.1',name:'Признание бессилия',r:'+50 XP'},{n:'1.2',name:'Поручить Высшей Силе',r:'+50 XP'},
+  {n:'1.3',name:'7 дней без срыва',r:'+1 воля, +100 XP'},{n:'1.4',name:'30 дней без срыва',r:'+3 воля, +500 XP'},
+  {n:'1.5',name:'90 дней без срыва',r:'+5 воля, +1500 XP'},{n:'1.6',name:'365 дней без срыва',r:'+10 воля, +10000 XP'}
+]);
+renderMain('main-quests-2', [
+  {n:'2.1',name:'Побить первый рекорд',r:'+2 силы, +100 XP'},{n:'2.2',name:'Дойти до Бамстеда',r:'+5 силы, +1000 XP'},
+  {n:'2.3',name:'Феномен выносливости',r:'+10 вын, титул'}
+]);
+renderMain('main-quests-3', [
+  {n:'3.1',name:'Первый доход 100 ед',r:'+1 интеллект'},{n:'3.2',name:'Первый проект',r:'+2 арбитраж'},
+  {n:'3.3',name:'Построение гарема',r:'+3 харизма'}
+]);
+document.getElementById('challenge-quests').innerHTML = ['2000 подтягиваний / 9ч','1111 отжиманий / 49мин','444 отжимания без отдыха','Планка 4 часа','Скакалка 2 часа','Забег 42 км','Забег 101 км'].map(c => `
+  <div class="quest-item"><div class="quest-type challenge">C</div><div class="quest-body"><div class="quest-name">${c}</div></div></div>`).join('');
+
+// Map zone interaction
+document.querySelectorAll('.zone-node').forEach(z => {
+  z.addEventListener('click', function() {
+    const titleElem = this.closest('svg')?.querySelector?.('[x]') || this.querySelector('title');
+    // Try to find the text element next to this rect
+    let label = '';
+    const svg = this.closest('svg');
+    if (svg) {
+      const boxes = svg.querySelectorAll('text');
+      let found = false;
+      boxes.forEach(t => {
+        if (!found) {
+          const tx = parseFloat(t.getAttribute('x'));
+          const ty = parseFloat(t.getAttribute('y'));
+          const rx = parseFloat(this.getAttribute('x')) + parseFloat(this.getAttribute('width'))/2;
+          const ry = parseFloat(this.getAttribute('y'));
+          if (Math.abs(tx - rx) < 30 && ty > ry && ty < ry + 60) {
+            label += (label ? ' / ' : '') + t.textContent;
+            found = true;
+          }
+        }
+      });
+    }
+    document.getElementById('zone-info').innerHTML = `<div style="color:var(--accent-cyan);font-weight:600;font-size:0.9rem;margin-bottom:8px;">${label || 'Зона'}</div><div>Интерактивная зона карты. Модификаторы применяются при входе.</div>`;
+  });
+});
+
+console.log('НОВА Dashboard v0.1.0 loaded.');
+</script>
+</body>
+</html>

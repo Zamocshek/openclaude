@@ -3,8 +3,9 @@
 // Tasks come in two flavors:
 //   - One-shot (recurring: false/undefined) — fire once, then auto-delete.
 //   - Recurring (recurring: true) — fire on schedule, reschedule from now,
-//     persist until explicitly deleted via CronDelete or auto-expire after
-//     a configurable limit (DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs).
+//     persist until explicitly deleted via CronDelete. Operators can still
+//     set DEFAULT_CRON_JITTER_CONFIG.recurringMaxAgeMs to a positive value to
+//     age out non-permanent recurring jobs.
 //
 // File format:
 //   { "tasks": [{ id, cron, prompt, createdAt, recurring?, permanent? }] }
@@ -48,7 +49,8 @@ export type CronTask = {
   /** When true, the task reschedules after firing instead of being deleted. */
   recurring?: boolean
   /**
-   * When true, the task is exempt from recurringMaxAgeMs auto-expiry.
+   * When true, the task is exempt from recurringMaxAgeMs auto-expiry if an
+   * operator enables that limiter.
    * System escape hatch for assistant mode's built-in tasks (catch-up/
    * morning-checkin/dream) — the installer's writeIfMissing() skips existing
    * files so re-install can't recreate them. Not settable via CronCreateTool;
@@ -332,15 +334,10 @@ export type CronJitterConfig = {
   oneShotMinuteMod: number
   /**
    * Recurring tasks auto-expire this many ms after creation (unless marked
-   * `permanent`). Cron is the primary driver of multi-day sessions (p99
-   * uptime 61min → 53h post-#19931), and unbounded recurrence lets Tier-1
-   * heap leaks compound indefinitely. The default (7 days) covers "check
-   * my PRs every hour this week" workflows while capping worst-case
-   * session lifetime. Permanent tasks (assistant mode's catch-up/
-   * morning-checkin/dream) never age out — they can't be recreated if
-   * deleted because install.ts's writeIfMissing() skips existing files.
-   *
-   * `0` = unlimited (tasks never auto-expire).
+   * `permanent`). `0` = unlimited, which is the default for local gateway
+   * deployments where reminders are expected to run until explicitly deleted.
+   * Operators can set a positive value through cron jitter config if they need
+   * a process-lifetime safety cap.
    */
   recurringMaxAgeMs: number
 }
@@ -351,7 +348,7 @@ export const DEFAULT_CRON_JITTER_CONFIG: CronJitterConfig = {
   oneShotMaxMs: 90 * 1000,
   oneShotFloorMs: 0,
   oneShotMinuteMod: 30,
-  recurringMaxAgeMs: 7 * 24 * 60 * 60 * 1000,
+  recurringMaxAgeMs: 0,
 }
 
 /**

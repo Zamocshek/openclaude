@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 
 import { getMaxOutputTokensForModel } from '../services/api/claude.ts'
 import {
@@ -9,8 +9,17 @@ import {
 const originalEnv = {
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
   CLAUDE_CODE_MAX_OUTPUT_TOKENS: process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS,
+  CLAUDE_CODE_MAX_CONTEXT_TOKENS: process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
+  OPENCLAUDE_CONTEXT_WINDOW_TOKENS: process.env.OPENCLAUDE_CONTEXT_WINDOW_TOKENS,
+  OPENCLAUDE_MAX_CONTEXT_TOKENS: process.env.OPENCLAUDE_MAX_CONTEXT_TOKENS,
   OPENAI_MODEL: process.env.OPENAI_MODEL,
 }
+
+beforeEach(() => {
+  delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  delete process.env.OPENCLAUDE_CONTEXT_WINDOW_TOKENS
+  delete process.env.OPENCLAUDE_MAX_CONTEXT_TOKENS
+})
 
 afterEach(() => {
   if (originalEnv.CLAUDE_CODE_USE_OPENAI === undefined) {
@@ -24,11 +33,56 @@ afterEach(() => {
     process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS =
       originalEnv.CLAUDE_CODE_MAX_OUTPUT_TOKENS
   }
+  if (originalEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS === undefined) {
+    delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  } else {
+    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS =
+      originalEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  }
+  if (originalEnv.OPENCLAUDE_CONTEXT_WINDOW_TOKENS === undefined) {
+    delete process.env.OPENCLAUDE_CONTEXT_WINDOW_TOKENS
+  } else {
+    process.env.OPENCLAUDE_CONTEXT_WINDOW_TOKENS =
+      originalEnv.OPENCLAUDE_CONTEXT_WINDOW_TOKENS
+  }
+  if (originalEnv.OPENCLAUDE_MAX_CONTEXT_TOKENS === undefined) {
+    delete process.env.OPENCLAUDE_MAX_CONTEXT_TOKENS
+  } else {
+    process.env.OPENCLAUDE_MAX_CONTEXT_TOKENS =
+      originalEnv.OPENCLAUDE_MAX_CONTEXT_TOKENS
+  }
   if (originalEnv.OPENAI_MODEL === undefined) {
     delete process.env.OPENAI_MODEL
   } else {
     process.env.OPENAI_MODEL = originalEnv.OPENAI_MODEL
   }
+})
+
+test('context override applies without internal user gating', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '64000'
+  delete process.env.OPENCLAUDE_CONTEXT_WINDOW_TOKENS
+  delete process.env.OPENCLAUDE_MAX_CONTEXT_TOKENS
+
+  expect(getContextWindowForModel('gpt-4o')).toBe(64_000)
+})
+
+test('OpenClaude context override accepts human 1m values', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENCLAUDE_CONTEXT_WINDOW_TOKENS = '1m'
+  delete process.env.OPENCLAUDE_MAX_CONTEXT_TOKENS
+  delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+
+  expect(getContextWindowForModel('gpt-4o')).toBe(1_000_000)
+})
+
+test('auto context override falls back to model-specific limits', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENCLAUDE_CONTEXT_WINDOW_TOKENS = 'auto'
+  delete process.env.OPENCLAUDE_MAX_CONTEXT_TOKENS
+  delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
+
+  expect(getContextWindowForModel('gpt-4o')).toBe(128_000)
 })
 
 test('deepseek-chat uses provider-specific context and output caps', () => {
@@ -125,6 +179,34 @@ test('unknown openai-compatible models use the 128k fallback window (not 8k, see
   delete process.env.OPENAI_MODEL
 
   expect(getContextWindowForModel('some-unknown-3p-model')).toBe(128_000)
+  expect(getModelMaxOutputTokens('some-unknown-3p-model')).toEqual({
+    default: 4_096,
+    upperLimit: 4_096,
+  })
+  expect(getMaxOutputTokensForModel('some-unknown-3p-model')).toBe(4_096)
+})
+
+test('unknown openai-compatible models do not write context warnings to stderr', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+  delete process.env.OPENAI_MODEL
+
+  const originalConsoleError = console.error
+  const errors: unknown[][] = []
+  console.error = (...args: unknown[]) => {
+    errors.push(args)
+  }
+  try {
+    expect(getContextWindowForModel('new-provider-model-2026')).toBe(128_000)
+    expect(getModelMaxOutputTokens('new-provider-model-2026')).toEqual({
+      default: 4_096,
+      upperLimit: 4_096,
+    })
+  } finally {
+    console.error = originalConsoleError
+  }
+
+  expect(errors).toEqual([])
 })
 
 test('MiniMax-M2.5 and M2.1 use explicit provider-specific context and output caps', () => {

@@ -71,9 +71,20 @@ const OPENAI_CONTEXT_WINDOWS: Record<string, number> = {
   // limits for the same model name, so we cannot safely hardcode values here.
 
   // OpenAI
+  'codexplan':               1_050_000,
+  'codexspark':                400_000,
+  'gpt-5.5':                  400_000,
   'gpt-5.4':               1_050_000,
   'gpt-5.4-mini':            400_000,
   'gpt-5.4-nano':            400_000,
+  'gpt-5.3-codex':           400_000,
+  'gpt-5.3-codex-spark':     400_000,
+  'gpt-5.2-codex':           400_000,
+  'gpt-5.2':                 264_000,
+  'gpt-5.1-codex':           400_000,
+  'gpt-5.1-codex-max':       400_000,
+  'gpt-5.1-codex-mini':      400_000,
+  'gpt-5.1':                 264_000,
   'gpt-4o':                   128_000,
   'gpt-4o-mini':              128_000,
   'gpt-4.1':                  1_047_576,
@@ -91,7 +102,6 @@ const OPENAI_CONTEXT_WINDOWS: Record<string, number> = {
 
   // Abacus RouteLLM presets (OpenAI-compatible router)
   'route-llm':                128_000,
-  'gpt-5.5':                  400_000,
   'claude-sonnet-4-6':        200_000,
   'claude-opus-4-6':          200_000,
   'claude-opus-4-7':          200_000,
@@ -100,6 +110,13 @@ const OPENAI_CONTEXT_WINDOWS: Record<string, number> = {
   // DeepSeek (V3: 128k context per official docs)
   'deepseek-chat':            128_000,
   'deepseek-reasoner':        128_000,
+  'deepseek-v4-flash':        128_000,
+  'deepseek-v4-pro':          128_000,
+
+  // LM Studio LAN models used by Telegram shortcuts.
+  // LM Studio currently runs these local Gemma 4 12B GGUF models with 8k n_ctx.
+  'gemma-4-12b-obliterated':    8_192,
+  'huihui-gemma-4-12b-coder-fable5-composer2.5-v1-abliterated': 8_192,
 
   // Groq (fast inference)
   'llama-3.3-70b-versatile':  128_000,
@@ -270,9 +287,20 @@ const OPENAI_MAX_OUTPUT_TOKENS: Record<string, number> = {
   // NOTE: bare Claude model names omitted — see context windows comment above.
 
   // OpenAI
+  'codexplan':                128_000,
+  'codexspark':                32_768,
+  'gpt-5.5':                  128_000,
   'gpt-5.4':                 128_000,
   'gpt-5.4-mini':            128_000,
   'gpt-5.4-nano':            128_000,
+  'gpt-5.3-codex':            32_768,
+  'gpt-5.3-codex-spark':      32_768,
+  'gpt-5.2-codex':            32_768,
+  'gpt-5.2':                  32_768,
+  'gpt-5.1-codex':            32_768,
+  'gpt-5.1-codex-max':        32_768,
+  'gpt-5.1-codex-mini':       32_768,
+  'gpt-5.1':                  32_768,
   'gpt-4o':                   16_384,
   'gpt-4o-mini':              16_384,
   'gpt-4.1':                  32_768,
@@ -290,7 +318,6 @@ const OPENAI_MAX_OUTPUT_TOKENS: Record<string, number> = {
 
   // Abacus RouteLLM presets
   'route-llm':                 32_768,
-  'gpt-5.5':                  128_000,
   'claude-sonnet-4-6':         32_000,
   'claude-opus-4-6':           32_000,
   'claude-opus-4-7':           32_000,
@@ -299,6 +326,12 @@ const OPENAI_MAX_OUTPUT_TOKENS: Record<string, number> = {
   // DeepSeek
   'deepseek-chat':              8_192,
   'deepseek-reasoner':         32_768,
+  'deepseek-v4-flash':          8_192,
+  'deepseek-v4-pro':           32_768,
+
+  // LM Studio LAN models used by Telegram shortcuts.
+  'gemma-4-12b-obliterated':    4_096,
+  'huihui-gemma-4-12b-coder-fable5-composer2.5-v1-abliterated': 4_096,
 
   // Groq
   'llama-3.3-70b-versatile':  32_768,
@@ -378,10 +411,34 @@ const OPENAI_MAX_OUTPUT_TOKENS: Record<string, number> = {
   '01-ai/yi-large': 8_192,
 }
 
+type ModelFamilyLimits = {
+  pattern: RegExp
+  contextWindow: number
+  maxOutputTokens: number
+}
+
+const OPENAI_COMPATIBLE_MODEL_FAMILY_LIMITS: ModelFamilyLimits[] = [
+  // Bare Codex/GPT-5 model ids and future suffixes exposed through Codex auth.
+  { pattern: /^(?:gpt-5(?:$|[.-].*)|codexplan|codexspark)$/u, contextWindow: 400_000, maxOutputTokens: 32_768 },
+  // DeepSeek-compatible endpoints often introduce new aliases before docs/code are updated.
+  { pattern: /^deepseek(?:$|[-_/].*)/u, contextWindow: 128_000, maxOutputTokens: 8_192 },
+  // Conservative local Gemma fallback. Exact larger provider-hosted Gemma ids are listed above.
+  { pattern: /^(?:[a-z0-9_.-]+\/)?(?:huihui-)?gemma(?:$|[-_:].*)/u, contextWindow: 8_192, maxOutputTokens: 4_096 },
+]
+
 function getProviderNamespaceModel(rawModel: string | undefined): string | undefined {
   const model = rawModel?.trim().split('?', 1)[0]
   if (model === 'github:copilot') return model
   return undefined
+}
+
+function getBaseModel(model: string): string {
+  return (model.trim().split('?', 1)[0] || model).toLowerCase()
+}
+
+function lookupModelFamilyLimits(model: string): ModelFamilyLimits | undefined {
+  const baseModel = getBaseModel(model)
+  return OPENAI_COMPATIBLE_MODEL_FAMILY_LIMITS.find(item => item.pattern.test(baseModel))
 }
 
 function lookupByModel<T>(table: Record<string, T>, model: string): T | undefined {
@@ -422,6 +479,7 @@ function lookupByKey<T>(table: Record<string, T>, model: string): T | undefined 
  */
 export function getOpenAIContextWindow(model: string): number | undefined {
   return lookupByModel(OPENAI_CONTEXT_WINDOWS, model)
+    ?? lookupModelFamilyLimits(model)?.contextWindow
 }
 
 /**
@@ -430,4 +488,5 @@ export function getOpenAIContextWindow(model: string): number | undefined {
  */
 export function getOpenAIMaxOutputTokens(model: string): number | undefined {
   return lookupByModel(OPENAI_MAX_OUTPUT_TOKENS, model)
+    ?? lookupModelFamilyLimits(model)?.maxOutputTokens
 }

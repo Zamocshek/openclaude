@@ -10,10 +10,13 @@ export type CronSchedule =
   | { kind: 'interval'; minutes: number; display: string }
   | { kind: 'cron'; expr: string; display: string }
 
+export type CronJobMode = 'agent' | 'message'
+
 export type CronJob = {
   id: string
   name: string
   prompt: string
+  mode?: CronJobMode
   schedule: CronSchedule
   scheduleDisplay: string
   timezone?: string
@@ -148,6 +151,7 @@ export async function createCronJob(
     id: randomUUID().replace(/-/g, '').slice(0, 12),
     name: String(input.name || prompt.slice(0, 50) || 'cron job').trim(),
     prompt,
+    mode: normalizeCronJobMode(input.mode ?? input.kind ?? input.direct),
     schedule,
     scheduleDisplay: schedule.display,
     timezone: String(input.timezone || '').trim() || undefined,
@@ -191,10 +195,15 @@ export async function updateCronJob(
 
   const current = jobs[index]!
   const next: CronJob = { ...current }
+  let shouldRecomputeNextRun = false
   if (typeof updates.name === 'string') next.name = updates.name.trim()
   if (typeof updates.prompt === 'string') next.prompt = updates.prompt
+  if (updates.mode !== undefined || updates.kind !== undefined || updates.direct !== undefined) {
+    next.mode = normalizeCronJobMode(updates.mode ?? updates.kind ?? updates.direct)
+  }
   if (typeof updates.timezone === 'string') {
     next.timezone = updates.timezone.trim() || undefined
+    shouldRecomputeNextRun = true
   }
   if (updates.enabled !== undefined) next.enabled = Boolean(updates.enabled)
   if (updates.deliver === 'local' || updates.deliver === 'telegram' || updates.deliver === 'origin') {
@@ -203,7 +212,7 @@ export async function updateCronJob(
   if (typeof updates.schedule === 'string' || typeof updates.cron === 'string') {
     next.schedule = await parseSchedule(String(updates.schedule || updates.cron))
     next.scheduleDisplay = next.schedule.display
-    next.nextRunAt = computeNextRun(next.schedule, next.lastRunAt, next.timezone)
+    shouldRecomputeNextRun = true
   }
   if (updates.repeat !== undefined) {
     const repeatValue = Number(updates.repeat)
@@ -211,6 +220,10 @@ export async function updateCronJob(
       times: Number.isFinite(repeatValue) && repeatValue > 0 ? repeatValue : undefined,
       completed: next.repeat?.completed ?? 0,
     }
+  }
+
+  if (shouldRecomputeNextRun && next.enabled && next.state !== 'completed') {
+    next.nextRunAt = computeNextRun(next.schedule, next.lastRunAt, next.timezone)
   }
 
   if (!next.enabled && next.state !== 'completed') {
@@ -281,6 +294,19 @@ function normalizeOrigin(value: unknown): CronJob['origin'] | undefined {
   const chatId = String(record.chatId || record.chat_id || '').trim()
   if (!platform || !chatId) return undefined
   return { platform, chatId }
+}
+
+function normalizeCronJobMode(value: unknown): CronJobMode | undefined {
+  if (value === true) return 'message'
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return undefined
+  if (['message', 'text', 'static', 'direct', 'reminder'].includes(normalized)) {
+    return 'message'
+  }
+  if (['agent', 'model', 'llm', 'dynamic'].includes(normalized)) {
+    return 'agent'
+  }
+  return undefined
 }
 
 export function computeNextRun(
@@ -499,18 +525,23 @@ async function runCronJob(
   config: AgentGatewayConfig,
   deliver?: CronDelivery,
 ): Promise<void> {
-  const prompt = [
-    '[SYSTEM: You are running as a scheduled OpenClaude cron job. Your final response is saved locally. If you have nothing new or noteworthy to report, respond with exactly "[SILENT]" (optionally followed by a brief internal note). This suppresses delivery to Telegram while still saving output locally. Only use [SILENT] when there are genuinely no changes worth reporting.]',
-    '',
-    'Note: The agent cannot see Telegram delivery metadata and therefore cannot respond to it.',
-    '',
-    job.prompt,
-  ].join('\n')
+  const mode = job.mode ?? 'agent'
+  const prompt = mode === 'message'
+    ? job.prompt
+    : [
+        '[SYSTEM: You are running as a scheduled OpenClaude cron job. Your final response is saved locally. If you have nothing new or noteworthy to report, respond with exactly "[SILENT]" (optionally followed by a brief internal note). This suppresses delivery to Telegram while still saving output locally. Only use [SILENT] when there are genuinely no changes worth reporting.]',
+        '',
+        'Note: The agent cannot see Telegram delivery metadata and therefore cannot respond to it.',
+        '',
+        job.prompt,
+      ].join('\n')
 
-  const result = await runOpenClaudeAgent({
-    prompt,
-    config,
-  })
+  const result = mode === 'message'
+    ? { exitCode: 0, text: job.prompt, stderr: '' }
+    : await runOpenClaudeAgent({
+        prompt,
+        config,
+      })
   const success = result.exitCode === 0
   const finalText = success ? result.text : result.stderr || 'Agent run failed'
   const output = [
@@ -519,6 +550,7 @@ async function runCronJob(
     `**Job ID:** ${job.id}`,
     `**Run Time:** ${new Date().toISOString()}`,
     `**Schedule:** ${job.scheduleDisplay}`,
+    `**Mode:** ${mode}`,
     ...(job.timezone ? [`**Timezone:** ${job.timezone}`] : []),
     '',
     '## Prompt',
@@ -531,6 +563,7 @@ async function runCronJob(
     '',
   ].join('\n')
   const outputFile = await saveJobOutput(job, output)
+  let deliveryError: string | undefined
 
   if (
     success &&
@@ -538,12 +571,16 @@ async function runCronJob(
     !isSilentCronResponse(finalText) &&
     (job.deliver === 'telegram' || job.deliver === 'origin')
   ) {
-    await deliver?.(finalText, job)
+    try {
+      await deliver?.(finalText, job)
+    } catch (error) {
+      deliveryError = error instanceof Error ? error.message : String(error)
+    }
   }
 
   await markJobRun(job.id, {
-    success,
-    error: success ? undefined : finalText,
+    success: success && !deliveryError,
+    error: !success ? finalText : deliveryError,
     outputFile,
   })
 }
@@ -565,7 +602,14 @@ export function startCronScheduler(
     try {
       const due = await getDueJobs()
       for (const job of due) {
-        await runCronJob(job, config, deliver)
+        try {
+          await runCronJob(job, config, deliver)
+        } catch (error) {
+          await markJobRun(job.id, {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
       }
       return due.length
     } finally {

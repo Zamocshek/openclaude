@@ -33,15 +33,34 @@ import {
   removeCuratedMemoryEntry,
   rejectPendingCuratedMemoryAction,
   replaceCuratedMemoryEntry,
+  loadChatLogTranscript,
   searchChatLog,
   searchCuratedMemory,
   CuratedMemoryError,
   type CuratedMemoryKind,
 } from './memory.js'
+import {
+  getConversationContextMaxChars,
+  getConversationContextTurnLimit,
+  trimConversationMessagesWithinCharBudget,
+} from './conversationContext.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
   onAgentResponse?: (text: string, source: 'api' | 'run') => void | Promise<void>
+}
+
+type ApiAgentQueueItem = {
+  id: string
+  label: string
+  enqueuedAt: number
+  startedAt?: number
+}
+
+type QueuedApiAgentExecution<T> = {
+  id: string
+  position: number
+  promise: Promise<T>
 }
 
 class AgentApiHttpError extends Error {
@@ -115,6 +134,11 @@ export class AgentApiServer {
   private readonly memorySnapshots = new Map<string, string>()
   private readonly memorySnapshotOrder: string[] = []
   private readonly runs = new Map<string, SseQueue>()
+  private apiAgentQueueTail: Promise<unknown> = Promise.resolve()
+  private apiAgentQueueActive: ApiAgentQueueItem | undefined
+  private apiAgentQueueWaiting = 0
+  private apiAgentQueueSequence = 0
+  private apiAgentQueueCompleted = 0
 
   constructor(options: AgentApiServerOptions) {
     this.config = options.config
@@ -274,6 +298,11 @@ export class AgentApiServer {
       return
     }
 
+    if (url.pathname === '/api/queue/status' && method === 'GET') {
+      this.writeJson(response, 200, this.getApiQueueStatusPayload())
+      return
+    }
+
     if (url.pathname === '/api/memory' || url.pathname === '/api/memory/') {
       await this.handleMemoryCollection(method, url, request, response)
       return
@@ -388,82 +417,77 @@ export class AgentApiServer {
       this.writeJson(response, 400, openAiError('No user message found'))
       return
     }
-    const requestedSessionId = getHeaderValue(request, 'x-hermes-session-id')
+    const requestedSessionId = resolveApiChatSessionId(request, body)
     const sessionId = requestedSessionId || randomUUID()
-    const sessionHistory = requestedSessionId
-      ? this.chatSessions.get(sessionId)
-      : undefined
-    const history = sessionHistory || chatInput.history
-    const promptMessages = buildChatPromptMessages({
-      systemMessages: chatInput.systemMessages,
-      history,
-      currentUser: chatInput.currentUser,
-    })
-    const { prompt: baseRunnerPrompt } = buildPromptFromChatMessages(promptMessages)
-    const runnerPrompt = await this.buildRunnerPromptWithMemory(
-      baseRunnerPrompt,
-      `chat:${sessionId}`,
-    )
-    if (!runnerPrompt.trim()) {
-      this.writeJson(response, 400, openAiError('No user message found'))
-      return
-    }
-
     const id = `chatcmpl-${randomUUID().replace(/-/g, '')}`
     const model = String(body.model || this.config.api.modelName)
+    const contextModel = resolveApiContextModel(model, this.config)
 
     if (body.stream) {
-      recordApiChatLog({
-        direction: 'in',
-        source: 'api',
-        endpoint: 'chat.completions',
-        sessionId,
-        text: chatInput.currentUser.content,
-      })
-      await this.streamChatCompletion(response, id, model, runnerPrompt, {
+      await this.streamChatCompletion(response, id, model, {
         includeUsage: shouldIncludeStreamUsage(body),
         sessionId,
-        history,
+        requestedSessionId,
+        contextModel,
+        chatInput,
         currentUser: chatInput.currentUser,
       })
       return
     }
 
-    recordApiChatLog({
-      direction: 'in',
-      source: 'api',
-      endpoint: 'chat.completions',
-      sessionId,
-      text: chatInput.currentUser.content,
-    })
-    const result = await runOpenClaudeAgent({
-      prompt: runnerPrompt,
-      config: this.config,
-    })
+    const queued = this.enqueueAgentExecution(
+      `chat.completions:${sessionId}`,
+      async () => {
+        const { runnerPrompt, history } = await this.buildChatCompletionRun({
+          sessionId,
+          requestedSessionId,
+          contextModel,
+          chatInput,
+        })
+        recordApiChatLog({
+          direction: 'in',
+          source: 'api',
+          endpoint: 'chat.completions',
+          sessionId,
+          text: chatInput.currentUser.content,
+        })
+        const result = await runOpenClaudeAgent({
+          prompt: runnerPrompt,
+          config: this.config,
+        })
+        if (result.exitCode !== 0) {
+          return { result, responseText: '', history }
+        }
+
+        const responseText = await this.prepareAgentResponseText(result.text, 'api')
+        recordApiChatLog({
+          direction: 'out',
+          source: 'api',
+          endpoint: 'chat.completions',
+          sessionId,
+          text: responseText,
+        })
+
+        this.storeChatSession(sessionId, [
+          ...history,
+          chatInput.currentUser,
+          { role: 'assistant', content: responseText },
+        ])
+        await this.onAgentResponse?.(responseText, 'api')
+        return { result, responseText, history }
+      },
+    )
+    const { result, responseText } = await queued.promise
     if (result.exitCode !== 0) {
       this.writeJson(
         response,
         500,
         openAiError(formatAgentFailureForApi(result), 'server_error'),
+        this.apiQueueHeaders(queued),
       )
       return
     }
 
-    const responseText = await this.prepareAgentResponseText(result.text, 'api')
-    recordApiChatLog({
-      direction: 'out',
-      source: 'api',
-      endpoint: 'chat.completions',
-      sessionId,
-      text: responseText,
-    })
-
-    this.storeChatSession(sessionId, [
-      ...history,
-      chatInput.currentUser,
-      { role: 'assistant', content: responseText },
-    ])
-    await this.onAgentResponse?.(responseText, 'api')
     this.writeJson(
       response,
       200,
@@ -481,19 +505,67 @@ export class AgentApiServer {
         ],
         usage: emptyUsage(),
       },
-      { 'X-Hermes-Session-Id': sessionId },
+      {
+        'X-Hermes-Session-Id': sessionId,
+        ...this.apiQueueHeaders(queued),
+      },
     )
+  }
+
+  private async buildChatCompletionRun(input: {
+    sessionId: string
+    requestedSessionId: string
+    contextModel: string
+    chatInput: {
+      systemMessages: string[]
+      history: ConversationMessage[]
+      currentUser: ConversationMessage
+    }
+  }): Promise<{
+    runnerPrompt: string
+    history: ConversationMessage[]
+  }> {
+    const sessionHistory = input.requestedSessionId
+      ? this.chatSessions.get(input.sessionId)
+      : undefined
+    const history = sessionHistory || input.chatInput.history
+    const conversationHistory = history.length > 0 || !input.requestedSessionId
+      ? history
+      : await loadApiSessionTranscript(input.sessionId)
+    const promptHistory = trimConversationMessagesWithinCharBudget(
+      conversationHistory,
+      getApiConversationMaxChars(input.contextModel),
+    )
+    const promptMessages = buildChatPromptMessages({
+      systemMessages: input.chatInput.systemMessages,
+      history: promptHistory,
+      currentUser: input.chatInput.currentUser,
+    })
+    const { prompt: baseRunnerPrompt } = buildPromptFromChatMessages(promptMessages)
+    const runnerPrompt = await this.buildRunnerPromptWithMemory(
+      baseRunnerPrompt,
+      `chat:${input.sessionId}`,
+    )
+    if (!runnerPrompt.trim()) {
+      throw new AgentApiHttpError(400, 'No user message found')
+    }
+    return { runnerPrompt, history: conversationHistory }
   }
 
   private async streamChatCompletion(
     response: ServerResponse,
     id: string,
     model: string,
-    prompt: string,
     options: {
       includeUsage?: boolean
       sessionId?: string
-      history?: ConversationMessage[]
+      requestedSessionId?: string
+      contextModel?: string
+      chatInput?: {
+        systemMessages: string[]
+        history: ConversationMessage[]
+        currentUser: ConversationMessage
+      }
       currentUser?: ConversationMessage
     } = {},
   ): Promise<void> {
@@ -502,10 +574,58 @@ export class AgentApiServer {
     response.on('close', () => {
       if (!completed) abortController.abort()
     })
+    const queued = this.enqueueAgentExecution(
+      `chat.completions.stream:${options.sessionId || id}`,
+      async () => {
+        if (abortController.signal.aborted) {
+          return {
+            text: '',
+            stderr: 'Client disconnected before queued API run started.',
+            exitCode: 1,
+            timedOut: false,
+            durationMs: 0,
+          } satisfies AgentRunResult
+        }
+
+        const run = options.sessionId && options.chatInput
+          ? await this.buildChatCompletionRun({
+              sessionId: options.sessionId,
+              requestedSessionId: options.requestedSessionId || '',
+              contextModel: options.contextModel || model,
+              chatInput: options.chatInput,
+            })
+          : { runnerPrompt: '', history: [] }
+        if (options.sessionId && options.currentUser) {
+          recordApiChatLog({
+            direction: 'in',
+            source: 'api',
+            endpoint: 'chat.completions',
+            sessionId: options.sessionId,
+            text: options.currentUser.content,
+          })
+        }
+        return runOpenClaudeAgent({
+          prompt: run.runnerPrompt,
+          config: this.config,
+          signal: abortController.signal,
+          onStdout: chunk => {
+            fullText += chunk
+            if (response.destroyed) return
+            const visibleChunk = memoryDirectiveStripper.push(
+              frontmatterStripper.push(chunk),
+            )
+            if (visibleChunk) {
+              writeChunk({ content: visibleChunk })
+            }
+          },
+        }).then(result => ({ ...result, history: run.history }))
+      },
+    )
 
     response.writeHead(200, {
       ...this.corsHeaders(),
       ...(options.sessionId ? { 'X-Hermes-Session-Id': options.sessionId } : {}),
+      ...this.apiQueueHeaders(queued),
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
@@ -524,25 +644,14 @@ export class AgentApiServer {
       )
     }
 
+    if (queued.position > 1) {
+      response.write(`: queued position ${queued.position}\n\n`)
+    }
     writeChunk({ role: 'assistant' })
     let fullText = ''
     const frontmatterStripper = createFrontmatterStreamStripper()
     const memoryDirectiveStripper = createMemoryDirectiveStreamStripper()
-    const result = await runOpenClaudeAgent({
-      prompt,
-      config: this.config,
-      signal: abortController.signal,
-      onStdout: chunk => {
-        fullText += chunk
-        if (response.destroyed) return
-        const visibleChunk = memoryDirectiveStripper.push(
-          frontmatterStripper.push(chunk),
-        )
-        if (visibleChunk) {
-          writeChunk({ content: visibleChunk })
-        }
-      },
-    })
+    const result = await queued.promise
 
     if (response.destroyed) return
 
@@ -582,8 +691,11 @@ export class AgentApiServer {
         text: normalizedFullText,
       })
       if (options.sessionId && options.currentUser) {
+        const history = 'history' in result && Array.isArray(result.history)
+          ? result.history
+          : []
         this.storeChatSession(options.sessionId, [
-          ...(options.history || []),
+          ...history,
           options.currentUser,
           { role: 'assistant', content: normalizedFullText },
         ])
@@ -613,100 +725,121 @@ export class AgentApiServer {
       typeof body.instructions === 'string' ? body.instructions.trim() : ''
     const conversation =
       typeof body.conversation === 'string' ? body.conversation.trim() : ''
-    const previousResponseId = this.resolvePreviousResponseId(body)
-    const previous = previousResponseId
-      ? this.responseStore.get(previousResponseId)
-      : undefined
-    if (previousResponseId && !previous) {
-      this.writeJson(response, 404, openAiError('Previous response not found'))
-      return
-    }
-
     const explicitHistory = normalizeConversationHistory(body.conversation_history)
-    const previousHistory = explicitHistory.length
-      ? explicitHistory
-      : normalizeConversationHistory(previous?.conversation_history)
-    const baseRunnerPrompt = buildResponsesRunnerPrompt({
-      instructions,
-      previousHistory,
-      prompt,
-    })
-    const memorySnapshotKey = conversation
-      ? `responses:${conversation}`
-      : typeof previous?.memory_snapshot_key === 'string'
-        ? previous.memory_snapshot_key
-        : `responses:${randomUUID()}`
-    const runnerPrompt = await this.buildRunnerPromptWithMemory(
-      baseRunnerPrompt,
-      memorySnapshotKey,
+    const model = String(body.model || this.config.api.modelName)
+    const contextModel = resolveApiContextModel(model, this.config)
+    const queued = this.enqueueAgentExecution(
+      `responses:${conversation || 'default'}`,
+      async () => {
+        const previousResponseId = this.resolvePreviousResponseId(body)
+        const previous = previousResponseId
+          ? this.responseStore.get(previousResponseId)
+          : undefined
+        if (previousResponseId && !previous) {
+          throw new AgentApiHttpError(404, 'Previous response not found')
+        }
+
+        const previousHistory = explicitHistory.length
+          ? explicitHistory
+          : previous
+            ? normalizeConversationHistory(previous.conversation_history)
+            : conversation
+              ? await loadApiConversationTranscript(conversation)
+              : []
+        const promptHistory = trimConversationMessagesWithinCharBudget(
+          previousHistory,
+          getApiConversationMaxChars(contextModel),
+        )
+        const baseRunnerPrompt = buildResponsesRunnerPrompt({
+          instructions,
+          previousHistory: promptHistory,
+          prompt,
+        })
+        const memorySnapshotKey = conversation
+          ? `responses:${conversation}`
+          : typeof previous?.memory_snapshot_key === 'string'
+            ? previous.memory_snapshot_key
+            : `responses:${randomUUID()}`
+        const runnerPrompt = await this.buildRunnerPromptWithMemory(
+          baseRunnerPrompt,
+          memorySnapshotKey,
+        )
+        recordApiChatLog({
+          direction: 'in',
+          source: 'api',
+          endpoint: 'responses',
+          conversation,
+          previousResponseId: previousResponseId || undefined,
+          text: prompt,
+        })
+        const result = await runOpenClaudeAgent({
+          prompt: runnerPrompt,
+          config: this.config,
+        })
+        if (result.exitCode !== 0) {
+          return { result, data: undefined }
+        }
+
+        const responseText = await this.prepareAgentResponseText(result.text, 'api')
+        recordApiChatLog({
+          direction: 'out',
+          source: 'api',
+          endpoint: 'responses',
+          conversation,
+          text: responseText,
+        })
+
+        const responseId = `resp_${randomUUID().replace(/-/g, '')}`
+        const data = {
+          id: responseId,
+          object: 'response',
+          status: 'completed',
+          created_at: Math.floor(Date.now() / 1000),
+          model,
+          previous_response_id: previousResponseId || null,
+          ...(conversation ? { conversation } : {}),
+          output: [
+            {
+              id: `msg_${randomUUID().replace(/-/g, '')}`,
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: responseText }],
+            },
+          ],
+          usage: emptyUsage(),
+        }
+
+        if (body.store !== false) {
+          this.storeResponse(responseId, {
+            response: data,
+            conversation_history: [
+              ...previousHistory,
+              { role: 'user', content: prompt },
+              { role: 'assistant', content: responseText },
+            ],
+            instructions,
+            previous_response_id: previousResponseId || undefined,
+            conversation: conversation || undefined,
+            memory_snapshot_key: memorySnapshotKey,
+          })
+        }
+
+        await this.onAgentResponse?.(responseText, 'api')
+        return { result, data }
+      },
     )
-    recordApiChatLog({
-      direction: 'in',
-      source: 'api',
-      endpoint: 'responses',
-      conversation,
-      previousResponseId: previousResponseId || undefined,
-      text: prompt,
-    })
-    const result = await runOpenClaudeAgent({
-      prompt: runnerPrompt,
-      config: this.config,
-    })
-    if (result.exitCode !== 0) {
+    const { result, data } = await queued.promise
+    if (result.exitCode !== 0 || !data) {
       this.writeJson(
         response,
         500,
         openAiError(formatAgentFailureForApi(result), 'server_error'),
+        this.apiQueueHeaders(queued),
       )
       return
     }
 
-    const responseText = await this.prepareAgentResponseText(result.text, 'api')
-    recordApiChatLog({
-      direction: 'out',
-      source: 'api',
-      endpoint: 'responses',
-      conversation,
-      text: responseText,
-    })
-
-    const responseId = `resp_${randomUUID().replace(/-/g, '')}`
-    const data = {
-      id: responseId,
-      object: 'response',
-      status: 'completed',
-      created_at: Math.floor(Date.now() / 1000),
-      model: String(body.model || this.config.api.modelName),
-      previous_response_id: previousResponseId || null,
-      ...(conversation ? { conversation } : {}),
-      output: [
-        {
-          id: `msg_${randomUUID().replace(/-/g, '')}`,
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'output_text', text: responseText }],
-        },
-      ],
-      usage: emptyUsage(),
-    }
-
-    if (body.store !== false) {
-      this.storeResponse(responseId, {
-        response: data,
-        conversation_history: [
-          ...previousHistory,
-          { role: 'user', content: prompt },
-          { role: 'assistant', content: responseText },
-        ],
-        instructions,
-        previous_response_id: previousResponseId || undefined,
-        conversation: conversation || undefined,
-        memory_snapshot_key: memorySnapshotKey,
-      })
-    }
-
-    await this.onAgentResponse?.(responseText, 'api')
-    this.writeJson(response, 200, data)
+    this.writeJson(response, 200, data, this.apiQueueHeaders(queued))
   }
 
   private async handleRuns(
@@ -738,18 +871,39 @@ export class AgentApiServer {
       text: prompt,
     })
 
-    void runOpenClaudeAgent({
-      prompt: runnerPrompt,
-      config: this.config,
-      onStdout: chunk => {
-        queue.push({
-          event: 'message.delta',
-          run_id: runId,
-          timestamp: Date.now() / 1000,
-          delta: chunk,
-        })
-      },
-    }).then(
+    const queued = this.enqueueAgentExecution(`runs:${runId}`, async () => {
+      queue.push({
+        event: 'run.started',
+        run_id: runId,
+        timestamp: Date.now() / 1000,
+        queue_id: queued.id,
+        queue_position: queued.position,
+      })
+      return runOpenClaudeAgent({
+        prompt: runnerPrompt,
+        config: this.config,
+        onStdout: chunk => {
+          queue.push({
+            event: 'message.delta',
+            run_id: runId,
+            timestamp: Date.now() / 1000,
+            delta: chunk,
+          })
+        },
+      })
+    })
+    if (queued.position > 1) {
+      queue.push({
+        event: 'run.queued',
+        run_id: runId,
+        timestamp: Date.now() / 1000,
+        queue_id: queued.id,
+        queue_position: queued.position,
+        waiting: Math.max(0, queued.position - 1),
+      })
+    }
+
+    void queued.promise.then(
       async result => {
         if (result.exitCode === 0) {
           const responseText = await this.prepareAgentResponseText(result.text, 'run')
@@ -789,7 +943,12 @@ export class AgentApiServer {
       },
     )
 
-    this.writeJson(response, 202, { run_id: runId, status: 'started' })
+    this.writeJson(response, 202, {
+      run_id: runId,
+      status: queued.position > 1 ? 'queued' : 'started',
+      queue_id: queued.id,
+      queue_position: queued.position,
+    })
   }
 
   private async handleRunEvents(
@@ -1146,6 +1305,72 @@ export class AgentApiServer {
     }
   }
 
+  private enqueueAgentExecution<T>(
+    label: string,
+    run: () => Promise<T>,
+  ): QueuedApiAgentExecution<T> {
+    const item: ApiAgentQueueItem = {
+      id: `apiq_${++this.apiAgentQueueSequence}`,
+      label,
+      enqueuedAt: Date.now(),
+    }
+    const position = getApiAgentQueuePosition({
+      active: Boolean(this.apiAgentQueueActive),
+      waiting: this.apiAgentQueueWaiting,
+    })
+    this.apiAgentQueueWaiting += 1
+
+    const previous = this.apiAgentQueueTail.catch(() => {})
+    const promise = previous.then(async () => {
+      this.apiAgentQueueWaiting = Math.max(0, this.apiAgentQueueWaiting - 1)
+      item.startedAt = Date.now()
+      this.apiAgentQueueActive = item
+      try {
+        return await run()
+      } finally {
+        if (this.apiAgentQueueActive?.id === item.id) {
+          this.apiAgentQueueActive = undefined
+        }
+        this.apiAgentQueueCompleted += 1
+      }
+    })
+
+    this.apiAgentQueueTail = promise.then(
+      () => undefined,
+      () => undefined,
+    )
+
+    return { id: item.id, position, promise }
+  }
+
+  private apiQueueHeaders(
+    execution: Pick<QueuedApiAgentExecution<unknown>, 'id' | 'position'>,
+  ): Record<string, string> {
+    return {
+      'X-Hermes-Queue-Id': execution.id,
+      'X-Hermes-Queue-Position': String(execution.position),
+    }
+  }
+
+  private getApiQueueStatusPayload(): Record<string, unknown> {
+    const active = this.apiAgentQueueActive
+      ? {
+          id: this.apiAgentQueueActive.id,
+          label: this.apiAgentQueueActive.label,
+          enqueued_at: this.apiAgentQueueActive.enqueuedAt / 1000,
+          started_at: (this.apiAgentQueueActive.startedAt || Date.now()) / 1000,
+          running_ms: this.apiAgentQueueActive.startedAt
+            ? Date.now() - this.apiAgentQueueActive.startedAt
+            : 0,
+        }
+      : null
+    return {
+      active,
+      waiting: this.apiAgentQueueWaiting,
+      completed: this.apiAgentQueueCompleted,
+    }
+  }
+
   private checkAuth(
     request: IncomingMessage,
     response: ServerResponse,
@@ -1210,9 +1435,16 @@ export class AgentApiServer {
       'Access-Control-Allow-Origin': allowOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id',
-      'Access-Control-Expose-Headers': 'X-Hermes-Session-Id',
+      'Access-Control-Expose-Headers': 'X-Hermes-Session-Id, X-Hermes-Queue-Id, X-Hermes-Queue-Position',
     }
   }
+}
+
+export function getApiAgentQueuePosition(input: {
+  active: boolean
+  waiting: number
+}): number {
+  return (input.active ? 1 : 0) + Math.max(0, input.waiting) + 1
 }
 
 function openAiError(
@@ -1332,6 +1564,124 @@ function shouldIncludeStreamUsage(body: Record<string, any>): boolean {
       typeof streamOptions === 'object' &&
       streamOptions.include_usage,
   )
+}
+
+function resolveApiChatSessionId(
+  request: IncomingMessage,
+  body: Record<string, any>,
+): string {
+  const headerSession = [
+    'x-hermes-session-id',
+    'x-openwebui-chat-id',
+    'x-openwebui-conversation-id',
+    'x-openwebui-session-id',
+    'x-conversation-id',
+    'x-chat-id',
+    'x-session-id',
+    'x-thread-id',
+  ]
+    .map(name => getHeaderValue(request, name))
+    .find(Boolean)
+  if (headerSession) return headerSession
+
+  const bodySession = firstStringValue(
+    body,
+    ['conversation_id', 'conversation', 'chat_id', 'session_id', 'thread_id'],
+  )
+  if (bodySession) return bodySession
+
+  const metadata = body.metadata && typeof body.metadata === 'object'
+    ? body.metadata as Record<string, unknown>
+    : undefined
+  const metadataSession = metadata
+    ? firstStringValue(metadata, ['chat_id', 'conversation_id', 'session_id', 'thread_id'])
+    : ''
+  if (metadataSession) return metadataSession
+
+  const user = typeof body.user === 'string' ? body.user.trim() : ''
+  return user ? `user:${user}` : ''
+}
+
+function resolveApiContextModel(
+  requestedModel: string,
+  config: AgentGatewayConfig,
+): string {
+  const model = requestedModel.trim()
+  if (model && model !== config.api.modelName) return model
+  return (
+    process.env.OPENCLAUDE_MODEL ||
+    process.env.OPENAI_MODEL ||
+    process.env.ANTHROPIC_MODEL ||
+    process.env.GEMINI_MODEL ||
+    process.env.MISTRAL_MODEL ||
+    model ||
+    config.api.modelName
+  )
+}
+
+function firstStringValue(
+  record: Record<string, unknown>,
+  keys: string[],
+): string {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return ''
+}
+
+async function loadApiSessionTranscript(
+  sessionId: string,
+): Promise<ConversationMessage[]> {
+  const entries = await loadChatLogTranscript({
+    sessionId,
+    limit: getApiConversationTurnLimit(),
+  })
+  return chatLogEntriesToConversationMessages(entries)
+}
+
+async function loadApiConversationTranscript(
+  conversation: string,
+): Promise<ConversationMessage[]> {
+  const entries = await loadChatLogTranscript({
+    conversation,
+    limit: getApiConversationTurnLimit(),
+  })
+  return chatLogEntriesToConversationMessages(entries)
+}
+
+function chatLogEntriesToConversationMessages(
+  entries: Record<string, unknown>[],
+): ConversationMessage[] {
+  return entries
+    .map(entry => {
+      const direction = String(entry.direction || '')
+      const text = String(entry.text || '').trim()
+      if (!text || (direction !== 'in' && direction !== 'out')) return undefined
+      return {
+        role: direction === 'out' ? 'assistant' : 'user',
+        content: text,
+      }
+    })
+    .filter((message): message is ConversationMessage => Boolean(message))
+}
+
+function getApiConversationTurnLimit(): number {
+  return getConversationContextTurnLimit([
+    'OPENCLAUDE_API_CONTEXT_TURNS',
+    'OPENCLAUDE_API_RECENT_HISTORY_LIMIT',
+  ])
+}
+
+function getApiConversationMaxChars(model?: string): number {
+  return getConversationContextMaxChars({
+    model,
+    envNames: [
+      'OPENCLAUDE_API_CONTEXT_CHARS',
+      'OPENCLAUDE_API_RECENT_HISTORY_MAX_CHARS',
+    ],
+  })
 }
 
 function buildChatCompletionInput(messages: unknown[]): {

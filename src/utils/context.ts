@@ -3,6 +3,7 @@
 import { CONTEXT_1M_BETA_HEADER } from '../constants/betas.js'
 import { getGlobalConfig } from './config.js'
 import { isEnvTruthy } from './envUtils.js'
+import { parseHumanLimit } from './limitParsing.js'
 import { getCanonicalName } from './model/model.js'
 import { getModelCapability } from './model/modelCapabilities.js'
 import { getOpenAIContextWindow, getOpenAIMaxOutputTokens } from './model/openaiContextWindows.js'
@@ -14,6 +15,8 @@ export const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
 // the effective context (this minus output token reservation) stays positive,
 // otherwise auto-compact fires on every message (issue #635).
 export const OPENAI_FALLBACK_CONTEXT_WINDOW = 128_000
+export const OPENAI_FALLBACK_MAX_OUTPUT_TOKENS = 4_096
+export const OPENCLAUDE_UNLIMITED_CONTEXT_WINDOW = 1_000_000
 
 // Maximum output tokens for compact operations
 export const COMPACT_MAX_OUTPUT_TOKENS = 20_000
@@ -59,18 +62,13 @@ export function getContextWindowForModel(
   model: string,
   betas?: string[],
 ): number {
-  // Allow override via environment variable (internal-only)
+  // Allow override via environment variable.
   // This takes precedence over all other context window resolution, including 1M detection,
   // so users can cap the effective context window for local decisions (auto-compact, etc.)
   // while still using a 1M-capable endpoint.
-  if (
-    process.env.USER_TYPE === 'ant' &&
-    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
-  ) {
-    const override = parseInt(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, 10)
-    if (!isNaN(override) && override > 0) {
-      return override
-    }
+  const contextOverride = getContextWindowOverride()
+  if (contextOverride !== undefined) {
+    return contextOverride
   }
 
   // [1m] suffix вЂ” explicit client-side opt-in, respected over all detection
@@ -78,10 +76,13 @@ export function getContextWindowForModel(
     return 1_000_000
   }
 
-  // OpenAI-compatible provider вЂ” use known context windows for the model.
-  // Unknown models get a conservative 128k default. This was previously 8k,
-  // but that caused auto-compact to fire on every turn because the effective
-  // context (8k minus output reservation) became negative (issue #635).
+  // OpenAI-compatible provider: use known context windows for the model.
+  // Unknown models get a quiet conservative 128k default. This was previously
+  // 8k, but that caused auto-compact to fire on every turn because the
+  // effective context (8k minus output reservation) became negative (issue
+  // #635). Do not warn here: local/proxy providers frequently expose new
+  // model ids before this table is updated, and stderr warnings can be
+  // mistaken for run failures by gateway diagnostics.
   const isOpenAIProvider =
     isEnvTruthy(process.env.CLAUDE_CODE_USE_OPENAI) ||
     isEnvTruthy(process.env.CLAUDE_CODE_USE_GEMINI) ||
@@ -92,10 +93,6 @@ export function getContextWindowForModel(
     if (openaiWindow !== undefined) {
       return openaiWindow
     }
-    console.error(
-      `[context] Warning: model "${model}" not in context window table вЂ” using conservative 128k default. ` +
-      'Add it to src/utils/model/openaiContextWindows.ts for accurate compaction.',
-    )
     return OPENAI_FALLBACK_CONTEXT_WINDOW
   }
 
@@ -123,6 +120,20 @@ export function getContextWindowForModel(
     }
   }
   return MODEL_CONTEXT_WINDOW_DEFAULT
+}
+
+export function getContextWindowOverride(): number | undefined {
+  for (const key of [
+    'OPENCLAUDE_CONTEXT_WINDOW_TOKENS',
+    'OPENCLAUDE_MAX_CONTEXT_TOKENS',
+    'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+  ]) {
+    const parsed = parseHumanLimit(process.env[key], {
+      unlimitedValue: OPENCLAUDE_UNLIMITED_CONTEXT_WINDOW,
+    })
+    if (parsed !== undefined) return parsed
+  }
+  return undefined
 }
 
 export function getSonnet1mExpTreatmentEnabled(model: string): boolean {
@@ -200,6 +211,10 @@ export function getModelMaxOutputTokens(model: string): {
     const openaiMax = getOpenAIMaxOutputTokens(model)
     if (openaiMax !== undefined) {
       return { default: openaiMax, upperLimit: openaiMax }
+    }
+    return {
+      default: OPENAI_FALLBACK_MAX_OUTPUT_TOKENS,
+      upperLimit: OPENAI_FALLBACK_MAX_OUTPUT_TOKENS,
     }
   }
 

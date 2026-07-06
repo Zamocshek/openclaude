@@ -11,9 +11,11 @@ import {
   parseSchedule,
   pauseCronJob,
   resumeCronJob,
+  runCronJobNow,
   triggerCronJob,
   updateCronJob,
 } from './cron.js'
+import type { AgentGatewayConfig } from './config.js'
 
 let previousStateDir: string | undefined
 let configDir: string | undefined
@@ -124,5 +126,59 @@ describe('agent gateway cron job storage', () => {
     expect(await getCronJob(job.id)).toBeTruthy()
     expect(await deleteCronJob(job.id)).toBe(true)
     expect(await getCronJob(job.id)).toBeUndefined()
+  })
+
+  test('message-mode jobs deliver prompt text without running the agent', async () => {
+    const job = await createCronJob({
+      name: 'static workout reminder',
+      prompt: '22:00 - время ежедневной тренировки. Не пропускай.',
+      schedule: '30m',
+      mode: 'message',
+      deliver: 'telegram',
+      origin: { platform: 'telegram', chatId: '42' },
+    })
+    await triggerCronJob(job.id)
+
+    const delivered: string[] = []
+    const updated = await runCronJobNow(
+      job.id,
+      { cron: { tickIntervalSeconds: 3600 } } as AgentGatewayConfig,
+      async content => {
+        delivered.push(content)
+      },
+    )
+
+    expect(delivered).toEqual([
+      '22:00 - время ежедневной тренировки. Не пропускай.',
+    ])
+    expect(updated?.state).toBe('completed')
+    expect(updated?.lastStatus).toBe('ok')
+    expect(updated?.repeat?.completed).toBe(1)
+  })
+
+  test('recomputes the next run when only timezone changes', async () => {
+    const job = await createCronJob({
+      name: 'local morning',
+      prompt: 'Say good morning',
+      cron: '0 9 * * *',
+      timezone: 'Europe/Amsterdam',
+      deliver: 'telegram',
+      origin: { platform: 'telegram', chatId: '42' },
+    })
+
+    const updated = await updateCronJob(job.id, {
+      timezone: 'Europe/Simferopol',
+    })
+
+    expect(updated?.nextRunAt).toBeTruthy()
+    expect(updated?.nextRunAt).not.toBe(job.nextRunAt)
+    expect(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Europe/Simferopol',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).format(new Date(updated!.nextRunAt!)),
+    ).toBe('09:00')
   })
 })
