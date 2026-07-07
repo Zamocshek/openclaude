@@ -214,6 +214,26 @@ describe('agent gateway curated memory', () => {
     })
   })
 
+  test('applies malformed model memory directives and strips them from visible text', async () => {
+    await withGatewayMemoryState(async () => {
+      const processed = await applyCuratedMemoryDirectives(
+        [
+          'Visible answer.',
+          '[MEMORY action="add" target="memory" content="Malformed XML suffix memory survives." tags="smoke,xml"</parameter>',
+          '[MEMORY]',
+          'Still visible.',
+        ].join('\n'),
+        { source: 'test-agent' },
+      )
+
+      expect(processed.text).toBe('Visible answer.\nStill visible.')
+      expect(processed.directives).toHaveLength(1)
+      expect(processed.results[0]?.pending).toBe(false)
+      expect((await searchCuratedMemory({ query: 'XML suffix memory' }))[0]?.tags)
+        .toEqual(['smoke', 'xml'])
+    })
+  })
+
   test('rejects secret-like memory content', async () => {
     await withGatewayMemoryState(async () => {
       await expect(

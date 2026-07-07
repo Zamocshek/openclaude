@@ -1877,7 +1877,7 @@ function createMemoryDirectiveStreamStripper(): LineStreamStripper {
         continue
       }
       const parsed = extractCuratedMemoryDirectives(line)
-      if (parsed.directives.length > 0 && !parsed.text) continue
+      if (!parsed.text && (parsed.directives.length > 0 || /^\s*\[MEMORY(?:\s|\]|$)/iu.test(line))) continue
       output += line + separator
     }
 

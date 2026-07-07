@@ -910,6 +910,9 @@ export function extractCuratedMemoryDirectives(text: string): {
       directives.push(directive)
       continue
     }
+    if (isCuratedMemoryControlLine(line)) {
+      continue
+    }
     cleanedLines.push(line)
   }
 
@@ -1295,9 +1298,9 @@ function getCuratedMemoryUsedChars(
 function parseCuratedMemoryDirectiveLine(
   line: string,
 ): CuratedMemoryDirective | undefined {
-  const match = line.match(/^\s*\[MEMORY(?:\s+([^\]]+))?\]\s*$/iu)
-  if (!match) return undefined
-  const attrs = parseControlAttributes(match[1] || '')
+  const rawAttrs = extractCuratedMemoryDirectiveAttributes(line)
+  if (rawAttrs === undefined) return undefined
+  const attrs = parseControlAttributes(rawAttrs)
   const action = normalizeCuratedMemoryAction(attrs.action)
   if (!action) return undefined
   const kind = normalizeCuratedMemoryKind(attrs.target ?? attrs.kind)
@@ -1313,6 +1316,27 @@ function parseCuratedMemoryDirectiveLine(
     ...directive,
     raw: line,
   }
+}
+
+function isCuratedMemoryControlLine(line: string): boolean {
+  return extractCuratedMemoryDirectiveAttributes(line) !== undefined
+}
+
+function extractCuratedMemoryDirectiveAttributes(line: string): string | undefined {
+  const trimmed = line.trim()
+  if (!/^\[MEMORY(?:\s|\]|$)/iu.test(trimmed)) return undefined
+  let raw = trimmed.slice('[MEMORY'.length).trim()
+
+  // Some models leak tool-call XML suffixes or omit the closing bracket:
+  // [MEMORY action="add" ... tags="x"</parameter>
+  for (let index = 0; index < 3; index++) {
+    raw = raw
+      .replace(/<\/parameter>\s*$/iu, '')
+      .replace(/\]\s*$/u, '')
+      .trim()
+  }
+
+  return raw
 }
 
 function parseControlAttributes(raw: string): Record<string, string> {
