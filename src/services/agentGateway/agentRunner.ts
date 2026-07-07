@@ -114,6 +114,10 @@ const IGNORABLE_STDERR_PATTERNS = [
   /^\(Use `node --trace-deprecation .*$/i,
   /^\[web-search\]\s+/i,
 ]
+const IGNORABLE_POST_SUCCESS_STDERR_PATTERNS = [
+  /^API Error:\s*fetch failed\.?$/i,
+  /^TypeError:\s*fetch failed\.?$/i,
+]
 const DEFAULT_FIRST_OUTPUT_PROGRESS_MS = 60_000
 
 export function addAgentRunObserver(observer: AgentRunObserver): () => void {
@@ -536,6 +540,18 @@ export function runOpenClaudeAgent(
         : (exitCode ?? 1)
       if (streamResultError && normalizedExitCode === 0) {
         normalizedExitCode = 1
+      }
+      if (
+        normalizedExitCode !== 0
+        && isIgnorablePostSuccessStderr({
+          text: normalizedText,
+          stderr: normalizedStderr,
+          streamResultText,
+          timedOut,
+          activity,
+        })
+      ) {
+        normalizedExitCode = 0
       }
       const inferredFailure = normalizedExitCode === 0
         ? inferFailedToolCompletion(normalizedText, activity)
@@ -1032,6 +1048,32 @@ function shouldIgnoreShutdownAssertion(
 
   return stderrLines.every(line =>
     IGNORABLE_STDERR_PATTERNS.some(pattern => pattern.test(line)),
+  )
+}
+
+export function isIgnorablePostSuccessStderr(input: {
+  text: string
+  stderr: string
+  streamResultText?: string
+  timedOut: boolean
+  activity?: string[]
+}): boolean {
+  if (input.timedOut) return false
+  if (!input.text.trim()) return false
+  if (!input.streamResultText?.trim()) return false
+  if (!input.activity?.some(event => /^result:\s*success$/i.test(event))) {
+    return false
+  }
+
+  const stderrLines = input.stderr
+    .split(/\r?\n/u)
+    .map(line => line.trim())
+    .filter(Boolean)
+  if (stderrLines.length === 0) return false
+
+  return stderrLines.every(line =>
+    IGNORABLE_STDERR_PATTERNS.some(pattern => pattern.test(line))
+    || IGNORABLE_POST_SUCCESS_STDERR_PATTERNS.some(pattern => pattern.test(line)),
   )
 }
 

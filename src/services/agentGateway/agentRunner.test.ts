@@ -7,6 +7,7 @@ import {
   buildAgentChildEnv,
   buildPromptFromChatMessages,
   classifyAgentRunFailure,
+  isIgnorablePostSuccessStderr,
   normalizeMessageContent,
   summarizeStreamJsonProgress,
   type StreamProgressContext,
@@ -207,6 +208,32 @@ describe('agent gateway prompt builder', () => {
 
     expect(failure.kind).toBe('tool_error')
     expect(failure.diagnostic).toContain('Recent activity')
+  })
+
+  test('ignores late transient fetch stderr after stream-json success', () => {
+    expect(isIgnorablePostSuccessStderr({
+      text: 'Saved.',
+      streamResultText: 'Saved.',
+      stderr: 'API Error: fetch failed',
+      timedOut: false,
+      activity: ['assistant response', 'result: success'],
+    })).toBe(true)
+
+    expect(isIgnorablePostSuccessStderr({
+      text: '',
+      streamResultText: '',
+      stderr: 'API Error: fetch failed',
+      timedOut: false,
+      activity: ['result: success'],
+    })).toBe(false)
+
+    expect(isIgnorablePostSuccessStderr({
+      text: 'Saved.',
+      streamResultText: 'Saved.',
+      stderr: 'API Error: fetch failed',
+      timedOut: true,
+      activity: ['result: success'],
+    })).toBe(false)
   })
 
   test('does not recurse into gateway-server mode for child agent runs', () => {
