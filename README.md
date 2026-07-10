@@ -59,18 +59,26 @@ Telegram:
 - `/help`, `/commands` - show Telegram help and refresh the command menu
 - `/chatid` - show the current chat ID
 - `/status` - show gateway, worker, cron, budget, and Ouroboros status
-- `/provider`, `/provider models`,
+- `/provider`, `/models`, `/provider models`,
   `/provider set <provider> <model> [base_url] [api_key]` - inspect or switch
-  the provider and model used by the next agent runs
-- `/gpt55`, `/codex`, `/dsflash`, `/dspro`, `/gemma`, `/gemmacoder` - quick
-  switches for Codex GPT-5.5, DeepSeek V4 Flash/Pro, and the LM Studio Gemma
-  profiles
+  the provider and model used by the next agent runs; `/provider` and
+  `/models` include Telegram inline buttons for Codex, DeepSeek, OpenRouter,
+  and LM Studio
+- `/sol`, `/terra`, `/luna`, `/gpt55`, `/codex`, `/dsflash`, `/dspro`,
+  `/gemma`, `/gemmacoder` - quick switches for Codex GPT-5.6 Sol/Terra/Luna,
+  GPT-5.5, DeepSeek V4 Flash/Pro, and the LM Studio Gemma profiles
+- `/reasoning [low|medium|high|xhigh|max|ultra]` - open the Codex reasoning
+  picker or set a supported level directly; the bot reads supported levels
+  from the signed-in Codex model catalog. `max` uses the backend-safe `xhigh`
+  effort, while `ultra` adds automatic Agent-tool delegation for substantial
+  independent subtasks.
 - `/provider set lmstudio-lan gemma-4-12b-obliterated` - switch Telegram
   inference to the LAN LM Studio server at `http://192.168.187.1:1234/v1`
   and enable no-tools runner mode for models whose LM Studio template rejects
   OpenAI tool schemas.
-- `/model <model>`, `/baseurl <url>`, `/apikey <key>` - update the active
-  OpenAI-compatible provider profile
+- `/model [model]`, `/baseurl <url>`, `/apikey <key>` - open model buttons or update the active
+  OpenAI-compatible provider profile. OpenRouter keys are retained separately
+  in `OPENROUTER_API_KEY` so switching away and back does not lose them.
 - `/context`, `/context auto|1m|<tokens>` - inspect or override the effective
   context window for the active model; `unlimited` maps to the 1M client window
 - `/stop`, `/retry` - abort or retry the current Telegram inference task

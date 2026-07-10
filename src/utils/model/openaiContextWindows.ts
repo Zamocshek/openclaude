@@ -71,7 +71,11 @@ const OPENAI_CONTEXT_WINDOWS: Record<string, number> = {
   // limits for the same model name, so we cannot safely hardcode values here.
 
   // OpenAI
-  'codexplan':               1_050_000,
+  'gpt-5.6':                   372_000,
+  'gpt-5.6-sol':               372_000,
+  'gpt-5.6-terra':             372_000,
+  'gpt-5.6-luna':              372_000,
+  'codexplan':                 372_000,
   'codexspark':                400_000,
   'gpt-5.5':                  400_000,
   'gpt-5.4':               1_050_000,

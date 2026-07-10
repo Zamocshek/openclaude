@@ -76,10 +76,15 @@ services:
       OPENAI_MODEL: "${OPENCLAUDE_DOCKER_MODEL:-${OPENAI_MODEL:-}}"
       OPENAI_API_KEY: "${OPENCLAUDE_DOCKER_API_KEY:-${OPENAI_API_KEY:-}}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-${OPENCLAUDE_DEEPSEEK_API_KEY:-}}"
-      CODEX_API_KEY: "${CODEX_API_KEY:-}"
+      # Subscription auth comes from the shared Codex auth.json below. Do not
+      # let a copied short-lived access token override its refreshable token set.
+      CODEX_API_KEY: ""
       CODEX_CREDENTIAL_SOURCE: "${CODEX_CREDENTIAL_SOURCE:-}"
       CHATGPT_ACCOUNT_ID: "${CHATGPT_ACCOUNT_ID:-}"
       CODEX_ACCOUNT_ID: "${CODEX_ACCOUNT_ID:-}"
+      CODEX_HOME: "/run/codex"
+      CODEX_AUTH_JSON_PATH: "/run/codex/auth.json"
+      CODEX_MODELS_CACHE_PATH: "/run/codex/models_cache.json"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"
@@ -151,6 +156,9 @@ services:
       - type: bind
         source: "${OPENCLAUDE_HOST_CONFIG_DIR:-${USERPROFILE}/.openclaude}"
         target: /home/node/.openclaude
+      - type: bind
+        source: "${OPENCLAUDE_HOST_CODEX_DIR:-${USERPROFILE}/.codex}"
+        target: /run/codex
       - ./:/workspace
     extra_hosts:
       - "host.docker.internal:host-gateway"

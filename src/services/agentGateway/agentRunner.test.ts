@@ -49,6 +49,7 @@ describe('agent gateway prompt builder', () => {
     const args = buildAgentArgs(config)
 
     expect(args).toContain('--print')
+    expect(args).not.toContain('--bare')
     expect(args).toContain('--tools')
     expect(args).toContain('Bash,Read,Write')
     expect(args).toContain('--disallowedTools')
@@ -103,6 +104,25 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('openrag_search')
     expect(systemPrompt).toContain('openrag_ingest_file')
     expect(systemPrompt).toContain('openrag_chat')
+  })
+
+  test('turns Codex Ultra into xhigh reasoning with automatic delegation guidance', () => {
+    const previousOpenClaudeModel = process.env.OPENCLAUDE_MODEL
+    process.env.OPENCLAUDE_MODEL = 'gpt-5.6-sol?reasoning=ultra'
+    try {
+      const args = buildAgentArgs(getDefaultAgentGatewayConfig())
+      const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+      expect(systemPrompt).toContain('Codex Ultra mode is active.')
+      expect(systemPrompt).toContain('automatically delegate')
+      expect(systemPrompt).toContain('Agent tool')
+    } finally {
+      if (previousOpenClaudeModel === undefined) {
+        delete process.env.OPENCLAUDE_MODEL
+      } else {
+        process.env.OPENCLAUDE_MODEL = previousOpenClaudeModel
+      }
+    }
   })
 
   test('summarizes stream-json tool and thinking events without exposing reasoning text', () => {

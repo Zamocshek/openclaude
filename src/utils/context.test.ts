@@ -151,6 +151,17 @@ test('gpt-5.4 family uses provider-specific context and output caps', () => {
   })
 })
 
+test('gpt-5.6 Codex models use their advertised context window', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
+  delete process.env.OPENAI_MODEL
+
+  expect(getContextWindowForModel('gpt-5.6-sol')).toBe(372_000)
+  expect(getContextWindowForModel('gpt-5.6-terra?reasoning=xhigh')).toBe(372_000)
+  expect(getContextWindowForModel('gpt-5.6-luna')).toBe(372_000)
+  expect(getContextWindowForModel('codexplan')).toBe(372_000)
+})
+
 test('gpt-5.4 family keeps large max output overrides within provider limits', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '200000'

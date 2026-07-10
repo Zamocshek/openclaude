@@ -4,6 +4,9 @@
  * codexCredentials is first loaded.
  */
 import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 function makeJwt(payload: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' }))
@@ -15,6 +18,8 @@ function makeJwt(payload: Record<string, unknown>): string {
 describe('codexCredentials', () => {
   const originalSimple = process.env.CLAUDE_CODE_SIMPLE
   const originalCodeKey = process.env.CODEX_API_KEY
+  const originalAuthJsonPath = process.env.CODEX_AUTH_JSON_PATH
+  const originalCodexHome = process.env.CODEX_HOME
   const originalFetch = globalThis.fetch
 
   afterEach(() => {
@@ -32,6 +37,75 @@ describe('codexCredentials', () => {
     } else {
       process.env.CODEX_API_KEY = originalCodeKey
     }
+
+    if (originalAuthJsonPath === undefined) {
+      delete process.env.CODEX_AUTH_JSON_PATH
+    } else {
+      process.env.CODEX_AUTH_JSON_PATH = originalAuthJsonPath
+    }
+    if (originalCodexHome === undefined) {
+      delete process.env.CODEX_HOME
+    } else {
+      process.env.CODEX_HOME = originalCodexHome
+    }
+  })
+
+  test('refreshCodexAccessTokenIfNeeded refreshes an explicitly configured Codex auth.json', async () => {
+    delete process.env.CLAUDE_CODE_SIMPLE
+    process.env.CODEX_API_KEY = 'stale-env-token'
+    delete process.env.CODEX_HOME
+
+    const directory = await mkdtemp(join(tmpdir(), 'openclaude-codex-auth-refresh-'))
+    const authPath = join(directory, 'auth.json')
+    process.env.CODEX_AUTH_JSON_PATH = authPath
+    const expiredToken = makeJwt({
+      exp: Math.floor((Date.now() - 60_000) / 1000),
+      chatgpt_account_id: 'acct_old',
+    })
+    const freshToken = makeJwt({
+      exp: Math.floor((Date.now() + 3_600_000) / 1000),
+      chatgpt_account_id: 'acct_new',
+    })
+    await writeFile(authPath, JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: {
+        access_token: expiredToken,
+        refresh_token: 'refresh-old',
+        account_id: 'acct_old',
+      },
+      preserved: true,
+    }))
+
+    mock.module('./secureStorage/index.js', () => ({
+      getSecureStorage: () => ({
+        read: () => null,
+        readAsync: async () => null,
+        update: () => ({ success: false }),
+        delete: () => true,
+      }),
+    }))
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({
+      access_token: freshToken,
+      refresh_token: 'refresh-new',
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch
+
+    // @ts-expect-error cache-busting query string for Bun module mocks
+    const { refreshCodexAccessTokenIfNeeded } = await import(
+      './codexCredentials.js?refresh-auth-json'
+    )
+    const result = await refreshCodexAccessTokenIfNeeded()
+    const saved = JSON.parse(await readFile(authPath, 'utf8'))
+
+    expect(result.refreshed).toBe(true)
+    expect(result.credentials?.accessToken).toBe(freshToken)
+    expect(saved.auth_mode).toBe('chatgpt')
+    expect(saved.preserved).toBe(true)
+    expect(saved.tokens.access_token).toBe(freshToken)
+    expect(saved.tokens.refresh_token).toBe('refresh-new')
+    expect(saved.tokens.account_id).toBe('acct_new')
   })
 
   test('save returns failure in bare mode', async () => {

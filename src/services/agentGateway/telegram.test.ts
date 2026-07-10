@@ -9,7 +9,10 @@ import {
   buildTelegramBotCommands,
   buildTelegramDownloadFileName,
   buildTelegramHelpText,
+  buildTelegramModelKeyboard,
+  buildTelegramProviderKeyboard,
   buildTelegramProviderProfileUpdate,
+  buildTelegramReasoningKeyboard,
   buildTelegramReplyContext,
   extractTelegramCronDirectives,
   extractTelegramSendDirectives,
@@ -25,6 +28,7 @@ import {
   getTelegramAgentRecoveryAttemptLimit,
   getTelegramQueuePosition,
   getTelegramProviderShortcut,
+  isTelegramActorAllowed,
   hasTelegramMemoryIntent,
   applyTelegramResearchMode,
   repairLikelyMojibakeText,
@@ -52,6 +56,18 @@ async function withTempGatewayState<T>(fn: (stateDir: string) => Promise<T>): Pr
 }
 
 describe('agent gateway Telegram bridge helpers', () => {
+  test('applies the same allowlist to messages and inline button callbacks', () => {
+    const policy = {
+      allowedChatIds: ['100'],
+      allowedUserIds: ['5117562403'],
+      homeChatId: '200',
+    }
+
+    expect(isTelegramActorAllowed({ ...policy, chatId: '100', userId: '7' })).toBe(true)
+    expect(isTelegramActorAllowed({ ...policy, chatId: '300', userId: '5117562403' })).toBe(true)
+    expect(isTelegramActorAllowed({ ...policy, chatId: '300', userId: '7' })).toBe(false)
+  })
+
   test('builds Telegram help text and bot command menu from one command list', () => {
     const help = buildTelegramHelpText()
     const commands = buildTelegramBotCommands()
@@ -724,13 +740,62 @@ describe('agent gateway Telegram bridge helpers', () => {
     })
     expect(getTelegramProviderShortcut('/gpt55')).toMatchObject({
       provider: 'codex',
-      model: 'gpt-5.5',
+      model: 'gpt-5.5?reasoning=medium',
+    })
+    expect(getTelegramProviderShortcut('/sol')).toMatchObject({
+      provider: 'codex',
+      model: 'gpt-5.6-sol?reasoning=medium',
+    })
+    expect(getTelegramProviderShortcut('/terra')).toMatchObject({
+      provider: 'codex',
+      model: 'gpt-5.6-terra?reasoning=medium',
     })
     expect(getTelegramProviderShortcut('/gemmacoder')).toMatchObject({
       provider: 'lmstudio-lan',
       model: 'huihui-gemma-4-12b-coder-fable5-composer2.5-v1-abliterated',
     })
     expect(getTelegramProviderShortcut('/unknown')).toBeUndefined()
+  })
+
+  test('builds Telegram provider, model, and reasoning button menus', () => {
+    const providers = buildTelegramProviderKeyboard('codex').flat()
+    expect(providers).toContainEqual({
+      text: '* Codex / ChatGPT',
+      callback_data: 'provider:codex',
+    })
+
+    const models = buildTelegramModelKeyboard(
+      'codex',
+      Array.from({ length: 10 }, (_, index) => ({
+        id: `model-${index}`,
+        label: `Model ${index}`,
+        reasoningLevels: [],
+      })),
+      'model-0',
+      1,
+    ).flat()
+    expect(models).toContainEqual({ text: 'Model 8', callback_data: 'model:codex:8' })
+    expect(models).toContainEqual({ text: '<', callback_data: 'models:codex:0' })
+
+    const reasoning = buildTelegramReasoningKeyboard(
+      {
+        id: 'gpt-5.6-sol',
+        label: 'GPT-5.6 Sol',
+        defaultReasoning: 'medium',
+        reasoningLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      },
+      {
+        provider: 'codex',
+        model: 'gpt-5.6-sol?reasoning=xhigh',
+        baseUrl: '',
+        apiKey: '',
+      },
+    ).flat()
+    expect(reasoning).toContainEqual({
+      text: '* Extra high',
+      callback_data: 'reason:xhigh',
+    })
+    expect(reasoning).toContainEqual({ text: 'Ultra', callback_data: 'reason:ultra' })
   })
 
   test('switches Telegram provider profile to LM Studio LAN defaults', () => {

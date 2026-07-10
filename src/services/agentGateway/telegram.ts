@@ -23,9 +23,22 @@ import { toggleEvolution, getEvolutionStatus, runEvolutionCycle, loadEvolutionSt
 import type { EvolutionResult, EvolutionType } from './evolution.js'
 import { buildSelfEditPrompt, selfRead, selfWrite, selfEdit, selfList, gitStatus, gitDiff, gitCommit, gitLog, gitReset } from './selfEdit.js'
 import { runInfiniteTask } from './infiniteTask.js'
-import { isCodexAlias } from '../api/providerConfig.js'
+import {
+  getReasoningEffortForModel,
+  isCodexAlias,
+  type ReasoningEffort,
+} from '../api/providerConfig.js'
 import { getContextWindowForModel } from '../../utils/context.js'
 import { parseHumanLimit } from '../../utils/limitParsing.js'
+import {
+  getBuiltInProviderModels,
+  getDefaultProviderModel,
+  getModelBaseId,
+  loadProviderModelCatalog,
+  withModelReasoning,
+  type ProviderModelCatalog,
+  type ProviderModelOption,
+} from './providerModels.js'
 import {
   getConversationContextMaxChars,
   getConversationContextTurnLimit,
@@ -77,7 +90,7 @@ type TelegramUpdate = {
 
 type TelegramCallbackQuery = {
   id: string
-  from?: { id: string; username?: string; first_name?: string }
+  from?: { id: number | string; username?: string; first_name?: string }
   message?: TelegramMessage
   chat_instance?: string
   data?: string
@@ -88,6 +101,13 @@ type TelegramApiResponse<T> = {
   result?: T
   description?: string
 }
+
+type TelegramInlineKeyboardButton = {
+  text: string
+  callback_data: string
+}
+
+type TelegramInlineKeyboard = TelegramInlineKeyboardButton[][]
 
 type ActiveTelegramTask = {
   controller: AbortController
@@ -192,16 +212,34 @@ export type TelegramProviderShortcut = {
 
 const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
   {
+    command: '/sol',
+    provider: 'codex',
+    model: 'gpt-5.6-sol?reasoning=medium',
+    description: 'switch to Codex GPT-5.6 Sol',
+  },
+  {
+    command: '/terra',
+    provider: 'codex',
+    model: 'gpt-5.6-terra?reasoning=medium',
+    description: 'switch to Codex GPT-5.6 Terra',
+  },
+  {
+    command: '/luna',
+    provider: 'codex',
+    model: 'gpt-5.6-luna?reasoning=medium',
+    description: 'switch to Codex GPT-5.6 Luna',
+  },
+  {
     command: '/gpt55',
     provider: 'codex',
-    model: 'gpt-5.5',
+    model: 'gpt-5.5?reasoning=medium',
     description: 'switch to Codex GPT-5.5',
   },
   {
     command: '/codex',
     provider: 'codex',
-    model: 'gpt-5.5',
-    description: 'switch to Codex GPT-5.5',
+    model: 'gpt-5.6-sol?reasoning=medium',
+    description: 'switch to Codex GPT-5.6 Sol',
   },
   {
     command: '/dsflash',
@@ -252,7 +290,9 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       })),
       { syntax: '/context', description: 'show effective context window for the active model', botDescription: 'Show or set context window' },
       { syntax: '/context auto|1m|<tokens>', description: 'set manual context window or return to model auto mode' },
-      { syntax: '/model <model>', description: 'switch model for next agent runs' },
+      { syntax: '/models', description: 'open the model picker for the active provider', botDescription: 'Choose provider model' },
+      { syntax: '/model [model]', description: 'open the model picker or set a model manually' },
+      { syntax: '/reasoning [level]', description: 'choose low, medium, high, xhigh, max, or ultra', botDescription: 'Choose reasoning level' },
       { syntax: '/baseurl <url>', description: 'switch OpenAI-compatible base URL' },
       { syntax: '/apikey <key>', description: 'store provider API key for next runs' },
     ],
@@ -437,6 +477,37 @@ export class TelegramAgentBridge {
         disable_web_page_preview: true,
       })
     }
+  }
+
+  private async sendMessageWithKeyboard(
+    chatId: string,
+    text: string,
+    inlineKeyboard: TelegramInlineKeyboard,
+  ): Promise<void> {
+    await this.callTelegram('sendMessage', {
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    })
+  }
+
+  private async editCallbackMessage(
+    query: TelegramCallbackQuery,
+    text: string,
+    inlineKeyboard: TelegramInlineKeyboard,
+  ): Promise<void> {
+    const chatId = query.message?.chat?.id
+    const messageId = query.message?.message_id
+    if (chatId === undefined || !messageId) return
+
+    await this.callTelegram('editMessageText', {
+      chat_id: String(chatId),
+      message_id: messageId,
+      text,
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    })
   }
 
   private async sendChatAction(
@@ -820,8 +891,16 @@ export class TelegramAgentBridge {
       return
     }
 
-    if (text === '/provider' || text.startsWith('/provider ')) {
-      await this.handleProviderCommand(chatId, text.slice('/provider'.length).trim())
+    if (commandText === '/provider' || commandText.startsWith('/provider ')) {
+      await this.handleProviderCommand(
+        chatId,
+        commandText.slice('/provider'.length).trim(),
+      )
+      return
+    }
+
+    if (commandText === '/models') {
+      await this.handleModelCommand(chatId, '')
       return
     }
 
@@ -847,8 +926,19 @@ export class TelegramAgentBridge {
       return
     }
 
-    if (text.startsWith('/model ')) {
-      await this.handleModelCommand(chatId, text.slice('/model '.length))
+    if (commandText === '/model' || commandText.startsWith('/model ')) {
+      await this.handleModelCommand(
+        chatId,
+        commandText.slice('/model'.length).trim(),
+      )
+      return
+    }
+
+    if (commandText === '/reasoning' || commandText.startsWith('/reasoning ')) {
+      await this.handleReasoningCommand(
+        chatId,
+        commandText.slice('/reasoning'.length).trim(),
+      )
       return
     }
 
@@ -1384,15 +1474,12 @@ export class TelegramAgentBridge {
   ): Promise<void> {
     const body = commandBody.trim()
     if (!body || ['show', 'status'].includes(body.toLowerCase())) {
-      const profile = await loadProviderProfile()
-      await this.sendMessage(chatId, formatProviderProfile(profile))
+      await this.sendProviderMenu(chatId)
       return
     }
 
     if (body.toLowerCase() === 'models') {
-      const profile = await loadProviderProfile()
-      const result = await loadProviderModels(profile)
-      await this.sendMessage(chatId, result)
+      await this.sendModelMenu(chatId)
       return
     }
 
@@ -1443,6 +1530,21 @@ export class TelegramAgentBridge {
     )
   }
 
+  private async sendProviderMenu(chatId: string): Promise<void> {
+    const profile = await loadProviderProfile()
+    await this.sendMessageWithKeyboard(
+      chatId,
+      formatProviderProfile(profile),
+      buildTelegramProviderKeyboard(profile.provider),
+    )
+  }
+
+  private async sendModelMenu(chatId: string, page = 0): Promise<void> {
+    const profile = await loadProviderProfile()
+    const menu = await buildTelegramModelMenu(profile, page)
+    await this.sendMessageWithKeyboard(chatId, menu.text, menu.keyboard)
+  }
+
   private async handleProviderShortcutCommand(
     chatId: string,
     shortcut: TelegramProviderShortcut,
@@ -1455,7 +1557,7 @@ export class TelegramAgentBridge {
       }),
     )
     await saveProviderProfile(profile)
-    await this.sendMessage(
+    await this.sendMessageWithKeyboard(
       chatId,
       [
         `Switched: ${shortcut.command}`,
@@ -1466,6 +1568,7 @@ export class TelegramAgentBridge {
           ? 'LM Studio Gemma profiles run with model tools disabled because the current LM Studio templates reject OpenAI tool schemas.'
           : 'Model tools are enabled for this provider.',
       ].join('\n'),
+      buildTelegramActiveProfileKeyboard(profile),
     )
   }
 
@@ -1504,13 +1607,63 @@ export class TelegramAgentBridge {
   private async handleModelCommand(chatId: string, commandBody: string): Promise<void> {
     const model = commandBody.trim()
     if (!model) {
-      await this.sendMessage(chatId, 'Usage: /model <model>')
+      await this.sendModelMenu(chatId)
       return
     }
     const profile = await loadProviderProfile()
     const next = normalizeProviderProfile({ ...profile, model })
     await saveProviderProfile(next)
-    await this.sendMessage(chatId, `Model updated for next agent runs: ${next.model}`)
+    await this.sendMessageWithKeyboard(
+      chatId,
+      `Model updated for next agent runs.\n\n${formatProviderProfile(next)}`,
+      buildTelegramActiveProfileKeyboard(next),
+    )
+  }
+
+  private async handleReasoningCommand(chatId: string, commandBody: string): Promise<void> {
+    const profile = await loadProviderProfile()
+    if (profile.provider !== 'codex') {
+      await this.sendMessage(
+        chatId,
+        'Reasoning levels are available for the Codex provider. Open /provider and choose Codex first.',
+      )
+      return
+    }
+
+    const effort = parseTelegramReasoningEffort(commandBody)
+    if (!commandBody || !effort) {
+      const catalog = await loadProviderModelCatalog(profile)
+      const option = findCatalogModel(catalog, profile.model)
+      await this.sendMessageWithKeyboard(
+        chatId,
+        commandBody
+          ? 'Unknown reasoning level. Choose one below.'
+          : formatProviderProfile(profile),
+        buildTelegramReasoningKeyboard(option, profile),
+      )
+      return
+    }
+
+    const catalog = await loadProviderModelCatalog(profile)
+    const option = findCatalogModel(catalog, profile.model)
+    if (option && !option.reasoningLevels.includes(effort)) {
+      await this.sendMessage(
+        chatId,
+        `${option.label} does not expose reasoning=${effort}. Available: ${option.reasoningLevels.join(', ') || 'none'}`,
+      )
+      return
+    }
+
+    const next = normalizeProviderProfile({
+      ...profile,
+      model: withModelReasoning(profile.model, effort),
+    })
+    await saveProviderProfile(next)
+    await this.sendMessageWithKeyboard(
+      chatId,
+      `Reasoning updated.\n\n${formatProviderProfile(next)}`,
+      buildTelegramReasoningKeyboard(option, next),
+    )
   }
 
   private async handleBaseUrlCommand(chatId: string, commandBody: string): Promise<void> {
@@ -2264,12 +2417,169 @@ export class TelegramAgentBridge {
       // The abort action matters more than clearing Telegram's button spinner.
     }
 
+    const chatId = query.message?.chat?.id === undefined
+      ? ''
+      : String(query.message.chat.id)
+    if (!chatId) return
+    const userId = query.from?.id === undefined ? '' : String(query.from.id)
+    if (!isTelegramActorAllowed({
+      chatId,
+      userId,
+      allowedChatIds: this.config.telegram.allowedChatIds,
+      allowedUserIds: this.config.telegram.allowedUserIds,
+      homeChatId: this.config.telegram.homeChatId,
+    })) return
+
     const data = query.data || ''
 
     // stop:<chatId>
     if (data.startsWith('stop:')) {
-      const chatId = data.slice(5)
+      if (data.slice(5) !== chatId) return
       await this.stopTask(chatId)
+      return
+    }
+
+    try {
+      if (data === 'menu:providers') {
+        const profile = await loadProviderProfile()
+        await this.editCallbackMessage(
+          query,
+          formatProviderProfile(profile),
+          buildTelegramProviderKeyboard(profile.provider),
+        )
+        return
+      }
+
+      if (data === 'menu:reasoning') {
+        const profile = await loadProviderProfile()
+        if (profile.provider !== 'codex') {
+          throw new Error('Switch to the Codex provider before choosing reasoning.')
+        }
+        const catalog = await loadProviderModelCatalog(profile)
+        const option = findCatalogModel(catalog, profile.model)
+        await this.editCallbackMessage(
+          query,
+          formatProviderProfile(profile),
+          buildTelegramReasoningKeyboard(option, profile),
+        )
+        return
+      }
+
+      const providerMatch = data.match(/^provider:([a-z0-9-]+)$/u)
+      if (providerMatch) {
+        const provider = providerMatch[1]!
+        if (!isKnownTelegramProvider(provider)) return
+        const previous = await loadProviderProfile()
+        const defaultModel = defaultTelegramProviderModel(provider)
+        const profile = await hydrateShortcutProviderProfile(
+          buildTelegramProviderProfileUpdate(previous, {
+            provider,
+            model: defaultModel,
+          }),
+        )
+        await saveProviderProfile(profile)
+        const menu = await buildTelegramModelMenu(profile, 0)
+        await this.editCallbackMessage(query, menu.text, menu.keyboard)
+        return
+      }
+
+      const modelsMatch = data.match(/^models:([a-z0-9-]+):(\d+)$/u)
+      if (modelsMatch) {
+        const provider = modelsMatch[1]!
+        const page = Number(modelsMatch[2])
+        if (!isKnownTelegramProvider(provider)) return
+        const current = await loadProviderProfile()
+        const profile = current.provider === provider
+          ? current
+          : await hydrateShortcutProviderProfile(
+              buildTelegramProviderProfileUpdate(current, {
+                provider,
+                model: defaultTelegramProviderModel(provider),
+              }),
+            )
+        if (profile !== current) await saveProviderProfile(profile)
+        const menu = await buildTelegramModelMenu(profile, page)
+        await this.editCallbackMessage(query, menu.text, menu.keyboard)
+        return
+      }
+
+      const modelMatch = data.match(/^model:([a-z0-9-]+):(\d+)$/u)
+      if (modelMatch) {
+        const provider = modelMatch[1]!
+        const modelIndex = Number(modelMatch[2])
+        if (!isKnownTelegramProvider(provider)) return
+        const current = await loadProviderProfile()
+        const targetProfile = current.provider === provider
+          ? current
+          : await hydrateShortcutProviderProfile(
+              buildTelegramProviderProfileUpdate(current, {
+                provider,
+                model: defaultTelegramProviderModel(provider),
+              }),
+            )
+        const catalog = await loadProviderModelCatalog(targetProfile)
+        const option = catalog.models[modelIndex]
+        if (!option) throw new Error('Model menu expired. Open /models again.')
+        const selectedModel = provider === 'codex' && option.defaultReasoning
+          ? withModelReasoning(option.id, option.defaultReasoning)
+          : option.id
+        const next = await hydrateShortcutProviderProfile(
+          buildTelegramProviderProfileUpdate(current, {
+            provider,
+            model: selectedModel,
+          }),
+        )
+        await saveProviderProfile(next)
+        await this.editCallbackMessage(
+          query,
+          `Provider and model updated.\n\n${formatProviderProfile(next)}`,
+          provider === 'codex'
+            ? buildTelegramReasoningKeyboard(option, next)
+            : buildTelegramActiveProfileKeyboard(next),
+        )
+        return
+      }
+
+      const reasoningMatch = data.match(/^reason:(low|medium|high|xhigh|max|ultra)$/u)
+      if (reasoningMatch) {
+        const effort = reasoningMatch[1] as ReasoningEffort
+        const profile = await loadProviderProfile()
+        if (profile.provider !== 'codex') {
+          throw new Error('Switch to the Codex provider before choosing reasoning.')
+        }
+        const catalog = await loadProviderModelCatalog(profile)
+        const option = findCatalogModel(catalog, profile.model)
+        if (option && !option.reasoningLevels.includes(effort)) {
+          throw new Error(`${option.label} does not support reasoning=${effort}.`)
+        }
+        const next = normalizeProviderProfile({
+          ...profile,
+          model: withModelReasoning(profile.model, effort),
+        })
+        await saveProviderProfile(next)
+        await this.editCallbackMessage(
+          query,
+          `Reasoning updated.\n\n${formatProviderProfile(next)}`,
+          buildTelegramReasoningKeyboard(option, next),
+        )
+        return
+      }
+
+      if (data === 'manual:provider') {
+        await this.sendMessage(
+          chatId,
+          [
+            'Manual provider/model input:',
+            '/provider set <provider> <model> [base_url] [api_key]',
+            '/model <model>',
+            '/reasoning low|medium|high|xhigh|max|ultra',
+          ].join('\n'),
+        )
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      await recordTelegramError(chatId, 'telegram-provider-callback', detail)
+      await this.sendMessage(chatId, `Provider menu error: ${detail}`)
     }
   }
 
@@ -2678,23 +2988,33 @@ export class TelegramAgentBridge {
   }
 
   private isMessageAllowed(message: TelegramMessage, chatId: string): boolean {
-    const allowedChats = new Set([
-      ...this.config.telegram.allowedChatIds,
-      ...(this.config.telegram.homeChatId ? [this.config.telegram.homeChatId] : []),
-    ])
-    const allowedUsers = new Set(this.config.telegram.allowedUserIds)
-
-    if (allowedChats.size === 0 && allowedUsers.size === 0) {
-      return true
-    }
-
-    if (allowedChats.has(chatId)) {
-      return true
-    }
-
     const userId = message.from?.id === undefined ? '' : String(message.from.id)
-    return Boolean(userId && allowedUsers.has(userId))
+    return isTelegramActorAllowed({
+      chatId,
+      userId,
+      allowedChatIds: this.config.telegram.allowedChatIds,
+      allowedUserIds: this.config.telegram.allowedUserIds,
+      homeChatId: this.config.telegram.homeChatId,
+    })
   }
+}
+
+export function isTelegramActorAllowed(input: {
+  chatId: string
+  userId: string
+  allowedChatIds: string[]
+  allowedUserIds: string[]
+  homeChatId?: string
+}): boolean {
+  const allowedChats = new Set([
+    ...input.allowedChatIds,
+    ...(input.homeChatId ? [input.homeChatId] : []),
+  ])
+  const allowedUsers = new Set(input.allowedUserIds)
+
+  if (allowedChats.size === 0 && allowedUsers.size === 0) return true
+  if (allowedChats.has(input.chatId)) return true
+  return Boolean(input.userId && allowedUsers.has(input.userId))
 }
 
 type TelegramProgressStatus = 'running' | 'completed' | 'failed' | 'stopped'
@@ -3059,14 +3379,191 @@ const TELEGRAM_PROVIDER_PRESETS: ProviderInfo[] = [
   { value: 'github', flag: 'github' },
 ]
 
+const TELEGRAM_PROVIDER_BUTTONS = [
+  { provider: 'deepseek', label: 'DeepSeek' },
+  { provider: 'codex', label: 'Codex / ChatGPT' },
+  { provider: 'openrouter', label: 'OpenRouter' },
+  { provider: 'lmstudio-lan', label: 'LM Studio' },
+] as const
+
+const TELEGRAM_MODEL_PAGE_SIZE = 8
+
 function getTelegramProviderInfo(provider: string): ProviderInfo {
   return TELEGRAM_PROVIDER_PRESETS.find(item => item.value === provider) || TELEGRAM_PROVIDER_PRESETS[0]!
 }
 
+function isKnownTelegramProvider(provider: string): boolean {
+  return TELEGRAM_PROVIDER_PRESETS.some(item => item.value === provider)
+}
+
+function defaultTelegramProviderModel(provider: string): string {
+  const model = getDefaultProviderModel(provider)
+  if (model) {
+    return provider === 'codex' && model.defaultReasoning
+      ? withModelReasoning(model.id, model.defaultReasoning)
+      : model.id
+  }
+  if (provider === 'openrouter') return 'openai/gpt-5.6-sol'
+  if (provider === 'openai' || provider === 'openai-compatible') return 'gpt-5.6'
+  return ''
+}
+
+export function buildTelegramProviderKeyboard(activeProvider: string): TelegramInlineKeyboard {
+  const rows: TelegramInlineKeyboard = []
+  for (let index = 0; index < TELEGRAM_PROVIDER_BUTTONS.length; index += 2) {
+    rows.push(
+      TELEGRAM_PROVIDER_BUTTONS.slice(index, index + 2).map(item => ({
+        text: `${item.provider === activeProvider ? '* ' : ''}${item.label}`,
+        callback_data: `provider:${item.provider}`,
+      })),
+    )
+  }
+  rows.push([{ text: 'Manual input', callback_data: 'manual:provider' }])
+  return rows
+}
+
+export function buildTelegramModelKeyboard(
+  provider: string,
+  models: ProviderModelOption[],
+  activeModel: string,
+  requestedPage = 0,
+): TelegramInlineKeyboard {
+  const pageCount = Math.max(1, Math.ceil(models.length / TELEGRAM_MODEL_PAGE_SIZE))
+  const page = Math.max(0, Math.min(requestedPage, pageCount - 1))
+  const start = page * TELEGRAM_MODEL_PAGE_SIZE
+  const activeBase = getModelBaseId(activeModel)
+  const rows: TelegramInlineKeyboard = models
+    .slice(start, start + TELEGRAM_MODEL_PAGE_SIZE)
+    .map((model, offset) => [{
+      text: `${model.id === activeBase ? '* ' : ''}${truncateTelegramButton(model.label)}`,
+      callback_data: `model:${provider}:${start + offset}`,
+    }])
+
+  if (pageCount > 1) {
+    const navigation: TelegramInlineKeyboardButton[] = []
+    if (page > 0) {
+      navigation.push({ text: '<', callback_data: `models:${provider}:${page - 1}` })
+    }
+    navigation.push({ text: `${page + 1}/${pageCount}`, callback_data: `models:${provider}:${page}` })
+    if (page + 1 < pageCount) {
+      navigation.push({ text: '>', callback_data: `models:${provider}:${page + 1}` })
+    }
+    rows.push(navigation)
+  }
+  rows.push([
+    { text: 'Providers', callback_data: 'menu:providers' },
+    { text: 'Manual input', callback_data: 'manual:provider' },
+  ])
+  return rows
+}
+
+function buildTelegramActiveProfileKeyboard(
+  profile: AgentProviderProfile,
+): TelegramInlineKeyboard {
+  const rows: TelegramInlineKeyboard = [[
+    { text: 'Models', callback_data: `models:${profile.provider}:0` },
+    { text: 'Providers', callback_data: 'menu:providers' },
+  ]]
+  if (profile.provider === 'codex') {
+    rows.unshift([{ text: 'Reasoning', callback_data: 'menu:reasoning' }])
+  }
+  return rows
+}
+
+export function buildTelegramReasoningKeyboard(
+  option: ProviderModelOption | undefined,
+  profile: AgentProviderProfile,
+): TelegramInlineKeyboard {
+  const levels = option?.reasoningLevels.length
+    ? option.reasoningLevels
+    : fallbackReasoningLevels(profile.model)
+  const active = getReasoningEffortForModel(profile.model)
+  const rows: TelegramInlineKeyboard = []
+  for (let index = 0; index < levels.length; index += 3) {
+    rows.push(levels.slice(index, index + 3).map(level => ({
+      text: `${level === active ? '* ' : ''}${formatReasoningLabel(level)}`,
+      callback_data: `reason:${level}`,
+    })))
+  }
+  rows.push([
+    { text: 'Models', callback_data: `models:${profile.provider}:0` },
+    { text: 'Providers', callback_data: 'menu:providers' },
+  ])
+  return rows
+}
+
+async function buildTelegramModelMenu(
+  profile: AgentProviderProfile,
+  page: number,
+): Promise<{ text: string; keyboard: TelegramInlineKeyboard }> {
+  const catalog = await loadProviderModelCatalog(profile)
+  const pageCount = Math.max(1, Math.ceil(catalog.models.length / TELEGRAM_MODEL_PAGE_SIZE))
+  const safePage = Math.max(0, Math.min(page, pageCount - 1))
+  const lines = [
+    'Choose model',
+    `Provider: ${profile.provider}`,
+    `Current: ${getModelBaseId(profile.model) || 'not set'}`,
+    `Catalog: ${catalog.source}`,
+    `Page: ${safePage + 1}/${pageCount}`,
+  ]
+  if (catalog.warning) lines.push(`Catalog warning: ${catalog.warning}`)
+  if (catalog.models.length === 0) {
+    lines.push('', 'No models loaded. Set the provider key/URL or use manual input.')
+  }
+  return {
+    text: lines.join('\n'),
+    keyboard: buildTelegramModelKeyboard(
+      profile.provider,
+      catalog.models,
+      profile.model,
+      safePage,
+    ),
+  }
+}
+
+function findCatalogModel(
+  catalog: ProviderModelCatalog,
+  model: string,
+): ProviderModelOption | undefined {
+  const base = getModelBaseId(model)
+  return catalog.models.find(option => option.id === base)
+}
+
+function parseTelegramReasoningEffort(value: string): ReasoningEffort | undefined {
+  const normalized = value.trim().toLowerCase()
+  return normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh' ||
+    normalized === 'max' ||
+    normalized === 'ultra'
+    ? normalized
+    : undefined
+}
+
+function fallbackReasoningLevels(model: string): ReasoningEffort[] {
+  const base = getModelBaseId(model)
+  const standard: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh']
+  if (base === 'gpt-5.6-sol' || base === 'gpt-5.6-terra') {
+    return [...standard, 'max', 'ultra']
+  }
+  if (base === 'gpt-5.6-luna') return [...standard, 'max']
+  return standard
+}
+
+function formatReasoningLabel(level: ReasoningEffort): string {
+  if (level === 'xhigh') return 'Extra high'
+  return level.charAt(0).toUpperCase() + level.slice(1)
+}
+
+function truncateTelegramButton(value: string): string {
+  return value.length > 42 ? `${value.slice(0, 39)}...` : value
+}
+
 async function formatContextWindowStatus(): Promise<string> {
   const env = {
-    ...process.env,
     ...(await readProjectEnvFile()),
+    ...process.env,
   }
   const profile = await loadProviderProfile()
   const configured = getConfiguredContextWindowValue(env)
@@ -3082,7 +3579,7 @@ async function formatContextWindowStatus(): Promise<string> {
     `Configured: ${configured || 'auto'}`,
     `Effective: ${formatTokenCount(effectiveTokens)} tokens`,
     `Provider: ${profile.provider}`,
-    `Model: ${model || 'not set'}`,
+    `Model: ${getModelBaseId(model) || 'not set'}`,
     '',
     'Use /context auto, /context 1m, /context unlimited, or /context <tokens>.',
   ].join('\n')
@@ -3156,8 +3653,8 @@ function formatTokenCount(tokens: number): string {
 
 async function loadProviderProfile(): Promise<AgentProviderProfile> {
   const env = {
-    ...process.env,
     ...(await readProjectEnvFile()),
+    ...process.env,
   }
   let provider = env.OPENCLAUDE_PROVIDER || ''
   if (!provider) {
@@ -3189,13 +3686,13 @@ async function loadProviderProfile(): Promise<AgentProviderProfile> {
       env.OPENCLAUDE_MODEL ||
       (isOpenAI ? env.OPENAI_MODEL : env[`${info.flag.toUpperCase()}_MODEL`]) ||
       '',
-    apiKey:
-      providerSpecificApiKey(provider, env) ||
-      (provider === 'codex' ? env.CODEX_API_KEY : '') ||
-      env.OPENCLAUDE_API_KEY ||
-      (isOpenAI ? env.OPENAI_API_KEY : env[`${info.flag.toUpperCase()}_API_KEY`]) ||
-      info.apiKey ||
-      '',
+    apiKey: provider === 'codex'
+      ? providerSpecificApiKey(provider, env)
+      : providerSpecificApiKey(provider, env) ||
+        env.OPENCLAUDE_API_KEY ||
+        (isOpenAI ? env.OPENAI_API_KEY : env[`${info.flag.toUpperCase()}_API_KEY`]) ||
+        info.apiKey ||
+        '',
   })
 }
 
@@ -3219,17 +3716,23 @@ async function saveProviderProfile(profile: AgentProviderProfile): Promise<void>
 async function hydrateShortcutProviderProfile(profile: AgentProviderProfile): Promise<AgentProviderProfile> {
   if (profile.apiKey) return profile
   const env = {
-    ...process.env,
     ...(await readProjectEnvFile()),
+    ...process.env,
   }
   const apiKey = providerSpecificApiKey(profile.provider, env)
   return apiKey ? { ...profile, apiKey } : profile
 }
 
 function providerSpecificApiKey(provider: string, env: Record<string, string | undefined>): string {
-  if (provider === 'codex') return env.CODEX_API_KEY || ''
+  if (provider === 'codex') {
+    if (env.CODEX_AUTH_JSON_PATH || env.CODEX_HOME) return ''
+    return env.CODEX_API_KEY || ''
+  }
   if (provider === 'deepseek') {
     return env.DEEPSEEK_API_KEY || env.OPENCLAUDE_DEEPSEEK_API_KEY || ''
+  }
+  if (provider === 'openrouter') {
+    return env.OPENROUTER_API_KEY || ''
   }
   return ''
 }
@@ -3259,6 +3762,7 @@ function providerProfileEnv(profile: AgentProviderProfile): Record<string, strin
     MISTRAL_BASE_URL: '',
     MISTRAL_MODEL: '',
     MISTRAL_API_KEY: '',
+    CODEX_API_KEY: '',
   }
   if (profile.provider === 'codex') {
     updates.CLAUDE_CODE_USE_OPENAI = '1'
@@ -3275,6 +3779,9 @@ function providerProfileEnv(profile: AgentProviderProfile): Record<string, strin
     if (profile.provider === 'deepseek' && profile.apiKey) {
       updates.DEEPSEEK_API_KEY = profile.apiKey
       updates.OPENCLAUDE_DEEPSEEK_API_KEY = profile.apiKey
+    }
+    if (profile.provider === 'openrouter' && profile.apiKey) {
+      updates.OPENROUTER_API_KEY = profile.apiKey
     }
   } else if (info.flag === 'anthropic') {
     updates.ANTHROPIC_BASE_URL = profile.baseUrl
@@ -3340,68 +3847,39 @@ function splitCommandLike(value: string): string[] {
 }
 
 function formatProviderProfile(profile: AgentProviderProfile): string {
+  const reasoning = profile.provider === 'codex'
+    ? getReasoningEffortForModel(profile.model)
+    : undefined
+  const authentication = profile.provider === 'codex' && !profile.apiKey && (
+    process.env.CODEX_AUTH_JSON_PATH || process.env.CODEX_HOME
+  )
+    ? 'Authentication: Codex subscription (auth.json)'
+    : `API key: ${maskSecretForTelegram(profile.apiKey)}`
   return [
     'Active provider profile',
     `Provider: ${profile.provider}`,
-    `Model: ${profile.model || 'not set'}`,
+    `Model: ${getModelBaseId(profile.model) || 'not set'}`,
+    ...(reasoning ? [`Reasoning: ${reasoning}`] : []),
     `Base URL: ${profile.baseUrl || 'not set'}`,
-    `API key: ${maskSecretForTelegram(profile.apiKey)}`,
+    authentication,
   ].join('\n')
 }
 
 async function loadProviderModels(profile: AgentProviderProfile): Promise<string> {
-  if (profile.provider === 'codex') {
-    return [
-      'Codex models available through Codex auth:',
-      '- gpt-5.5',
-      '- gpt-5.4',
-      '- gpt-5.3-codex',
-      '- gpt-5.3-codex-spark',
-      '- gpt-5.2-codex',
-      '- gpt-5.1-codex-max',
-      '- gpt-5.1-codex-mini',
-      '- codexplan',
-      '- codexspark',
-      '',
-      'Use /model <model> or /provider set codex <model>.',
-    ].join('\n')
-  }
-
-  const info = getTelegramProviderInfo(profile.provider)
-  if (info.flag !== 'openai') {
-    return 'Model loading is implemented for OpenAI-compatible providers. Enter model manually with /model <model>.'
-  }
-  const errors: string[] = []
-  for (const url of providerModelUrls(profile.baseUrl)) {
-    try {
-      const response = await fetch(url, {
-        headers: profile.apiKey ? { Authorization: `Bearer ${profile.apiKey}` } : {},
-      })
-      const text = await response.text()
-      if (!response.ok) throw new Error(`${response.status}: ${text || response.statusText}`)
-      const data = JSON.parse(text) as { data?: Array<{ id?: string }> }
-      const models = Array.isArray(data.data)
-        ? data.data.map(item => item.id).filter(Boolean).sort()
-        : []
-      if (models.length === 0) throw new Error('provider returned no models')
-      return [
-        `Models from ${url}:`,
-        ...models.slice(0, 80).map(model => `- ${model}`),
-        models.length > 80 ? `...and ${models.length - 80} more` : '',
-      ].filter(Boolean).join('\n')
-    } catch (error) {
-      errors.push(`${url}: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-  return `Could not load models.\n${errors.join('\n')}`
-}
-
-function providerModelUrls(baseUrl: string): string[] {
-  const trimmed = String(baseUrl || '').replace(/\/+$/, '')
-  if (!trimmed) return []
-  return trimmed.endsWith('/v1')
-    ? [`${trimmed}/models`, `${trimmed.replace(/\/v1$/, '')}/models`]
-    : [`${trimmed}/v1/models`, `${trimmed}/models`]
+  const catalog = await loadProviderModelCatalog(profile)
+  return [
+    `Models for ${profile.provider} (${catalog.source}):`,
+    ...catalog.models.slice(0, 80).map(model => {
+      const reasoning = model.reasoningLevels.length
+        ? ` [${model.reasoningLevels.join(',')}]`
+        : ''
+      return `- ${model.id}${reasoning}`
+    }),
+    catalog.models.length > 80 ? `...and ${catalog.models.length - 80} more` : '',
+    catalog.warning ? `Warning: ${catalog.warning}` : '',
+    '',
+    'Use /models for buttons or /model <model> for manual input.',
+  ].filter(Boolean).join('\n')
 }
 
 async function readProjectEnvFile(): Promise<Record<string, string>> {
@@ -3724,11 +4202,16 @@ export function summarizeAgentProgressChunk(chunk: string): string[] {
 }
 
 export function formatTelegramProgressText(snapshot: TelegramProgressSnapshot): string {
+  const model = snapshot.providerProfile?.model || ''
+  const reasoning = snapshot.providerProfile?.provider === 'codex'
+    ? getReasoningEffortForModel(model)
+    : undefined
   const lines = [
     `OpenClaude task: ${snapshot.status}`,
     `Phase: ${snapshot.phase}`,
     `Provider: ${snapshot.providerProfile?.provider || 'not set'}`,
-    `Model: ${snapshot.providerProfile?.model || 'not set'}`,
+    `Model: ${getModelBaseId(model) || 'not set'}`,
+    ...(reasoning ? [`Reasoning: ${reasoning}`] : []),
     `Elapsed: ${formatDuration(Date.now() - snapshot.startedAt)}`,
     '',
     'Activity:',

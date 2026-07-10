@@ -28,12 +28,28 @@ const CODEX_ALIAS_MODELS: Record<
   }
 > = {
   codexplan: {
-    model: 'gpt-5.4',
+    model: 'gpt-5.6-sol',
     reasoningEffort: 'high',
+  },
+  'gpt-5.6': {
+    model: 'gpt-5.6-sol',
+    reasoningEffort: 'medium',
+  },
+  'gpt-5.6-sol': {
+    model: 'gpt-5.6-sol',
+    reasoningEffort: 'medium',
+  },
+  'gpt-5.6-terra': {
+    model: 'gpt-5.6-terra',
+    reasoningEffort: 'medium',
+  },
+  'gpt-5.6-luna': {
+    model: 'gpt-5.6-luna',
+    reasoningEffort: 'medium',
   },
   'gpt-5.5': {
     model: 'gpt-5.5',
-    reasoningEffort: 'high',
+    reasoningEffort: 'medium',
   },
   'gpt-5.4': {
     model: 'gpt-5.4',
@@ -71,7 +87,13 @@ const CODEX_ALIAS_MODELS: Record<
 } as const
 
 type CodexAlias = keyof typeof CODEX_ALIAS_MODELS
-type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+export type ReasoningEffort =
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra'
 
 const OPENAI_CODEX_SHORTCUT_ALIASES = new Set(['codexplan', 'codexspark'])
 
@@ -161,7 +183,14 @@ function readNestedString(
 function parseReasoningEffort(value: string | undefined): ReasoningEffort | undefined {
   if (!value) return undefined
   const normalized = value.trim().toLowerCase()
-  if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh') {
+  if (
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh' ||
+    normalized === 'max' ||
+    normalized === 'ultra'
+  ) {
     return normalized
   }
   return undefined
@@ -427,9 +456,16 @@ export function resolveProviderRequest(options?: {
       ? normalizeGithubModelsApiModel(descriptor.baseModel)
       : descriptor.baseModel)
 
-  const reasoning = options?.reasoningEffortOverride
+  const requestedReasoning = options?.reasoningEffortOverride
     ? { effort: options.reasoningEffortOverride }
     : descriptor.reasoning
+  // The Codex catalog exposes max/ultra as client modes. The raw Responses
+  // endpoint accepts up to xhigh; Ultra adds delegation in the gateway prompt.
+  const reasoning = transport === 'codex_responses' && (
+    requestedReasoning?.effort === 'max' || requestedReasoning?.effort === 'ultra'
+  )
+    ? { effort: 'xhigh' as const }
+    : requestedReasoning
 
   return {
     transport,
@@ -596,6 +632,20 @@ function resolveEnvOrAuthJsonCodexCredentials(
     asTrimmedString(env.CODEX_ACCOUNT_ID) ??
     asTrimmedString(env.CHATGPT_ACCOUNT_ID)
 
+  const explicitAuthPathConfigured = Boolean(
+    asTrimmedString(env.CODEX_AUTH_JSON_PATH) ?? asTrimmedString(env.CODEX_HOME),
+  )
+  if (explicitAuthPathConfigured) {
+    const authPath = resolveCodexAuthPath(env)
+    const authJson = loadCodexAuthJson(authPath)
+    const credentials = resolveCodexAuthJsonCredentials({
+      authJson,
+      authPath,
+      envAccountId,
+    })
+    if (credentials.apiKey || !envApiKey) return credentials
+  }
+
   if (envApiKey) {
     return {
       apiKey: envApiKey,
@@ -603,10 +653,6 @@ function resolveEnvOrAuthJsonCodexCredentials(
       source: 'env',
     }
   }
-
-  const explicitAuthPathConfigured = Boolean(
-    asTrimmedString(env.CODEX_AUTH_JSON_PATH) ?? asTrimmedString(env.CODEX_HOME),
-  )
 
   if (!explicitAuthPathConfigured && options?.explicitAuthPathOnly) {
     return {
@@ -728,11 +774,7 @@ export function resolveCodexApiCredentials(
 }
 
 export function getReasoningEffortForModel(model: string): ReasoningEffort | undefined {
-  const normalized = model.trim().toLowerCase()
-  const base = normalized.split('?', 1)[0] ?? normalized
-  const alias = base as CodexAlias
-  const aliasConfig = CODEX_ALIAS_MODELS[alias]
-  return aliasConfig?.reasoningEffort
+  return parseModelDescriptor(model).reasoning?.effort
 }
 
 export function supportsCodexReasoningEffort(model: string): boolean {

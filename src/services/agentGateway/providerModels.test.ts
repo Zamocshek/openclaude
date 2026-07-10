@@ -1,0 +1,71 @@
+import { describe, expect, test } from 'bun:test'
+
+import {
+  getBuiltInProviderModels,
+  getModelBaseId,
+  parseCodexModelRecords,
+  withModelReasoning,
+} from './providerModels.js'
+
+describe('agent gateway provider model catalog', () => {
+  test('ships current Codex, DeepSeek, and OpenRouter quick models', () => {
+    expect(getBuiltInProviderModels('codex').map(model => model.id)).toEqual([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+      'gpt-5.5',
+      'gpt-5.4',
+      'gpt-5.4-mini',
+      'gpt-5.3-codex-spark',
+    ])
+    expect(getBuiltInProviderModels('deepseek').map(model => model.id)).toEqual([
+      'deepseek-v4-flash',
+      'deepseek-v4-pro',
+    ])
+    expect(getBuiltInProviderModels('openrouter').map(model => model.id)).toContain(
+      'openai/gpt-5.6-sol',
+    )
+    expect(getBuiltInProviderModels('openrouter').map(model => model.id)).toContain(
+      'openai/gpt-5.5-pro',
+    )
+  })
+
+  test('preserves supported Codex reasoning levels from the live catalog', () => {
+    const models = parseCodexModelRecords([
+      {
+        slug: 'gpt-5.6-sol',
+        display_name: 'GPT-5.6 Sol',
+        default_reasoning_level: 'medium',
+        supported_reasoning_levels: [
+          { effort: 'low' },
+          { effort: 'xhigh' },
+          { effort: 'max' },
+          { effort: 'ultra' },
+          { effort: 'invalid' },
+        ],
+        context_window: 372_000,
+        visibility: 'list',
+        priority: 1,
+      },
+      { slug: 'hidden', visibility: 'hide', priority: 0 },
+    ])
+
+    expect(models).toEqual([{
+      id: 'gpt-5.6-sol',
+      label: 'GPT-5.6 Sol',
+      defaultReasoning: 'medium',
+      reasoningLevels: ['low', 'xhigh', 'max', 'ultra'],
+      contextWindow: 372_000,
+    }])
+  })
+
+  test('sets reasoning without duplicating model query parameters', () => {
+    expect(withModelReasoning('gpt-5.6-sol', 'xhigh')).toBe(
+      'gpt-5.6-sol?reasoning=xhigh',
+    )
+    expect(withModelReasoning('gpt-5.6-sol?reasoning=low', 'ultra')).toBe(
+      'gpt-5.6-sol?reasoning=ultra',
+    )
+    expect(getModelBaseId('gpt-5.6-sol?reasoning=ultra')).toBe('gpt-5.6-sol')
+  })
+})

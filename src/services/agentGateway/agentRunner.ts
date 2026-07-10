@@ -9,6 +9,7 @@ import {
   type AgentGatewayConfig,
 } from './config.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { getReasoningEffortForModel } from '../api/providerConfig.js'
 
 export type AgentRunOptions = {
   prompt: string
@@ -71,7 +72,7 @@ const API_GATEWAY_APPEND_SYSTEM_PROMPT = [
   'Answer directly and finish the turn as soon as the user request is satisfied.',
   'Use existing knowledge for stable facts when possible.',
   'Only invoke tools when the user explicitly asks you to act, inspect local state, or when tool use is necessary to complete the task.',
-  'When invoking tools, pass JSON arguments that exactly match the tool schema. For Write, always provide both file_path and content. For Edit, always provide file_path, old_string, and new_string.',
+  'When invoking tools, use only tools exposed in the current runtime and pass arguments that exactly match their schemas.',
   'If a tool returns an input validation error, retry once with corrected arguments before giving up.',
   'Never claim a local action is complete unless the relevant tool call succeeded. If a tool fails, report the exact failure.',
   'For desktop, screenshot, application-window, filesystem, or automation requests, inspect the real local environment with available tools and report tool failures explicitly.',
@@ -101,6 +102,11 @@ const HINDSIGHT_APPEND_SYSTEM_PROMPT = [
   `When the user explicitly asks to remember/save memory, including words such as "remember", "save to memory", "\u0437\u0430\u043f\u043e\u043c\u043d\u0438", "\u043f\u0430\u043c\u044f\u0442\u044c", or "\u0441\u043e\u0445\u0440\u0430\u043d\u0438", call hindsight_retain when it is available and do not rely on a text claim alone.`,
   'Use hindsight_reflect for synthesis, background consciousness summaries, evolution reviews, and deeper analysis over retained memories.',
   'Do not claim that memory was read or saved unless the Hindsight tool call succeeded.',
+].join(' ')
+const CODEX_ULTRA_APPEND_SYSTEM_PROMPT = [
+  'Codex Ultra mode is active.',
+  'Use xhigh model reasoning and automatically delegate independent, substantial subtasks through the Agent tool when delegation improves quality or throughput.',
+  'Do not delegate trivial work, do not duplicate delegated work, and integrate and verify delegated results before responding.',
 ].join(' ')
 const DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT = [
   'When running inside the Docker agent container and launching a web app or dev server, bind the server to 0.0.0.0 instead of 127.0.0.1.',
@@ -185,7 +191,6 @@ export function buildAgentArgs(
 ): string[] {
   const args = [
     '--print',
-    '--bare',
     ...(options.streamEvents ? ['--verbose'] : []),
     '--output-format',
     options.streamEvents ? 'stream-json' : 'text',
@@ -240,6 +245,11 @@ function getApiGatewayAppendSystemPrompt(config: AgentGatewayConfig): string {
     config.openRAG.mcpEnabled ||
     Boolean(config.openRAG.apiKey)
   const parts = [API_GATEWAY_APPEND_SYSTEM_PROMPT]
+  const configuredModel =
+    process.env.OPENCLAUDE_MODEL || process.env.OPENAI_MODEL || ''
+  if (getReasoningEffortForModel(configuredModel) === 'ultra') {
+    parts.push(CODEX_ULTRA_APPEND_SYSTEM_PROMPT)
+  }
   if (hasOpenRAG) parts.push(OPENRAG_APPEND_SYSTEM_PROMPT)
   parts.push(CAMOFOX_APPEND_SYSTEM_PROMPT)
   parts.push(HINDSIGHT_APPEND_SYSTEM_PROMPT)

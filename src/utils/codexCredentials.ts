@@ -1,3 +1,6 @@
+import { chmod, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
 import { isBareMode } from './envUtils.js'
 import { getSecureStorage } from './secureStorage/index.js'
 import {
@@ -30,6 +33,12 @@ type CodexTokenRefreshResponse = {
   id_token?: string
 }
 
+type CodexAuthJsonSource = {
+  path: string
+  document: Record<string, unknown>
+  credentials: CodexCredentialBlob
+}
+
 let inFlightCodexRefresh:
   | Promise<{
       refreshed: boolean
@@ -50,6 +59,87 @@ function parseJwtExpiryMs(token: string | undefined): number | undefined {
     return exp * 1000
   }
   return undefined
+}
+
+function getConfiguredCodexAuthJsonPath(): string | undefined {
+  const explicit = asTrimmedString(process.env.CODEX_AUTH_JSON_PATH)
+  if (explicit) return explicit
+
+  const codexHome = asTrimmedString(process.env.CODEX_HOME)
+  return codexHome ? join(codexHome, 'auth.json') : undefined
+}
+
+async function readConfiguredCodexAuthJson(): Promise<CodexAuthJsonSource | undefined> {
+  const path = getConfiguredCodexAuthJsonPath()
+  if (!path) return undefined
+
+  try {
+    const document = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+    const tokens = document.tokens && typeof document.tokens === 'object'
+      ? document.tokens as Record<string, unknown>
+      : document
+    const accessToken = asTrimmedString(
+      tokens.access_token ?? tokens.accessToken ?? document.access_token,
+    )
+    if (!accessToken) return undefined
+
+    const refreshToken = asTrimmedString(
+      tokens.refresh_token ?? tokens.refreshToken ?? document.refresh_token,
+    )
+    const idToken = asTrimmedString(
+      tokens.id_token ?? tokens.idToken ?? document.id_token,
+    )
+    const accountId =
+      asTrimmedString(tokens.account_id ?? tokens.accountId) ??
+      parseChatgptAccountId(idToken) ??
+      parseChatgptAccountId(accessToken)
+    const lastRefresh = asTrimmedString(document.last_refresh)
+    const lastRefreshAt = lastRefresh ? Date.parse(lastRefresh) : Number.NaN
+
+    return {
+      path,
+      document,
+      credentials: {
+        accessToken,
+        refreshToken,
+        idToken,
+        accountId,
+        lastRefreshAt: Number.isFinite(lastRefreshAt) ? lastRefreshAt : undefined,
+      },
+    }
+  } catch {
+    return undefined
+  }
+}
+
+async function saveConfiguredCodexAuthJson(
+  source: CodexAuthJsonSource,
+  credentials: CodexCredentialBlob,
+): Promise<void> {
+  const document = { ...source.document }
+  const previousTokens =
+    document.tokens && typeof document.tokens === 'object'
+      ? document.tokens as Record<string, unknown>
+      : {}
+  document.tokens = {
+    ...previousTokens,
+    access_token: credentials.accessToken,
+    ...(credentials.refreshToken ? { refresh_token: credentials.refreshToken } : {}),
+    ...(credentials.idToken ? { id_token: credentials.idToken } : {}),
+    ...(credentials.accountId ? { account_id: credentials.accountId } : {}),
+  }
+  document.last_refresh = new Date().toISOString()
+
+  const serialized = `${JSON.stringify(document, null, 2)}\n`
+  const temporaryPath = `${source.path}.openclaude-${process.pid}.tmp`
+  await writeFile(temporaryPath, serialized, { encoding: 'utf8', mode: 0o600 })
+  try {
+    await rename(temporaryPath, source.path)
+  } catch {
+    await writeFile(source.path, serialized, { encoding: 'utf8', mode: 0o600 })
+    await unlink(temporaryPath).catch(() => {})
+  }
+  await chmod(source.path, 0o600).catch(() => {})
 }
 
 function normalizeCodexCredentialBlob(
@@ -275,11 +365,18 @@ export async function refreshCodexAccessTokenIfNeeded(options?: {
     return { refreshed: false }
   }
 
-  if (process.env.CODEX_API_KEY?.trim()) {
+  const configuredAuthJsonPath = getConfiguredCodexAuthJsonPath()
+  if (process.env.CODEX_API_KEY?.trim() && !configuredAuthJsonPath) {
     return { refreshed: false }
   }
 
-  const current = await readCodexCredentialsAsync()
+  const authJsonSource = configuredAuthJsonPath
+    ? await readConfiguredCodexAuthJson()
+    : undefined
+  const storedCurrent = authJsonSource
+    ? undefined
+    : await readCodexCredentialsAsync()
+  const current = storedCurrent ?? authJsonSource?.credentials
   if (!current) {
     return { refreshed: false }
   }
@@ -345,18 +442,22 @@ export async function refreshCodexAccessTokenIfNeeded(options?: {
       }
 
       const idTokenForExchange = next.idToken ?? current.idToken
-      if (idTokenForExchange) {
+      if (storedCurrent && idTokenForExchange) {
         next.apiKey = await exchangeCodexIdTokenForApiKey(
           idTokenForExchange,
         ).catch(() => undefined)
       }
 
-      const saveResult = saveCodexCredentials(next)
-      if (!saveResult.success) {
-        throw new Error(
-          saveResult.warning ??
-            'Codex token refresh succeeded but credentials could not be saved.',
-        )
+      if (authJsonSource) {
+        await saveConfiguredCodexAuthJson(authJsonSource, next)
+      } else {
+        const saveResult = saveCodexCredentials(next)
+        if (!saveResult.success) {
+          throw new Error(
+            saveResult.warning ??
+              'Codex token refresh succeeded but credentials could not be saved.',
+          )
+        }
       }
 
       return {
