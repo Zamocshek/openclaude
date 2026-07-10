@@ -106,6 +106,15 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('openrag_chat')
   })
 
+  test('adds CodeGraph guidance for code exploration and impact analysis', () => {
+    const args = buildAgentArgs(getDefaultAgentGatewayConfig())
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(systemPrompt).toContain('codegraph_explore')
+    expect(systemPrompt).toContain('change impact')
+    expect(systemPrompt).toContain('watcher updates the index automatically')
+  })
+
   test('turns Codex Ultra into xhigh reasoning with automatic delegation guidance', () => {
     const previousOpenClaudeModel = process.env.OPENCLAUDE_MODEL
     process.env.OPENCLAUDE_MODEL = 'gpt-5.6-sol?reasoning=ultra'

@@ -45,6 +45,17 @@
         "HINDSIGHT_MCP_TIMEOUT": "60",
         "HINDSIGHT_API_KEY": "${HINDSIGHT_API_KEY}"
       }
+    },
+    "codegraph": {
+      "command": "node",
+      "args": [
+        "scripts/codegraph-mcp.cjs",
+        "serve",
+        "--mcp"
+      ],
+      "env": {
+        "CODEGRAPH_TELEMETRY": "0"
+      }
     }
   }
 }

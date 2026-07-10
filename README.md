@@ -193,11 +193,34 @@ Advanced and source-build guides:
 ## What Works
 
 - **Tool-driven coding workflows**: Bash, file read/write/edit, grep, glob, agents, tasks, MCP, and slash commands
+- **CodeGraph semantic code intelligence**: `codegraph_explore` returns relevant source, call paths, and change impact from a local auto-synced `.codegraph` SQLite index
 - **Streaming responses**: Real-time token output and tool progress
 - **Tool calling**: Multi-step tool loops with model calls, tool execution, and follow-up responses
 - **Images**: URL and base64 image inputs for providers that support vision
 - **Provider profiles**: Guided setup plus saved `.openclaude-profile.json` support
 - **Local and remote model backends**: Cloud APIs, local servers, and Apple Silicon local inference
+
+### CodeGraph
+
+CodeGraph is installed as an exact project dependency and connected through
+the project `.mcp.json`. Docker initializes `/workspace/.codegraph` on the first
+start; later MCP sessions reconcile and watch source changes automatically.
+The index is local and ignored by Git.
+
+Useful commands inside the Docker agent:
+
+```bash
+codegraph status /workspace
+codegraph explore "how does the Telegram request reach the model?"
+codegraph impact TelegramAgentBridge
+codegraph sync /workspace
+```
+
+For the same checks on the host, run `node scripts/codegraph-mcp.cjs status .`
+or replace `status .` with another CodeGraph command.
+
+Set `OPENCLAUDE_CODEGRAPH_AUTO_INIT=0` to disable first-start indexing or
+`CODEGRAPH_TELEMETRY=1` to opt into CodeGraph's anonymous usage telemetry.
 
 ## Provider Notes
 

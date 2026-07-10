@@ -14,5 +14,6 @@ logs/
 .playwright-cli/
 .tmp-control-center/
 .tmp-gateway/
+.codegraph/
 .webui_secret_key
 tmp/

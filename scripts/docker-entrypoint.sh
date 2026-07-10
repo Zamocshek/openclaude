@@ -85,6 +85,31 @@ normalize_provider_env
 
 export OPENCLAUDE_AGENT_GATEWAY_COMMAND="${OPENCLAUDE_AGENT_GATEWAY_COMMAND:-node /app/dist/cli.mjs}"
 
+bootstrap_codegraph() {
+  if ! is_truthy "${OPENCLAUDE_CODEGRAPH_AUTO_INIT:-1}"; then
+    return
+  fi
+
+  codegraph_shim="${OPENCLAUDE_CODEGRAPH_SHIM:-/app/node_modules/@colbymchenry/codegraph/npm-shim.js}"
+  codegraph_project="${OPENCLAUDE_CODEGRAPH_PROJECT_PATH:-${OPENCLAUDE_AGENT_RUNNER_CWD:-/workspace}}"
+  codegraph_db="$codegraph_project/.codegraph/codegraph.db"
+  if [ ! -f "$codegraph_shim" ] || [ ! -d "$codegraph_project" ] || [ -f "$codegraph_db" ]; then
+    return
+  fi
+
+  export CODEGRAPH_TELEMETRY="${CODEGRAPH_TELEMETRY:-0}"
+  printf '[codegraph] initializing index for %s\n' "$codegraph_project" >&2
+  if [ "$(id -u)" = "0" ] && ! is_truthy "$RUN_AS_ROOT"; then
+    if ! HOME=/home/node gosu node node "$codegraph_shim" init "$codegraph_project" >&2; then
+      printf '[codegraph] initial index failed; gateway will continue without it\n' >&2
+    fi
+  elif ! node "$codegraph_shim" init "$codegraph_project" >&2; then
+    printf '[codegraph] initial index failed; gateway will continue without it\n' >&2
+  fi
+}
+
+bootstrap_codegraph
+
 latest_backup="$(ls -1t "$CONFIG_DIR"/backups/.claude.json.backup.* 2>/dev/null | head -n 1 || true)"
 if [ ! -f "$CONFIG_FILE" ]; then
   if [ -n "$latest_backup" ] && [ -f "$latest_backup" ]; then

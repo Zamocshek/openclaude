@@ -108,6 +108,12 @@ const CODEX_ULTRA_APPEND_SYSTEM_PROMPT = [
   'Use xhigh model reasoning and automatically delegate independent, substantial subtasks through the Agent tool when delegation improves quality or throughput.',
   'Do not delegate trivial work, do not duplicate delegated work, and integrate and verify delegated results before responding.',
 ].join(' ')
+const CODEGRAPH_APPEND_SYSTEM_PROMPT = [
+  'CodeGraph semantic code intelligence may be available through the codegraph_explore MCP tool and the codegraph CLI.',
+  'For code architecture, execution flow, symbol relationships, implementation discovery, or change impact, use codegraph_explore before broad Grep, Glob, or Read exploration when the project has a .codegraph index.',
+  'Treat verbatim source returned by CodeGraph as already read; open files again only for an exact edit or when CodeGraph reports pending or stale content.',
+  'After edits, the CodeGraph watcher updates the index automatically. Use codegraph status when freshness matters, and fall back to built-in tools if the project is not indexed or the MCP server is unavailable.',
+].join(' ')
 const DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT = [
   'When running inside the Docker agent container and launching a web app or dev server, bind the server to 0.0.0.0 instead of 127.0.0.1.',
   'Preferred exposed container ports are 3000-3010, 5173, 8000, and 8080.',
@@ -250,6 +256,7 @@ function getApiGatewayAppendSystemPrompt(config: AgentGatewayConfig): string {
   if (getReasoningEffortForModel(configuredModel) === 'ultra') {
     parts.push(CODEX_ULTRA_APPEND_SYSTEM_PROMPT)
   }
+  parts.push(CODEGRAPH_APPEND_SYSTEM_PROMPT)
   if (hasOpenRAG) parts.push(OPENRAG_APPEND_SYSTEM_PROMPT)
   parts.push(CAMOFOX_APPEND_SYSTEM_PROMPT)
   parts.push(HINDSIGHT_APPEND_SYSTEM_PROMPT)

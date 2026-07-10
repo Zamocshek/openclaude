@@ -60,6 +60,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 
 RUN chmod +x scripts/docker-entrypoint.sh \
+    && ln -sf /app/node_modules/@colbymchenry/codegraph/npm-shim.js /usr/local/bin/codegraph \
     && mkdir -p /home/node/.openclaude \
     && chown -R node:node /home/node/.openclaude
 
