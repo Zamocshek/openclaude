@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { mkdtemp, rm } from 'fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { getDefaultAgentGatewayConfig, type AgentGatewayConfig } from './config.js'
@@ -207,6 +207,86 @@ describe('AgentApiServer', () => {
       headers: { Authorization: 'Bearer secret' },
     })
     expect(authorized.status).toBe(200)
+  })
+
+  test('manages redacted runtime MCP servers through the protected API', async () => {
+    const projectRoot = join(tempGatewayStateDir!, 'project')
+    await mkdir(projectRoot, { recursive: true })
+    await writeFile(join(projectRoot, '.mcp.json'), JSON.stringify({
+      mcpServers: {
+        core: { command: 'node', args: ['core-server.js'] },
+      },
+    }))
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({
+        api: { apiKey: 'secret' } as never,
+        runner: { cwd: projectRoot } as never,
+      }),
+    })
+    await server.start()
+
+    const unauthorized = await fetch(`${server.url}/api/mcp/servers`)
+    expect(unauthorized.status).toBe(401)
+
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    }
+    const imported = await fetch(`${server.url}/api/mcp/servers`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        mcpServers: {
+          search: {
+            command: 'npx',
+            args: ['-y', 'mcp-searxng'],
+            env: {
+              SEARXNG_URL: 'http://searxng:8080',
+              PRIVATE_API_KEY: 'must-not-be-returned',
+            },
+          },
+        },
+      }),
+    })
+    expect(imported.status).toBe(201)
+    const importedText = await imported.text()
+    expect(importedText).not.toContain('must-not-be-returned')
+    const importedBody = JSON.parse(importedText) as {
+      imported: string[]
+      normalized_npx: string[]
+      data: Array<{ name: string; enabled: boolean; envKeys: string[] }>
+    }
+    expect(importedBody.imported).toEqual(['search'])
+    expect(importedBody.normalized_npx).toEqual(['search'])
+    expect(importedBody.data.find(item => item.name === 'search')).toMatchObject({
+      enabled: true,
+      envKeys: ['PRIVATE_API_KEY', 'SEARXNG_URL'],
+    })
+
+    const disabled = await fetch(`${server.url}/api/mcp/servers/search`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    })
+    expect(disabled.status).toBe(200)
+    const disabledBody = await disabled.json() as {
+      data: Array<{ name: string; enabled: boolean }>
+    }
+    expect(disabledBody.data.find(item => item.name === 'search')?.enabled).toBe(false)
+
+    const removed = await fetch(`${server.url}/api/mcp/servers/search`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer secret' },
+    })
+    expect(removed.status).toBe(200)
+    const removedBody = await removed.json() as {
+      deleted: string
+      data: Array<{ name: string }>
+    }
+    expect(removedBody.deleted).toBe('search')
+    expect(removedBody.data.map(item => item.name)).toEqual(['core'])
   })
 
   test('serves bearer-protected Hermes-style memory endpoints', async () => {

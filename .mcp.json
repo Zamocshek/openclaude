@@ -56,6 +56,30 @@
       "env": {
         "CODEGRAPH_TELEMETRY": "0"
       }
+    },
+    "searxng": {
+      "command": "node",
+      "args": [
+        "scripts/run-project-mcp.cjs",
+        "mcp-searxng/dist/cli.js"
+      ],
+      "env": {
+        "SEARXNG_URL": "${SEARXNG_URL}",
+        "SEARXNG_MAX_RESULTS": "${SEARXNG_MAX_RESULTS}",
+        "SEARXNG_TIMEOUT_MS": "${SEARXNG_TIMEOUT_MS}"
+      }
+    },
+    "context7": {
+      "command": "node",
+      "args": [
+        "scripts/run-project-mcp.cjs",
+        "@upstash/context7-mcp/dist/index.js",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+      }
     }
   }
 }

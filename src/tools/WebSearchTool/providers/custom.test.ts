@@ -180,6 +180,26 @@ describe('custom provider blank env fallbacks', () => {
     expect(output.hits).toHaveLength(1)
     expect(output.hits[0].url).toBe('https://docs.example/result')
   })
+
+  test('requests JSON automatically for the SearXNG preset', async () => {
+    process.env.WEB_PROVIDER = 'searxng'
+    process.env.WEB_SEARCH_API = 'https://search.example.com/search'
+    process.env.OPENCLAUDE_AGENT_GATEWAY_CHILD = '1'
+
+    let seenUrl = ''
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      seenUrl = String(input)
+      return new Response(
+        JSON.stringify({ results: [{ title: 'Result', url: 'https://docs.example/result' }] }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    }) as typeof fetch
+
+    const output = await customProvider.search({ query: 'private metasearch' })
+
+    expect(new URL(seenUrl).searchParams.get('format')).toBe('json')
+    expect(output.hits).toHaveLength(1)
+  })
 })
 
 // ---------------------------------------------------------------------------

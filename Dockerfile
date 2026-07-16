@@ -42,6 +42,8 @@ COPY scripts/release/camofox-control.mjs scripts/release/camofox-control.mjs
 COPY scripts/release/hindsight-mcp-bridge.cjs scripts/release/hindsight-mcp-bridge.cjs
 COPY scripts/release/hindsight-control.mjs scripts/release/hindsight-control.mjs
 COPY scripts/release/test-hindsight-mcp-bridge.cjs scripts/release/test-hindsight-mcp-bridge.cjs
+COPY scripts/run-project-mcp.cjs scripts/run-project-mcp.cjs
+COPY scripts/run-npx-mcp.cjs scripts/run-npx-mcp.cjs
 
 # Install git and ripgrep - many CLI tool operations depend on them
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -59,8 +61,12 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
     && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 
+COPY --from=build /app/scripts/release/test-research-mcp.cjs scripts/release/test-research-mcp.cjs
+
 RUN chmod +x scripts/docker-entrypoint.sh \
     && ln -sf /app/node_modules/@colbymchenry/codegraph/npm-shim.js /usr/local/bin/codegraph \
+    && ln -sf /app/node_modules/mcp-searxng/dist/cli.js /usr/local/bin/mcp-searxng \
+    && ln -sf /app/node_modules/@upstash/context7-mcp/dist/index.js /usr/local/bin/context7-mcp \
     && mkdir -p /home/node/.openclaude \
     && chown -R node:node /home/node/.openclaude
 

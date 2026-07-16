@@ -44,6 +44,15 @@ import {
   getConversationContextTurnLimit,
   selectTextBlocksWithinCharBudget,
 } from './conversationContext.js'
+import {
+  describeManagedMcpServer,
+  importManagedMcpServers,
+  listManagedMcpServers,
+  parseMcpConfigImport,
+  removeManagedMcpServer,
+  setManagedMcpServerEnabled,
+  type ManagedMcpServer,
+} from './mcpRegistry.js'
 
 export type TelegramFileRef = {
   file_id: string
@@ -273,9 +282,21 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     commands: [
       { syntax: '/help', description: 'show this help and refresh the Telegram command menu', botDescription: 'Show Telegram control help' },
       { syntax: '/commands', description: 'show the same Telegram command reference' },
+      { syntax: '/panel', description: 'open the button control panel', botDescription: 'Open agent control panel' },
+      { syntax: '/control', description: 'open the same button control panel' },
       { syntax: '/chatid', description: 'show the current chat ID' },
       { syntax: '/status', description: 'show gateway, workers, cron, budget, and Ouroboros status' },
       { syntax: '/transcribe', description: 'check voice/audio transcription availability' },
+    ],
+  },
+  {
+    title: 'MCP servers',
+    commands: [
+      { syntax: '/mcp', description: 'open the MCP server control panel', botDescription: 'Manage MCP servers' },
+      { syntax: '/mcp add <json>', description: 'import one or more mcpServers definitions' },
+      { syntax: '/mcp enable <name>', description: 'enable an MCP server' },
+      { syntax: '/mcp disable <name>', description: 'disable an MCP server' },
+      { syntax: '/mcp remove <name>', description: 'remove a runtime MCP server or override' },
     ],
   },
   {
@@ -336,6 +357,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/consciousness [start|stop]', description: 'show, resume, or pause consciousness loop' },
       { syntax: '/evolution [on|off]', description: 'show or toggle self-improvement cycles' },
       { syntax: '/evolve [now|stop|status]', description: 'control autonomous evolution mode' },
+      { syntax: '/tools [on|off]', description: 'show, enable, or disable model tool calls', botDescription: 'Control model tools' },
       { syntax: '/review', description: 'run a deep architecture review cycle' },
       { syntax: '/infinite <goal>', description: 'run an opt-in persistent task loop' },
     ],
@@ -484,12 +506,17 @@ export class TelegramAgentBridge {
     text: string,
     inlineKeyboard: TelegramInlineKeyboard,
   ): Promise<void> {
-    await this.callTelegram('sendMessage', {
-      chat_id: chatId,
-      text,
-      disable_web_page_preview: true,
-      reply_markup: { inline_keyboard: inlineKeyboard },
-    })
+    const chunks = splitTelegramText(text)
+    for (let index = 0; index < chunks.length; index++) {
+      await this.callTelegram('sendMessage', {
+        chat_id: chatId,
+        text: chunks[index]!,
+        disable_web_page_preview: true,
+        ...(index === chunks.length - 1
+          ? { reply_markup: { inline_keyboard: inlineKeyboard } }
+          : {}),
+      })
+    }
   }
 
   private async editCallbackMessage(
@@ -866,7 +893,16 @@ export class TelegramAgentBridge {
     const commandText = normalizeTelegramCommand(text)
 
     if (commandText === '/start' || commandText === '/help' || commandText === '/commands') {
-      await this.sendMessage(chatId, buildTelegramHelpText())
+      await this.sendMessageWithKeyboard(
+        chatId,
+        buildTelegramHelpText(),
+        buildTelegramControlKeyboard(),
+      )
+      return
+    }
+
+    if (commandText === '/panel' || commandText === '/control') {
+      await this.sendControlPanel(chatId)
       return
     }
 
@@ -896,6 +932,11 @@ export class TelegramAgentBridge {
         chatId,
         commandText.slice('/provider'.length).trim(),
       )
+      return
+    }
+
+    if (commandText === '/mcp' || commandText.startsWith('/mcp ')) {
+      await this.handleMcpCommand(chatId, getTelegramCommandBody(text, 'mcp'))
       return
     }
 
@@ -969,6 +1010,11 @@ export class TelegramAgentBridge {
 
     if (commandText === '/review') {
       await this.handleReviewCommand(chatId)
+      return
+    }
+
+    if (commandText === '/tools' || commandText.startsWith('/tools ')) {
+      await this.handleToolsCommand(chatId, commandText.slice('/tools'.length).trim())
       return
     }
 
@@ -1129,6 +1175,12 @@ export class TelegramAgentBridge {
 
     if (text === '/undo') {
       await this.handleUndoCommand(chatId)
+      return
+    }
+
+    const mcpImport = parseMcpConfigImport(text)
+    if (mcpImport) {
+      await this.handleMcpImport(chatId, mcpImport)
       return
     }
 
@@ -1418,6 +1470,193 @@ export class TelegramAgentBridge {
         : `Error processing audio message: ${detail}`
       await this.sendMessage(chatId, errorMessage)
     }
+  }
+
+  private mcpProjectRoot(): string {
+    return this.config.runner.cwd || process.cwd()
+  }
+
+  private async sendControlPanel(chatId: string): Promise<void> {
+    const profile = await loadProviderProfile()
+    const servers = await listManagedMcpServers(this.mcpProjectRoot())
+    const evolution = await loadEvolutionState()
+    await this.sendMessageWithKeyboard(
+      chatId,
+      formatTelegramControlPanel({
+        profile,
+        mcpEnabled: servers.filter(server => server.enabled).length,
+        mcpTotal: servers.length,
+        toolsEnabled: !this.config.runner.disableTools,
+        cronEnabled: this.config.cron.enabled,
+        consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+        evolutionEnabled: evolution.enabled,
+      }),
+      buildTelegramControlKeyboard(),
+    )
+  }
+
+  private async sendMcpMenu(chatId: string): Promise<void> {
+    const servers = await listManagedMcpServers(this.mcpProjectRoot())
+    await this.sendMessageWithKeyboard(
+      chatId,
+      formatTelegramMcpMenu(servers),
+      buildTelegramMcpKeyboard(servers),
+    )
+  }
+
+  private async editMcpMenu(query: TelegramCallbackQuery): Promise<void> {
+    const servers = await listManagedMcpServers(this.mcpProjectRoot())
+    await this.editCallbackMessage(
+      query,
+      formatTelegramMcpMenu(servers),
+      buildTelegramMcpKeyboard(servers),
+    )
+  }
+
+  private async handleMcpImport(
+    chatId: string,
+    parsed: NonNullable<ReturnType<typeof parseMcpConfigImport>>,
+  ): Promise<void> {
+    if (parsed.ok === false) {
+      await this.sendMessageWithKeyboard(
+        chatId,
+        `MCP import rejected: ${parsed.error}`,
+        [[{ text: 'MCP servers', callback_data: 'menu:mcp' }]],
+      )
+      return
+    }
+
+    const imported = Object.keys(parsed.config.mcpServers)
+    const servers = await importManagedMcpServers(this.mcpProjectRoot(), parsed.config)
+    const lines = [
+      `MCP import complete: ${imported.join(', ')}`,
+      'The new configuration is applied to the next agent run.',
+    ]
+    if (parsed.normalizedNpxServers.length > 0) {
+      lines.push(
+        `Cross-platform npx launcher applied: ${parsed.normalizedNpxServers.join(', ')}`,
+      )
+    }
+    await this.sendMessageWithKeyboard(
+      chatId,
+      lines.join('\n'),
+      buildTelegramMcpKeyboard(servers),
+    )
+  }
+
+  private async handleMcpCommand(chatId: string, commandBody: string): Promise<void> {
+    const body = commandBody.trim()
+    if (!body || ['list', 'status', 'show'].includes(body.toLowerCase())) {
+      await this.sendMcpMenu(chatId)
+      return
+    }
+
+    if (body.toLowerCase() === 'add') {
+      await this.sendMessageWithKeyboard(
+        chatId,
+        buildTelegramMcpImportInstructions(),
+        [[
+          { text: 'MCP servers', callback_data: 'menu:mcp' },
+          { text: 'Control panel', callback_data: 'menu:control' },
+        ]],
+      )
+      return
+    }
+
+    if (body.toLowerCase().startsWith('add ')) {
+      const parsed = parseMcpConfigImport(body.slice(4))
+      if (!parsed) {
+        await this.sendMessage(chatId, 'MCP import rejected: expected a JSON object with mcpServers.')
+        return
+      }
+      await this.handleMcpImport(chatId, parsed)
+      return
+    }
+
+    const actionMatch = body.match(/^(enable|disable|remove|delete)\s+([A-Za-z0-9._-]{1,40})$/iu)
+    if (actionMatch) {
+      const action = actionMatch[1]!.toLowerCase()
+      const name = actionMatch[2]!
+      try {
+        const servers = action === 'remove' || action === 'delete'
+          ? await removeManagedMcpServer(this.mcpProjectRoot(), name)
+          : await setManagedMcpServerEnabled(
+              this.mcpProjectRoot(),
+              name,
+              action === 'enable',
+            )
+        await this.sendMessageWithKeyboard(
+          chatId,
+          `${action === 'delete' ? 'remove' : action}: ${name}\nApplied to the next agent run.`,
+          buildTelegramMcpKeyboard(servers),
+        )
+      } catch (error) {
+        await this.sendMessage(chatId, `MCP command failed: ${summarizeTelegramError(error)}`)
+      }
+      return
+    }
+
+    const parsed = parseMcpConfigImport(body)
+    if (parsed) {
+      await this.handleMcpImport(chatId, parsed)
+      return
+    }
+
+    await this.sendMessage(
+      chatId,
+      'Usage: /mcp | /mcp add <json> | /mcp enable <name> | /mcp disable <name> | /mcp remove <name>',
+    )
+  }
+
+  private async handleToolsCommand(chatId: string, commandBody: string): Promise<void> {
+    const action = commandBody.trim().toLowerCase() || 'status'
+    if (action === 'status') {
+      await this.sendMessageWithKeyboard(
+        chatId,
+        `Model tool calls: ${this.config.runner.disableTools ? 'OFF' : 'ON'}`,
+        buildTelegramRuntimeKeyboard({
+          toolsEnabled: !this.config.runner.disableTools,
+          cronEnabled: this.config.cron.enabled,
+          consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+          evolutionEnabled: (await loadEvolutionState()).enabled,
+        }),
+      )
+      return
+    }
+    if (!['on', 'off', '1', '0', 'enable', 'disable'].includes(action)) {
+      await this.sendMessage(chatId, 'Usage: /tools [on|off]')
+      return
+    }
+
+    const enabled = ['on', '1', 'enable'].includes(action)
+    const updates = { OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS: enabled ? '0' : '1' }
+    await updateProjectEnvFile(updates)
+    applyRuntimeEnvUpdates(updates)
+    await updateAgentGatewayConfig(current => ({
+      ...current,
+      runner: { ...current.runner, disableTools: !enabled },
+    }))
+    this.config.runner.disableTools = !enabled
+    await this.sendMessage(chatId, `Model tool calls: ${enabled ? 'ON' : 'OFF'}`)
+  }
+
+  private async editRuntimeMenu(query: TelegramCallbackQuery): Promise<void> {
+    const evolution = await loadEvolutionState()
+    await this.editCallbackMessage(
+      query,
+      formatTelegramRuntimePanel({
+        toolsEnabled: !this.config.runner.disableTools,
+        cronEnabled: this.config.cron.enabled,
+        consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+        evolutionEnabled: evolution.enabled,
+      }),
+      buildTelegramRuntimeKeyboard({
+        toolsEnabled: !this.config.runner.disableTools,
+        cronEnabled: this.config.cron.enabled,
+        consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+        evolutionEnabled: evolution.enabled,
+      }),
+    )
   }
 
   private async handleTranscribeStatusCommand(chatId: string): Promise<void> {
@@ -2058,6 +2297,12 @@ export class TelegramAgentBridge {
   ): Promise<void> {
     const action = commandBody.trim().toLowerCase() || 'status'
     if (['start', 'on', '1'].includes(action)) {
+      const updates = {
+        OPENCLAUDE_OUROBOROS_ENABLED: '1',
+        OPENCLAUDE_CONSCIOUSNESS_ENABLED: '1',
+      }
+      await updateProjectEnvFile(updates)
+      applyRuntimeEnvUpdates(updates)
       await updateAgentGatewayConfig(current => ({
         ...current,
         ouroboros: {
@@ -2066,6 +2311,8 @@ export class TelegramAgentBridge {
           consciousnessEnabled: true,
         },
       }))
+      this.config.ouroboros.enabled = true
+      this.config.ouroboros.consciousnessEnabled = true
       await this.sendMessage(chatId, 'Background consciousness: starting.')
       await this.acknowledgeTelegramUpdates()
       const runtime = await restartAgentGateway()
@@ -2076,6 +2323,9 @@ export class TelegramAgentBridge {
 
     if (['stop', 'off', '0'].includes(action)) {
       getAgentGatewayRuntime()?.consciousness?.pause()
+      const updates = { OPENCLAUDE_CONSCIOUSNESS_ENABLED: '0' }
+      await updateProjectEnvFile(updates)
+      applyRuntimeEnvUpdates(updates)
       await updateAgentGatewayConfig(current => ({
         ...current,
         ouroboros: {
@@ -2083,6 +2333,7 @@ export class TelegramAgentBridge {
           consciousnessEnabled: false,
         },
       }))
+      this.config.ouroboros.consciousnessEnabled = false
       await this.sendMessage(chatId, 'Background consciousness: stopping.')
       await this.acknowledgeTelegramUpdates()
       await restartAgentGateway()
@@ -2091,6 +2342,20 @@ export class TelegramAgentBridge {
     }
 
     await this.handleConsciousnessCommand(chatId)
+  }
+
+  private async handleCronToggleCommand(chatId: string, enabled: boolean): Promise<void> {
+    const updates = { OPENCLAUDE_AGENT_CRON_ENABLED: enabled ? '1' : '0' }
+    await updateProjectEnvFile(updates)
+    applyRuntimeEnvUpdates(updates)
+    await updateAgentGatewayConfig(current => ({
+      ...current,
+      cron: { ...current.cron, enabled },
+    }))
+    this.config.cron.enabled = enabled
+    await this.sendMessage(chatId, `Cron scheduler: ${enabled ? 'ON' : 'OFF'}. Restarting gateway.`)
+    await this.acknowledgeTelegramUpdates()
+    await restartAgentGateway()
   }
 
   private async handleEvolveCommand(
@@ -2440,6 +2705,313 @@ export class TelegramAgentBridge {
     }
 
     try {
+      if (data === 'menu:control') {
+        const profile = await loadProviderProfile()
+        const servers = await listManagedMcpServers(this.mcpProjectRoot())
+        const evolution = await loadEvolutionState()
+        await this.editCallbackMessage(
+          query,
+          formatTelegramControlPanel({
+            profile,
+            mcpEnabled: servers.filter(server => server.enabled).length,
+            mcpTotal: servers.length,
+            toolsEnabled: !this.config.runner.disableTools,
+            cronEnabled: this.config.cron.enabled,
+            consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+            evolutionEnabled: evolution.enabled,
+          }),
+          buildTelegramControlKeyboard(),
+        )
+        return
+      }
+
+      if (data === 'control:help') {
+        await this.sendMessageWithKeyboard(
+          chatId,
+          buildTelegramHelpText(),
+          buildTelegramControlKeyboard(),
+        )
+        return
+      }
+
+      if (data === 'control:status') {
+        await this.handleStatusCommand(chatId)
+        return
+      }
+
+      if (data === 'menu:mcp') {
+        await this.editMcpMenu(query)
+        return
+      }
+
+      if (data === 'mcp:add') {
+        await this.editCallbackMessage(
+          query,
+          buildTelegramMcpImportInstructions(),
+          [[
+            { text: 'MCP servers', callback_data: 'menu:mcp' },
+            { text: 'Control panel', callback_data: 'menu:control' },
+          ]],
+        )
+        return
+      }
+
+      const mcpAction = data.match(/^mcp:(view|toggle|delete|confirm-delete):([A-Za-z0-9._-]{1,40})$/u)
+      if (mcpAction) {
+        const action = mcpAction[1]!
+        const name = mcpAction[2]!
+        const servers = await listManagedMcpServers(this.mcpProjectRoot())
+        const server = servers.find(item => item.name === name)
+        if (!server) throw new Error(`MCP server not found: ${name}`)
+
+        if (action === 'view') {
+          await this.editCallbackMessage(
+            query,
+            formatTelegramMcpServer(server),
+            buildTelegramMcpServerKeyboard(server),
+          )
+          return
+        }
+        if (action === 'toggle') {
+          await setManagedMcpServerEnabled(
+            this.mcpProjectRoot(),
+            name,
+            !server.enabled,
+          )
+          await this.editMcpMenu(query)
+          return
+        }
+        if (action === 'delete') {
+          if (server.origin === 'base') {
+            throw new Error(`Base MCP server ${name} can be disabled but not removed`)
+          }
+          await this.editCallbackMessage(
+            query,
+            `Remove runtime MCP configuration ${name}?`,
+            [[
+              { text: 'Remove', callback_data: `mcp:confirm-delete:${name}` },
+              { text: 'Cancel', callback_data: `mcp:view:${name}` },
+            ]],
+          )
+          return
+        }
+        await removeManagedMcpServer(this.mcpProjectRoot(), name)
+        await this.editMcpMenu(query)
+        return
+      }
+
+      if (data === 'menu:runtime') {
+        await this.editRuntimeMenu(query)
+        return
+      }
+
+      if (data === 'runtime:tools') {
+        await this.handleToolsCommand(
+          chatId,
+          this.config.runner.disableTools ? 'on' : 'off',
+        )
+        await this.editRuntimeMenu(query)
+        return
+      }
+
+      if (data === 'runtime:consciousness') {
+        await this.handleBgCommand(
+          chatId,
+          this.config.ouroboros.consciousnessEnabled ? 'stop' : 'start',
+        )
+        return
+      }
+
+      if (data === 'runtime:evolution') {
+        const state = await loadEvolutionState()
+        await this.handleEvolutionToggleCommand(chatId, !state.enabled)
+        await this.editRuntimeMenu(query)
+        return
+      }
+
+      if (data === 'runtime:cron') {
+        await this.handleCronToggleCommand(chatId, !this.config.cron.enabled)
+        return
+      }
+
+      if (data === 'runtime:evolve') {
+        await this.handleEvolveNowCommand(chatId)
+        return
+      }
+
+      if (data === 'runtime:review') {
+        await this.handleReviewCommand(chatId)
+        return
+      }
+
+      if (data === 'runtime:restart') {
+        await this.editCallbackMessage(
+          query,
+          'Restart the gateway runtime?',
+          [[
+            { text: 'Restart', callback_data: 'runtime:confirm-restart' },
+            { text: 'Cancel', callback_data: 'menu:runtime' },
+          ]],
+        )
+        return
+      }
+
+      if (data === 'runtime:confirm-restart') {
+        await this.handleRestartCommand(chatId)
+        return
+      }
+
+      if (data === 'runtime:panic') {
+        await this.editCallbackMessage(
+          query,
+          'Stop all tasks and the gateway runtime?',
+          [[
+            { text: 'Stop runtime', callback_data: 'runtime:confirm-panic' },
+            { text: 'Cancel', callback_data: 'menu:runtime' },
+          ]],
+        )
+        return
+      }
+
+      if (data === 'runtime:confirm-panic') {
+        await this.handlePanicCommand(chatId)
+        return
+      }
+
+      if (data === 'menu:schedule') {
+        const jobs = (await listCronJobs(true)).filter(
+          job => job.origin?.platform === 'telegram' && job.origin.chatId === chatId,
+        )
+        await this.editCallbackMessage(
+          query,
+          formatTelegramSchedulePanel(jobs),
+          buildTelegramScheduleKeyboard(jobs),
+        )
+        return
+      }
+
+      if (data === 'cron:add') {
+        await this.editCallbackMessage(
+          query,
+          'Create a scheduled task with:\n/schedule every 1h | prompt\n/schedule 0 22 * * * | prompt',
+          [[
+            { text: 'Schedules', callback_data: 'menu:schedule' },
+            { text: 'Control panel', callback_data: 'menu:control' },
+          ]],
+        )
+        return
+      }
+
+      if (data === 'cron:reload') {
+        await this.handleCronCommand(chatId, 'reload')
+        return
+      }
+
+      const cronAction = data.match(/^cron:(run|pause|resume|delete|confirm-delete):([^:]{1,48})$/u)
+      if (cronAction) {
+        const action = cronAction[1]!
+        const jobId = cronAction[2]!
+        if (action === 'run') await this.handleRunJobCommand(chatId, jobId)
+        else if (action === 'pause') await this.handlePauseJobCommand(chatId, jobId)
+        else if (action === 'resume') await this.handleResumeJobCommand(chatId, jobId)
+        else if (action === 'delete') {
+          await this.editCallbackMessage(
+            query,
+            `Delete scheduled job ${jobId}?`,
+            [[
+              { text: 'Delete', callback_data: `cron:confirm-delete:${jobId}` },
+              { text: 'Cancel', callback_data: 'menu:schedule' },
+            ]],
+          )
+          return
+        } else await this.handleDeleteJobCommand(chatId, jobId)
+        return
+      }
+
+      if (data === 'menu:memory') {
+        await this.editCallbackMessage(
+          query,
+          'Memory and repository knowledge',
+          buildTelegramMemoryKeyboard(),
+        )
+        return
+      }
+
+      if (data === 'memory:identity') {
+        await this.handleIdentityCommand(chatId)
+        return
+      }
+      if (data === 'memory:scratchpad') {
+        await this.handleScratchpadCommand(chatId)
+        return
+      }
+      if (data === 'memory:bible') {
+        await this.handleBibleCommand(chatId)
+        return
+      }
+      if (data === 'memory:architecture') {
+        await this.handleArchitectureCommand(chatId)
+        return
+      }
+
+      if (data === 'menu:research') {
+        await this.editCallbackMessage(
+          query,
+          `Research mode: ${this.chatModes.get(chatId) || 'off'}`,
+          buildTelegramResearchKeyboard(this.chatModes.get(chatId)),
+        )
+        return
+      }
+
+      const modeAction = data.match(/^mode:(bio|social|code|off)$/u)
+      if (modeAction) {
+        const mode = modeAction[1] as TelegramResearchMode | 'off'
+        if (mode === 'off') this.chatModes.delete(chatId)
+        else this.chatModes.set(chatId, mode)
+        await this.editCallbackMessage(
+          query,
+          `Research mode: ${mode}`,
+          buildTelegramResearchKeyboard(mode === 'off' ? undefined : mode),
+        )
+        return
+      }
+
+      if (data === 'menu:git') {
+        await this.editCallbackMessage(query, 'Repository controls', buildTelegramGitKeyboard())
+        return
+      }
+      if (data === 'git:status') {
+        await this.handleGitStatusCommand(chatId)
+        return
+      }
+      if (data === 'git:log') {
+        await this.handleGitLogCommand(chatId)
+        return
+      }
+      if (data === 'git:diff') {
+        await this.handleGitDiffCommand(chatId, '')
+        return
+      }
+      if (data === 'git:commit') {
+        await this.sendMessage(chatId, 'Commit with: /git commit <message>')
+        return
+      }
+      if (data === 'git:undo') {
+        await this.editCallbackMessage(
+          query,
+          'Hard-reset the last git commit?',
+          [[
+            { text: 'Undo commit', callback_data: 'git:confirm-undo' },
+            { text: 'Cancel', callback_data: 'menu:git' },
+          ]],
+        )
+        return
+      }
+      if (data === 'git:confirm-undo') {
+        await this.handleUndoCommand(chatId)
+        return
+      }
+
       if (data === 'menu:providers') {
         const profile = await loadProviderProfile()
         await this.editCallbackMessage(
@@ -2566,20 +3138,24 @@ export class TelegramAgentBridge {
       }
 
       if (data === 'manual:provider') {
-        await this.sendMessage(
+        await this.sendMessageWithKeyboard(
           chatId,
           [
-            'Manual provider/model input:',
+            'Add or update a provider:',
             '/provider set <provider> <model> [base_url] [api_key]',
             '/model <model>',
             '/reasoning low|medium|high|xhigh|max|ultra',
           ].join('\n'),
+          [[
+            { text: 'Providers', callback_data: 'menu:providers' },
+            { text: 'Control panel', callback_data: 'menu:control' },
+          ]],
         )
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      await recordTelegramError(chatId, 'telegram-provider-callback', detail)
-      await this.sendMessage(chatId, `Provider menu error: ${detail}`)
+      await recordTelegramError(chatId, 'telegram-control-callback', detail)
+      await this.sendMessage(chatId, `Control panel error: ${detail}`)
     }
   }
 
@@ -3335,6 +3911,250 @@ export type AgentProviderProfile = {
 
 type TelegramProgressProviderProfile = Pick<AgentProviderProfile, 'provider' | 'model'>
 
+type TelegramRuntimePanelState = {
+  toolsEnabled: boolean
+  cronEnabled: boolean
+  consciousnessEnabled: boolean
+  evolutionEnabled: boolean
+}
+
+type TelegramControlPanelState = TelegramRuntimePanelState & {
+  profile: AgentProviderProfile
+  mcpEnabled: number
+  mcpTotal: number
+}
+
+export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
+  return [
+    [
+      { text: 'Providers and models', callback_data: 'menu:providers' },
+      { text: 'MCP servers', callback_data: 'menu:mcp' },
+    ],
+    [
+      { text: 'Runtime', callback_data: 'menu:runtime' },
+      { text: 'Schedules', callback_data: 'menu:schedule' },
+    ],
+    [
+      { text: 'Memory', callback_data: 'menu:memory' },
+      { text: 'Research modes', callback_data: 'menu:research' },
+    ],
+    [
+      { text: 'Repository', callback_data: 'menu:git' },
+      { text: 'Status', callback_data: 'control:status' },
+    ],
+    [{ text: 'Help', callback_data: 'control:help' }],
+  ]
+}
+
+function formatTelegramControlPanel(state: TelegramControlPanelState): string {
+  return [
+    'OpenClaude control panel',
+    '',
+    `Provider: ${state.profile.provider}`,
+    `Model: ${state.profile.model || 'not set'}`,
+    `MCP servers: ${state.mcpEnabled}/${state.mcpTotal} enabled`,
+    `Model tools: ${state.toolsEnabled ? 'ON' : 'OFF'}`,
+    `Cron: ${state.cronEnabled ? 'ON' : 'OFF'}`,
+    `Consciousness: ${state.consciousnessEnabled ? 'ON' : 'OFF'}`,
+    `Evolution: ${state.evolutionEnabled ? 'ON' : 'OFF'}`,
+  ].join('\n')
+}
+
+function buildTelegramMcpImportInstructions(): string {
+  return [
+    'Send a JSON object containing mcpServers as the next message, or use /mcp add <json>.',
+    'Example:',
+    '{',
+    '  "mcpServers": {',
+    '    "example": {',
+    '      "command": "npx",',
+    '      "args": ["-y", "example-mcp"],',
+    '      "env": { "API_KEY": "value" }',
+    '    }',
+    '  }',
+    '}',
+    '',
+    'Accepted transports: stdio, http, sse, ws. Secrets are stored in the private gateway state and are not echoed back.',
+  ].join('\n')
+}
+
+export function formatTelegramMcpMenu(servers: ManagedMcpServer[]): string {
+  const lines = [
+    'MCP server control',
+    `${servers.filter(server => server.enabled).length}/${servers.length} enabled`,
+  ]
+  if (servers.length === 0) lines.push('', 'No MCP servers configured.')
+  for (const server of servers) {
+    const info = describeManagedMcpServer(server)
+    lines.push(
+      '',
+      `${server.enabled ? 'ON' : 'OFF'} ${server.name} [${server.origin}]`,
+      `${info.transport}: ${info.target || 'not set'}`,
+      info.envKeys.length ? `env: ${info.envKeys.join(', ')}` : 'env: none',
+    )
+  }
+  return lines.join('\n').slice(0, 3900)
+}
+
+export function buildTelegramMcpKeyboard(
+  servers: ManagedMcpServer[],
+): TelegramInlineKeyboard {
+  const rows: TelegramInlineKeyboard = servers.map(server => [{
+    text: `${server.enabled ? 'ON' : 'OFF'} ${truncateTelegramButton(server.name)}`,
+    callback_data: `mcp:view:${server.name}`,
+  }])
+  rows.push([
+    { text: 'Add JSON', callback_data: 'mcp:add' },
+    { text: 'Refresh', callback_data: 'menu:mcp' },
+  ])
+  rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
+  return rows
+}
+
+function formatTelegramMcpServer(server: ManagedMcpServer): string {
+  const info = describeManagedMcpServer(server)
+  return [
+    `MCP server: ${server.name}`,
+    `State: ${server.enabled ? 'ON' : 'OFF'}`,
+    `Origin: ${server.origin}`,
+    `Transport: ${info.transport}`,
+    `Target: ${info.target || 'not set'}`,
+    `Environment keys: ${info.envKeys.join(', ') || 'none'}`,
+    `Header keys: ${info.headerKeys.join(', ') || 'none'}`,
+    '',
+    'Changes apply to the next agent run.',
+  ].join('\n')
+}
+
+function buildTelegramMcpServerKeyboard(server: ManagedMcpServer): TelegramInlineKeyboard {
+  const rows: TelegramInlineKeyboard = [[{
+    text: server.enabled ? 'Disable' : 'Enable',
+    callback_data: `mcp:toggle:${server.name}`,
+  }]]
+  if (server.origin !== 'base') {
+    rows[0]!.push({ text: 'Remove', callback_data: `mcp:delete:${server.name}` })
+  }
+  rows.push([
+    { text: 'MCP servers', callback_data: 'menu:mcp' },
+    { text: 'Control panel', callback_data: 'menu:control' },
+  ])
+  return rows
+}
+
+function formatTelegramRuntimePanel(state: TelegramRuntimePanelState): string {
+  return [
+    'Runtime controls',
+    '',
+    `Model tools: ${state.toolsEnabled ? 'ON' : 'OFF'}`,
+    `Cron scheduler: ${state.cronEnabled ? 'ON' : 'OFF'}`,
+    `Background consciousness: ${state.consciousnessEnabled ? 'ON' : 'OFF'}`,
+    `Evolution: ${state.evolutionEnabled ? 'ON' : 'OFF'}`,
+  ].join('\n')
+}
+
+export function buildTelegramRuntimeKeyboard(
+  state: TelegramRuntimePanelState,
+): TelegramInlineKeyboard {
+  return [
+    [
+      { text: `Tools ${state.toolsEnabled ? 'ON' : 'OFF'}`, callback_data: 'runtime:tools' },
+      { text: `Cron ${state.cronEnabled ? 'ON' : 'OFF'}`, callback_data: 'runtime:cron' },
+    ],
+    [
+      { text: `Consciousness ${state.consciousnessEnabled ? 'ON' : 'OFF'}`, callback_data: 'runtime:consciousness' },
+      { text: `Evolution ${state.evolutionEnabled ? 'ON' : 'OFF'}`, callback_data: 'runtime:evolution' },
+    ],
+    [
+      { text: 'Evolve now', callback_data: 'runtime:evolve' },
+      { text: 'Architecture review', callback_data: 'runtime:review' },
+    ],
+    [
+      { text: 'Restart', callback_data: 'runtime:restart' },
+      { text: 'Stop runtime', callback_data: 'runtime:panic' },
+    ],
+    [{ text: 'Control panel', callback_data: 'menu:control' }],
+  ]
+}
+
+function formatTelegramSchedulePanel(jobs: CronJob[]): string {
+  if (jobs.length === 0) return 'Schedules\n\nNo jobs for this Telegram chat.'
+  return [
+    'Schedules',
+    '',
+    ...jobs.flatMap(job => [
+      `${job.id} - ${job.name}`,
+      `${job.state}; ${job.scheduleDisplay}; next: ${job.nextRunAt || 'none'}`,
+      '',
+    ]),
+  ].join('\n').trim().slice(0, 3900)
+}
+
+function buildTelegramScheduleKeyboard(jobs: CronJob[]): TelegramInlineKeyboard {
+  const rows: TelegramInlineKeyboard = []
+  for (const job of jobs) {
+    if (!/^[A-Za-z0-9._-]{1,48}$/u.test(job.id)) continue
+    rows.push([
+      { text: `Run ${truncateTelegramButton(job.name, 24)}`, callback_data: `cron:run:${job.id}` },
+      {
+        text: job.enabled ? 'Pause' : 'Resume',
+        callback_data: `${job.enabled ? 'cron:pause:' : 'cron:resume:'}${job.id}`,
+      },
+      { text: 'Delete', callback_data: `cron:delete:${job.id}` },
+    ])
+  }
+  rows.push([
+    { text: 'Add schedule', callback_data: 'cron:add' },
+    { text: 'Reload', callback_data: 'cron:reload' },
+  ])
+  rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
+  return rows
+}
+
+function buildTelegramMemoryKeyboard(): TelegramInlineKeyboard {
+  return [
+    [
+      { text: 'Identity', callback_data: 'memory:identity' },
+      { text: 'Scratchpad', callback_data: 'memory:scratchpad' },
+    ],
+    [
+      { text: 'Constitution', callback_data: 'memory:bible' },
+      { text: 'Architecture', callback_data: 'memory:architecture' },
+    ],
+    [{ text: 'Control panel', callback_data: 'menu:control' }],
+  ]
+}
+
+function buildTelegramResearchKeyboard(
+  active?: TelegramResearchMode,
+): TelegramInlineKeyboard {
+  return [
+    [
+      { text: `${active === 'bio' ? '* ' : ''}Biology`, callback_data: 'mode:bio' },
+      { text: `${active === 'social' ? '* ' : ''}Social`, callback_data: 'mode:social' },
+      { text: `${active === 'code' ? '* ' : ''}Code`, callback_data: 'mode:code' },
+    ],
+    [
+      { text: 'Mode off', callback_data: 'mode:off' },
+      { text: 'Control panel', callback_data: 'menu:control' },
+    ],
+  ]
+}
+
+function buildTelegramGitKeyboard(): TelegramInlineKeyboard {
+  return [
+    [
+      { text: 'Status', callback_data: 'git:status' },
+      { text: 'Log', callback_data: 'git:log' },
+      { text: 'Diff', callback_data: 'git:diff' },
+    ],
+    [
+      { text: 'Commit', callback_data: 'git:commit' },
+      { text: 'Undo commit', callback_data: 'git:undo' },
+    ],
+    [{ text: 'Control panel', callback_data: 'menu:control' }],
+  ]
+}
+
 type ProviderInfo = {
   value: string
   flag: 'openai' | 'anthropic' | 'gemini' | 'mistral' | 'github'
@@ -3418,7 +4238,8 @@ export function buildTelegramProviderKeyboard(activeProvider: string): TelegramI
       })),
     )
   }
-  rows.push([{ text: 'Manual input', callback_data: 'manual:provider' }])
+  rows.push([{ text: 'Add / manual provider', callback_data: 'manual:provider' }])
+  rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
   return rows
 }
 
@@ -3452,8 +4273,9 @@ export function buildTelegramModelKeyboard(
   }
   rows.push([
     { text: 'Providers', callback_data: 'menu:providers' },
-    { text: 'Manual input', callback_data: 'manual:provider' },
+    { text: 'Add / manual', callback_data: 'manual:provider' },
   ])
+  rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
   return rows
 }
 
@@ -3467,6 +4289,7 @@ function buildTelegramActiveProfileKeyboard(
   if (profile.provider === 'codex') {
     rows.unshift([{ text: 'Reasoning', callback_data: 'menu:reasoning' }])
   }
+  rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
   return rows
 }
 
@@ -3489,6 +4312,7 @@ export function buildTelegramReasoningKeyboard(
     { text: 'Models', callback_data: `models:${profile.provider}:0` },
     { text: 'Providers', callback_data: 'menu:providers' },
   ])
+  rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
   return rows
 }
 
@@ -3556,8 +4380,9 @@ function formatReasoningLabel(level: ReasoningEffort): string {
   return level.charAt(0).toUpperCase() + level.slice(1)
 }
 
-function truncateTelegramButton(value: string): string {
-  return value.length > 42 ? `${value.slice(0, 39)}...` : value
+function truncateTelegramButton(value: string, maxLength = 42): string {
+  const limit = Math.max(4, maxLength)
+  return value.length > limit ? `${value.slice(0, limit - 3)}...` : value
 }
 
 async function formatContextWindowStatus(): Promise<string> {
@@ -4238,6 +5063,12 @@ function normalizeTelegramCommand(text: string): string {
   const [command = '', ...rest] = trimmed.split(/\s+/)
   const normalizedCommand = command.replace(/@[A-Za-z0-9_]+$/, '').toLowerCase()
   return [normalizedCommand, ...rest].join(' ').trim()
+}
+
+function getTelegramCommandBody(text: string, command: string): string {
+  return text
+    .replace(new RegExp(`^/${command}(?:@[A-Za-z0-9_]+)?(?:\\s+|$)`, 'iu'), '')
+    .trim()
 }
 
 export function hasTelegramMemoryIntent(text: string): boolean {

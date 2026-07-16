@@ -9,16 +9,20 @@ import {
   buildTelegramBotCommands,
   buildTelegramDownloadFileName,
   buildTelegramHelpText,
+  buildTelegramControlKeyboard,
+  buildTelegramMcpKeyboard,
   buildTelegramModelKeyboard,
   buildTelegramProviderKeyboard,
   buildTelegramProviderProfileUpdate,
   buildTelegramReasoningKeyboard,
+  buildTelegramRuntimeKeyboard,
   buildTelegramReplyContext,
   extractTelegramCronDirectives,
   extractTelegramSendDirectives,
   formatTelegramReplyContext,
   formatTelegramProgressText,
   formatTelegramQueueNotice,
+  formatTelegramMcpMenu,
   formatTelegramConversationTranscript,
   formatTelegramAgentFailureForRecovery,
   getAgentRecoveryFailureSignature,
@@ -74,6 +78,9 @@ describe('agent gateway Telegram bridge helpers', () => {
 
     expect(help).toContain('OpenClaude Telegram inference is online.')
     expect(help).toContain('/provider set <provider> <model> [base_url] [api_key]')
+    expect(help).toContain('/panel - open the button control panel')
+    expect(help).toContain('/mcp add <json> - import one or more mcpServers definitions')
+    expect(help).toContain('/tools [on|off] - show, enable, or disable model tool calls')
     expect(help).toContain('/dsflash - switch to DeepSeek V4 Flash')
     expect(help).toContain('/gemmacoder - switch to LM Studio Huihui Gemma Coder')
     expect(help).toContain('/context auto|1m|<tokens> - set manual context window or return to model auto mode')
@@ -88,6 +95,18 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands).toContainEqual({
       command: 'provider',
       description: 'Show or switch provider/model',
+    })
+    expect(commands).toContainEqual({
+      command: 'panel',
+      description: 'Open agent control panel',
+    })
+    expect(commands).toContainEqual({
+      command: 'mcp',
+      description: 'Manage MCP servers',
+    })
+    expect(commands).toContainEqual({
+      command: 'tools',
+      description: 'Control model tools',
     })
     expect(commands).toContainEqual({
       command: 'dsflash',
@@ -108,6 +127,50 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands.every(item => !item.command.startsWith('/'))).toBe(true)
     expect(commands.every(item => item.command.length <= 32)).toBe(true)
     expect(commands.every(item => item.description.length <= 256)).toBe(true)
+  })
+
+  test('builds button panels for MCP and runtime controls without exposing secrets', () => {
+    const servers = [{
+      name: 'searxng',
+      enabled: true,
+      origin: 'custom' as const,
+      managed: true,
+      config: {
+        command: 'node',
+        args: ['scripts/run-npx-mcp.cjs', '-y', 'mcp-searxng'],
+        env: {
+          SEARXNG_URL: 'http://searxng:8080',
+          PRIVATE_API_KEY: 'must-not-be-rendered',
+        },
+      },
+    }]
+
+    const menu = formatTelegramMcpMenu(servers)
+    expect(menu).toContain('ON searxng [custom]')
+    expect(menu).toContain('env: PRIVATE_API_KEY, SEARXNG_URL')
+    expect(menu).not.toContain('must-not-be-rendered')
+
+    const controlActions = buildTelegramControlKeyboard().flat().map(button => button.callback_data)
+    expect(controlActions).toContain('menu:providers')
+    expect(controlActions).toContain('menu:mcp')
+    expect(controlActions).toContain('menu:runtime')
+    expect(controlActions).toContain('menu:schedule')
+    expect(controlActions).toContain('menu:memory')
+
+    const mcpActions = buildTelegramMcpKeyboard(servers).flat().map(button => button.callback_data)
+    expect(mcpActions).toContain('mcp:view:searxng')
+    expect(mcpActions).toContain('mcp:add')
+
+    const runtimeActions = buildTelegramRuntimeKeyboard({
+      toolsEnabled: true,
+      cronEnabled: true,
+      consciousnessEnabled: false,
+      evolutionEnabled: false,
+    }).flat().map(button => button.callback_data)
+    expect(runtimeActions).toContain('runtime:tools')
+    expect(runtimeActions).toContain('runtime:cron')
+    expect(runtimeActions).toContain('runtime:evolution')
+    expect(runtimeActions).toContain('runtime:restart')
   })
 
   test('selects the highest resolution photo Telegram sends', () => {

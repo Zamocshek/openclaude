@@ -42,6 +42,7 @@ import {
 interface ProviderPreset {
   urlTemplate: string
   queryParam: string
+  defaultParams?: Record<string, string>
   method?: string
   authHeader?: string
   authScheme?: string
@@ -56,6 +57,7 @@ const BUILT_IN_PROVIDERS: Record<string, ProviderPreset> = {
     // to comply with the HTTPS-only guardrail.
     urlTemplate: 'https://localhost:8080/search',
     queryParam: 'q',
+    defaultParams: { format: 'json' },
     jsonPath: 'results',
     responseAdapter(data: any) {
       return (data.results ?? []).map((r: any) => ({
@@ -418,8 +420,11 @@ function buildRequest(query: string) {
   const templateWithQuery = rawTemplate.replace(/\{query\}/g, encodeURIComponent(query))
   const url = new URL(templateWithQuery)
 
-  // Merge extra static params
-  for (const [k, v] of Object.entries(parseExtraParams())) {
+  // Provider requirements come first; explicit WEB_PARAMS can override them.
+  for (const [k, v] of Object.entries({
+    ...config.preset?.defaultParams,
+    ...parseExtraParams(),
+  })) {
     url.searchParams.set(k, v)
   }
 

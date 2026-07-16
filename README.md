@@ -57,6 +57,13 @@ messages as agent prompts and supports these owner-control commands from
 Telegram:
 
 - `/help`, `/commands` - show Telegram help and refresh the command menu
+- `/panel`, `/control` - open the button control panel for providers/models,
+  MCP servers, runtime tools, cron jobs, memory, research modes, and repository
+  actions
+- `/mcp`, `/mcp add <json>`, `/mcp enable <name>`, `/mcp disable <name>`,
+  `/mcp remove <name>` - import and manage MCP servers; a standalone JSON
+  message with a top-level `mcpServers` object is imported automatically
+- `/tools [on|off]` - inspect or toggle model tool calls for subsequent runs
 - `/chatid` - show the current chat ID
 - `/status` - show gateway, worker, cron, budget, and Ouroboros status
 - `/provider`, `/models`, `/provider models`,
@@ -194,6 +201,8 @@ Advanced and source-build guides:
 
 - **Tool-driven coding workflows**: Bash, file read/write/edit, grep, glob, agents, tasks, MCP, and slash commands
 - **CodeGraph semantic code intelligence**: `codegraph_explore` returns relevant source, call paths, and change impact from a local auto-synced `.codegraph` SQLite index
+- **Private web research**: SearXNG plus `mcp-searxng` provide metasearch, suggestions, instance diagnostics, and source-page reading
+- **Current library documentation**: Context7 resolves packages and retrieves version-aware API and setup documentation
 - **Streaming responses**: Real-time token output and tool progress
 - **Tool calling**: Multi-step tool loops with model calls, tool execution, and follow-up responses
 - **Images**: URL and base64 image inputs for providers that support vision
@@ -221,6 +230,55 @@ or replace `status .` with another CodeGraph command.
 
 Set `OPENCLAUDE_CODEGRAPH_AUTO_INIT=0` to disable first-start indexing or
 `CODEGRAPH_TELEMETRY=1` to opt into CodeGraph's anonymous usage telemetry.
+
+### Search And Documentation
+
+The default Docker stack includes a private SearXNG instance and exposes it only
+at `http://127.0.0.1:18088`. The agent receives both the native WebSearch adapter
+and the `mcp-searxng` tools `searxng_web_search`, `searxng_search_suggestions`,
+`searxng_instance_info`, and `web_url_read`. The SearXNG JSON API is enabled in
+`config/searxng/settings.yml`.
+
+Context7 is connected through the same project `.mcp.json`. The agent is directed
+to use `resolve-library-id` and `query-docs` for current library/API documentation,
+configuration, setup, and version-specific code. `CONTEXT7_API_KEY` is optional;
+set one in `.env` for higher upstream rate limits.
+
+Additional MCP servers can be added at runtime from Telegram or the authenticated
+Agent Gateway API without editing the tracked `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "searxng-extra": {
+      "command": "npx",
+      "args": ["-y", "mcp-searxng"],
+      "env": {
+        "SEARXNG_URL": "http://searxng:8080"
+      }
+    }
+  }
+}
+```
+
+Send that JSON directly to the owner-only Telegram bot, use `/mcp add <json>`,
+or `POST /api/mcp/servers`. List servers with `GET /api/mcp/servers`, toggle one
+with `PATCH /api/mcp/servers/:name` and `{ "enabled": false }`, or remove a
+runtime server with `DELETE /api/mcp/servers/:name`. `/api/*` uses the existing
+gateway bearer authentication. Runtime MCP definitions and their secrets are
+stored under the private Agent Gateway state directory; Telegram and API replies
+return only redacted targets and environment/header key names. Imported `npx`
+servers are launched without a shell and changes apply to the next agent run.
+
+Start or refresh the stack with:
+
+```bash
+docker compose -f docker-compose.agent-gateway.yml up -d --build
+```
+
+For host-native MCP use, set `SEARXNG_URL=http://127.0.0.1:18088`. Docker uses
+the internal `http://searxng:8080` service address automatically. Keep SearXNG
+bound to loopback unless its authentication and reverse proxy are configured.
 
 ## Provider Notes
 

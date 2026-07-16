@@ -44,6 +44,14 @@ import {
   getConversationContextTurnLimit,
   trimConversationMessagesWithinCharBudget,
 } from './conversationContext.js'
+import {
+  describeManagedMcpServer,
+  importManagedMcpServers,
+  listManagedMcpServers,
+  parseMcpConfigImport,
+  removeManagedMcpServer,
+  setManagedMcpServerEnabled,
+} from './mcpRegistry.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -301,6 +309,89 @@ export class AgentApiServer {
     if (url.pathname === '/api/queue/status' && method === 'GET') {
       this.writeJson(response, 200, this.getApiQueueStatusPayload())
       return
+    }
+
+    if (url.pathname === '/api/mcp/servers') {
+      if (method === 'GET') {
+        const servers = await listManagedMcpServers(
+          this.config.runner.cwd || process.cwd(),
+        )
+        this.writeJson(response, 200, {
+          data: servers.map(describeManagedMcpServer),
+        })
+        return
+      }
+      if (method === 'POST') {
+        const body = await this.readJson(request)
+        const parsed = parseMcpConfigImport(JSON.stringify(body))
+        if (parsed === undefined) {
+          this.writeJson(
+            response,
+            400,
+            openAiError("Missing 'mcpServers' object"),
+          )
+          return
+        }
+        if (parsed.ok === false) {
+          this.writeJson(
+            response,
+            400,
+            openAiError(parsed.error),
+          )
+          return
+        }
+        const servers = await importManagedMcpServers(
+          this.config.runner.cwd || process.cwd(),
+          parsed.config,
+        )
+        this.writeJson(response, 201, {
+          imported: Object.keys(parsed.config.mcpServers),
+          normalized_npx: parsed.normalizedNpxServers,
+          data: servers.map(describeManagedMcpServer),
+        })
+        return
+      }
+    }
+
+    const mcpServerMatch = url.pathname.match(/^\/api\/mcp\/servers\/([^/]+)$/u)
+    if (mcpServerMatch) {
+      const name = decodeURIComponent(mcpServerMatch[1]!)
+      try {
+        if (method === 'PATCH') {
+          const body = await this.readJson(request)
+          if (typeof body.enabled !== 'boolean') {
+            this.writeJson(response, 400, openAiError("Missing boolean 'enabled'"))
+            return
+          }
+          const servers = await setManagedMcpServerEnabled(
+            this.config.runner.cwd || process.cwd(),
+            name,
+            body.enabled,
+          )
+          this.writeJson(response, 200, {
+            data: servers.map(describeManagedMcpServer),
+          })
+          return
+        }
+        if (method === 'DELETE') {
+          const servers = await removeManagedMcpServer(
+            this.config.runner.cwd || process.cwd(),
+            name,
+          )
+          this.writeJson(response, 200, {
+            deleted: name,
+            data: servers.map(describeManagedMcpServer),
+          })
+          return
+        }
+      } catch (error) {
+        this.writeJson(
+          response,
+          400,
+          openAiError(error instanceof Error ? error.message : String(error)),
+        )
+        return
+      }
     }
 
     if (url.pathname === '/api/memory' || url.pathname === '/api/memory/') {
