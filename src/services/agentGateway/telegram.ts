@@ -53,6 +53,18 @@ import {
   setManagedMcpServerEnabled,
   type ManagedMcpServer,
 } from './mcpRegistry.js'
+import {
+  createManagedSkill,
+  deleteManagedSkill,
+  getSkillStoreItemDetails,
+  listSkillStore,
+  normalizeSkillCreateInput,
+  parseSkillStoreImport,
+  type SkillCreateInput,
+  type SkillStoreImportResult,
+  type SkillStoreItem,
+  type SkillStoreItemDetails,
+} from './skillStore.js'
 
 export type TelegramFileRef = {
   file_id: string
@@ -297,6 +309,16 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/mcp enable <name>', description: 'enable an MCP server' },
       { syntax: '/mcp disable <name>', description: 'disable an MCP server' },
       { syntax: '/mcp remove <name>', description: 'remove a runtime MCP server or override' },
+    ],
+  },
+  {
+    title: 'Skill Store',
+    commands: [
+      { syntax: '/skills', description: 'browse the Skill Store with inline buttons', botDescription: 'Browse and create agent skills' },
+      { syntax: '/skill [name]', description: 'open a skill card by name' },
+      { syntax: '/skill create <json>', description: 'create a persistent native SKILL.md' },
+      { syntax: '/skill create <name> | <description> | <instructions>', description: 'create a skill with compact syntax' },
+      { syntax: '/skill delete <name>', description: 'remove a user-created Store skill' },
     ],
   },
   {
@@ -940,6 +962,21 @@ export class TelegramAgentBridge {
       return
     }
 
+    if (
+      commandText === '/skills'
+      || commandText === '/skillstore'
+      || commandText === '/skill'
+      || commandText.startsWith('/skill ')
+    ) {
+      await this.handleSkillCommand(
+        chatId,
+        commandText === '/skills' || commandText === '/skillstore'
+          ? ''
+          : getTelegramCommandBody(text, 'skill'),
+      )
+      return
+    }
+
     if (commandText === '/models') {
       await this.handleModelCommand(chatId, '')
       return
@@ -1162,6 +1199,12 @@ export class TelegramAgentBridge {
     const mcpImport = parseMcpConfigImport(text)
     if (mcpImport) {
       await this.handleMcpImport(chatId, mcpImport)
+      return
+    }
+
+    const skillImport = parseSkillStoreImport(text)
+    if (skillImport) {
+      await this.handleSkillImport(chatId, skillImport)
       return
     }
 
@@ -1460,6 +1503,7 @@ export class TelegramAgentBridge {
   private async sendControlPanel(chatId: string): Promise<void> {
     const profile = await loadProviderProfile()
     const servers = await listManagedMcpServers(this.mcpProjectRoot())
+    const skills = await listSkillStore(this.mcpProjectRoot())
     const evolution = await loadEvolutionState()
     await this.sendMessageWithKeyboard(
       chatId,
@@ -1467,6 +1511,8 @@ export class TelegramAgentBridge {
         profile,
         mcpEnabled: servers.filter(server => server.enabled).length,
         mcpTotal: servers.length,
+        skillManaged: skills.filter(skill => skill.managed).length,
+        skillTotal: skills.length,
         toolsEnabled: !this.config.runner.disableTools,
         cronEnabled: this.config.cron.enabled,
         consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
@@ -1586,6 +1632,122 @@ export class TelegramAgentBridge {
     await this.sendMessage(
       chatId,
       'Usage: /mcp | /mcp add <json> | /mcp enable <name> | /mcp disable <name> | /mcp remove <name>',
+    )
+  }
+
+  private async sendSkillStoreMenu(chatId: string, page = 0): Promise<void> {
+    const skills = await listSkillStore(this.mcpProjectRoot())
+    await this.sendMessageWithKeyboard(
+      chatId,
+      formatTelegramSkillStoreMenu(skills, page),
+      buildTelegramSkillStoreKeyboard(skills, page),
+    )
+  }
+
+  private async editSkillStoreMenu(
+    query: TelegramCallbackQuery,
+    page = 0,
+  ): Promise<void> {
+    const skills = await listSkillStore(this.mcpProjectRoot())
+    await this.editCallbackMessage(
+      query,
+      formatTelegramSkillStoreMenu(skills, page),
+      buildTelegramSkillStoreKeyboard(skills, page),
+    )
+  }
+
+  private async handleSkillImport(
+    chatId: string,
+    parsed: SkillStoreImportResult,
+  ): Promise<void> {
+    if (parsed.ok === false) {
+      await this.sendMessageWithKeyboard(
+        chatId,
+        `Skill creation rejected: ${parsed.error}`,
+        [[{ text: 'Skill Store', callback_data: 'menu:skills' }]],
+      )
+      return
+    }
+
+    try {
+      const created = await createManagedSkill(
+        this.mcpProjectRoot(),
+        parsed.input,
+      )
+      await this.sendMessageWithKeyboard(
+        chatId,
+        `Skill created and available to the next agent run.\n\n${formatTelegramSkillDetails(created)}`,
+        buildTelegramSkillDetailsKeyboard(created),
+      )
+    } catch (error) {
+      await this.sendMessageWithKeyboard(
+        chatId,
+        `Skill creation failed: ${summarizeTelegramError(error)}`,
+        [[{ text: 'Skill Store', callback_data: 'menu:skills' }]],
+      )
+    }
+  }
+
+  private async handleSkillCommand(chatId: string, commandBody: string): Promise<void> {
+    const body = commandBody.trim()
+    if (!body || ['list', 'store', 'status'].includes(body.toLowerCase())) {
+      await this.sendSkillStoreMenu(chatId)
+      return
+    }
+
+    if (body.toLowerCase() === 'create' || body.toLowerCase() === 'add') {
+      await this.sendMessageWithKeyboard(
+        chatId,
+        buildTelegramSkillCreateInstructions(),
+        [[
+          { text: 'Skill Store', callback_data: 'menu:skills' },
+          { text: 'Control panel', callback_data: 'menu:control' },
+        ]],
+      )
+      return
+    }
+
+    const createMatch = body.match(/^(?:create|add)\s+([\s\S]+)$/iu)
+    if (createMatch) {
+      await this.handleSkillImport(
+        chatId,
+        parseTelegramSkillCreateInput(createMatch[1]!),
+      )
+      return
+    }
+
+    const actionMatch = body.match(/^(view|show|delete|remove)\s+(.+)$/iu)
+    const action = actionMatch?.[1]?.toLowerCase() || 'view'
+    const selector = (actionMatch?.[2] || body).trim()
+    const skill = await getSkillStoreItemDetails(this.mcpProjectRoot(), selector)
+    if (!skill) {
+      await this.sendMessage(chatId, `Skill not found: ${selector}`)
+      return
+    }
+
+    if (action === 'delete' || action === 'remove') {
+      if (!skill.managed) {
+        await this.sendMessage(
+          chatId,
+          `Only user-created Store skills can be removed: ${skill.name}`,
+        )
+        return
+      }
+      await this.sendMessageWithKeyboard(
+        chatId,
+        `Remove user-created skill ${skill.name}?`,
+        [[
+          { text: 'Remove', callback_data: `skill:confirm-delete:${skill.id}` },
+          { text: 'Cancel', callback_data: `skill:view:${skill.id}` },
+        ]],
+      )
+      return
+    }
+
+    await this.sendMessageWithKeyboard(
+      chatId,
+      formatTelegramSkillDetails(skill),
+      buildTelegramSkillDetailsKeyboard(skill),
     )
   }
 
@@ -2741,6 +2903,7 @@ export class TelegramAgentBridge {
       if (data === 'menu:control') {
         const profile = await loadProviderProfile()
         const servers = await listManagedMcpServers(this.mcpProjectRoot())
+        const skills = await listSkillStore(this.mcpProjectRoot())
         const evolution = await loadEvolutionState()
         await this.editCallbackMessage(
           query,
@@ -2748,6 +2911,8 @@ export class TelegramAgentBridge {
             profile,
             mcpEnabled: servers.filter(server => server.enabled).length,
             mcpTotal: servers.length,
+            skillManaged: skills.filter(skill => skill.managed).length,
+            skillTotal: skills.length,
             toolsEnabled: !this.config.runner.disableTools,
             cronEnabled: this.config.cron.enabled,
             consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
@@ -2830,6 +2995,70 @@ export class TelegramAgentBridge {
         }
         await removeManagedMcpServer(this.mcpProjectRoot(), name)
         await this.editMcpMenu(query)
+        return
+      }
+
+      if (data === 'menu:skills') {
+        await this.editSkillStoreMenu(query)
+        return
+      }
+
+      const skillPage = data.match(/^skills:page:(\d+)$/u)
+      if (skillPage) {
+        await this.editSkillStoreMenu(query, Number(skillPage[1]))
+        return
+      }
+
+      if (data === 'skills:create') {
+        await this.editCallbackMessage(
+          query,
+          buildTelegramSkillCreateInstructions(),
+          [[
+            { text: 'Skill Store', callback_data: 'menu:skills' },
+            { text: 'Control panel', callback_data: 'menu:control' },
+          ]],
+        )
+        return
+      }
+
+      const skillAction = data.match(
+        /^skill:(view|delete|confirm-delete):([a-f0-9]{12})$/u,
+      )
+      if (skillAction) {
+        const action = skillAction[1]!
+        const id = skillAction[2]!
+        const skill = await getSkillStoreItemDetails(this.mcpProjectRoot(), id)
+        if (!skill) throw new Error(`Skill not found: ${id}`)
+
+        if (action === 'view') {
+          await this.editCallbackMessage(
+            query,
+            formatTelegramSkillDetails(skill),
+            buildTelegramSkillDetailsKeyboard(skill),
+          )
+          return
+        }
+        if (!skill.managed) {
+          throw new Error(`Only user-created Store skills can be removed: ${skill.name}`)
+        }
+        if (action === 'delete') {
+          await this.editCallbackMessage(
+            query,
+            `Remove user-created skill ${skill.name}?`,
+            [[
+              { text: 'Remove', callback_data: `skill:confirm-delete:${skill.id}` },
+              { text: 'Cancel', callback_data: `skill:view:${skill.id}` },
+            ]],
+          )
+          return
+        }
+
+        const skills = await deleteManagedSkill(this.mcpProjectRoot(), skill.id)
+        await this.editCallbackMessage(
+          query,
+          `Skill removed: ${skill.name}\n\n${formatTelegramSkillStoreMenu(skills)}`,
+          buildTelegramSkillStoreKeyboard(skills),
+        )
         return
       }
 
@@ -3960,6 +4189,8 @@ type TelegramControlPanelState = TelegramRuntimePanelState & {
   profile: AgentProviderProfile
   mcpEnabled: number
   mcpTotal: number
+  skillManaged: number
+  skillTotal: number
 }
 
 export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
@@ -3969,18 +4200,21 @@ export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
       { text: 'MCP servers', callback_data: 'menu:mcp' },
     ],
     [
+      { text: 'Skill Store', callback_data: 'menu:skills' },
       { text: 'Runtime', callback_data: 'menu:runtime' },
+    ],
+    [
       { text: 'Schedules', callback_data: 'menu:schedule' },
-    ],
-    [
       { text: 'Memory', callback_data: 'menu:memory' },
-      { text: 'Research modes', callback_data: 'menu:research' },
     ],
     [
+      { text: 'Research modes', callback_data: 'menu:research' },
       { text: 'Repository', callback_data: 'menu:git' },
-      { text: 'Status', callback_data: 'control:status' },
     ],
-    [{ text: 'Help', callback_data: 'control:help' }],
+    [
+      { text: 'Status', callback_data: 'control:status' },
+      { text: 'Help', callback_data: 'control:help' },
+    ],
   ]
 }
 
@@ -3991,6 +4225,7 @@ function formatTelegramControlPanel(state: TelegramControlPanelState): string {
     `Provider: ${state.profile.provider}`,
     `Model: ${state.profile.model || 'not set'}`,
     `MCP servers: ${state.mcpEnabled}/${state.mcpTotal} enabled`,
+    `Skills: ${state.skillTotal} available (${state.skillManaged} Store-created)`,
     `Model tools: ${state.toolsEnabled ? 'ON' : 'OFF'}`,
     `Cron: ${state.cronEnabled ? 'ON' : 'OFF'}`,
     `Consciousness: ${state.consciousnessEnabled ? 'ON' : 'OFF'}`,
@@ -4077,6 +4312,156 @@ function buildTelegramMcpServerKeyboard(server: ManagedMcpServer): TelegramInlin
     { text: 'Control panel', callback_data: 'menu:control' },
   ])
   return rows
+}
+
+const TELEGRAM_SKILL_STORE_PAGE_SIZE = 7
+
+function getTelegramSkillStorePage(
+  skills: SkillStoreItem[],
+  requestedPage: number,
+): { page: number; totalPages: number; items: SkillStoreItem[] } {
+  const totalPages = Math.max(
+    1,
+    Math.ceil(skills.length / TELEGRAM_SKILL_STORE_PAGE_SIZE),
+  )
+  const page = Math.max(0, Math.min(Math.floor(requestedPage), totalPages - 1))
+  const start = page * TELEGRAM_SKILL_STORE_PAGE_SIZE
+  return {
+    page,
+    totalPages,
+    items: skills.slice(start, start + TELEGRAM_SKILL_STORE_PAGE_SIZE),
+  }
+}
+
+export function formatTelegramSkillStoreMenu(
+  skills: SkillStoreItem[],
+  requestedPage = 0,
+): string {
+  const page = getTelegramSkillStorePage(skills, requestedPage)
+  const lines = [
+    'Skill Store',
+    `${skills.length} available, ${skills.filter(skill => skill.managed).length} Store-created`,
+    `Page ${page.page + 1}/${page.totalPages}`,
+  ]
+  if (page.items.length === 0) {
+    lines.push('', 'No skills are available yet.')
+  }
+  for (const skill of page.items) {
+    lines.push(
+      '',
+      `${skill.managed ? 'CUSTOM' : 'AVAILABLE'} ${skill.name}`,
+      skill.description.slice(0, 220),
+    )
+  }
+  return lines.join('\n').slice(0, 3900)
+}
+
+export function buildTelegramSkillStoreKeyboard(
+  skills: SkillStoreItem[],
+  requestedPage = 0,
+): TelegramInlineKeyboard {
+  const page = getTelegramSkillStorePage(skills, requestedPage)
+  const rows: TelegramInlineKeyboard = page.items.map(skill => [{
+    text: `${skill.managed ? 'CUSTOM' : 'VIEW'} ${truncateTelegramButton(skill.name, 34)}`,
+    callback_data: `skill:view:${skill.id}`,
+  }])
+  if (page.totalPages > 1) {
+    const navigation: TelegramInlineKeyboardButton[] = []
+    if (page.page > 0) {
+      navigation.push({ text: 'Previous', callback_data: `skills:page:${page.page - 1}` })
+    }
+    if (page.page < page.totalPages - 1) {
+      navigation.push({ text: 'Next', callback_data: `skills:page:${page.page + 1}` })
+    }
+    rows.push(navigation)
+  }
+  rows.push([
+    { text: 'Create skill', callback_data: 'skills:create' },
+    { text: 'Refresh', callback_data: `skills:page:${page.page}` },
+  ])
+  rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
+  return rows
+}
+
+export function formatTelegramSkillDetails(skill: SkillStoreItemDetails): string {
+  const instructions = skill.instructions?.trim()
+  return [
+    `Skill: ${skill.name}`,
+    `Type: ${skill.managed ? 'Store-created' : skill.origin}`,
+    `Description: ${skill.description}`,
+    ...(instructions
+      ? ['', 'Instructions:', instructions.slice(0, 2800)]
+      : ['', 'Instructions are provided by the runtime when this skill is invoked.']),
+  ].join('\n').slice(0, 3900)
+}
+
+export function buildTelegramSkillDetailsKeyboard(
+  skill: SkillStoreItem,
+): TelegramInlineKeyboard {
+  const firstRow: TelegramInlineKeyboardButton[] = [
+    { text: 'Skill Store', callback_data: 'menu:skills' },
+  ]
+  if (skill.managed) {
+    firstRow.push({ text: 'Remove', callback_data: `skill:delete:${skill.id}` })
+  }
+  return [
+    firstRow,
+    [{ text: 'Create skill', callback_data: 'skills:create' }],
+  ]
+}
+
+export function buildTelegramSkillCreateInstructions(): string {
+  return [
+    'Create a persistent native skill with:',
+    '/skill create <name> | <description> | <instructions>',
+    '',
+    'Or send this JSON:',
+    '{',
+    '  "skill": {',
+    '    "name": "verify-output",',
+    '    "description": "Use when a task needs explicit verification.",',
+    '    "instructions": "Run the narrowest relevant check before reporting success."',
+    '  }',
+    '}',
+    '',
+    'Names use lowercase letters, digits, and dashes. New skills persist in the Docker config volume and are available to the next agent run.',
+  ].join('\n')
+}
+
+export function parseTelegramSkillCreateInput(
+  payload: string,
+): SkillStoreImportResult {
+  const imported = parseSkillStoreImport(payload)
+  if (imported) return imported
+
+  try {
+    const trimmed = payload.trim()
+    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu)?.[1]
+    const jsonText = (fenced || trimmed).trim()
+    if (jsonText.startsWith('{')) {
+      const parsed = JSON.parse(jsonText) as unknown
+      return { ok: true, input: normalizeSkillCreateInput(parsed) }
+    }
+
+    const [name, description, ...instructionParts] = payload.split('|')
+    if (!name || !description || instructionParts.length === 0) {
+      return {
+        ok: false,
+        error: 'Use: /skill create <name> | <description> | <instructions>',
+      }
+    }
+    const input: SkillCreateInput = {
+      name: name.trim(),
+      description: description.trim(),
+      instructions: instructionParts.join('|').trim(),
+    }
+    return { ok: true, input: normalizeSkillCreateInput(input) }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
 }
 
 function formatTelegramRuntimePanel(state: TelegramRuntimePanelState): string {

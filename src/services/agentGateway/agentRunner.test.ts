@@ -134,6 +134,18 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('without waiting for an explicit user request')
   })
 
+  test('requires a private skill, MCP, and tool routing pass before every task', () => {
+    const args = buildAgentArgs(getDefaultAgentGatewayConfig())
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(systemPrompt).toContain('Before executing every user request')
+    expect(systemPrompt).toContain('available Skill descriptions')
+    expect(systemPrompt).toContain('connected MCP servers')
+    expect(systemPrompt).toContain('invoke the most specific Skill tool')
+    expect(systemPrompt).toContain('privately select none')
+    expect(systemPrompt).toContain('Do not reveal chain-of-thought')
+  })
+
   test('turns Codex Ultra into xhigh reasoning with automatic delegation guidance', () => {
     const previousOpenClaudeModel = process.env.OPENCLAUDE_MODEL
     process.env.OPENCLAUDE_MODEL = 'gpt-5.6-sol?reasoning=ultra'

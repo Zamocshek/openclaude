@@ -63,6 +63,9 @@ Telegram:
 - `/mcp`, `/mcp add <json>`, `/mcp enable <name>`, `/mcp disable <name>`,
   `/mcp remove <name>` - import and manage MCP servers; a standalone JSON
   message with a top-level `mcpServers` object is imported automatically
+- `/skills`, `/skill <name>`, `/skill create <name> | <description> |
+  <instructions>`, `/skill delete <name>` - browse the button-driven Skill
+  Store, inspect skills, and create or remove persistent user skills
 - `/tools [on|off]` - inspect or toggle model tool calls for subsequent runs
 - `/chatid` - show the current chat ID
 - `/status` - show gateway, worker, cron, budget, and Ouroboros status
@@ -278,6 +281,35 @@ gateway bearer authentication. Runtime MCP definitions and their secrets are
 stored under the private Agent Gateway state directory; Telegram and API replies
 return only redacted targets and environment/header key names. Imported `npx`
 servers are launched without a shell and changes apply to the next agent run.
+
+### Skill Store
+
+The Skill Store is available from Telegram `/skills` and the authenticated
+Agent Gateway API. It lists bundled, managed, project, and user file-based skills
+while allowing only Store-created user skills to be removed. Create a native skill by
+sending this owner-only Telegram JSON or by using `POST /api/skills`:
+
+```json
+{
+  "skill": {
+    "name": "verify-output",
+    "description": "Use when a task needs explicit verification.",
+    "instructions": "Run the narrowest relevant check before reporting success."
+  }
+}
+```
+
+List with `GET /api/skills`, inspect with `GET /api/skills/:name-or-id`, and
+remove a Store-created skill with `DELETE /api/skills/:name-or-id`. Skills are
+written atomically to `${CLAUDE_CONFIG_DIR}/skills/<name>/SKILL.md`, persist in
+the existing Docker config volume, and become available to the native `Skill`
+tool on the next agent run.
+
+Every Agent Gateway run performs a private capability-routing pass before
+execution. The model reviews available skill descriptions, connected MCP
+servers, and built-in tools, invokes the most specific matching skill first,
+and selects no specialized capability only when none adds value. This rule is
+shared by Telegram, the Agent API, cron runs, and OpenWebUI inference.
 
 Start or refresh the stack with:
 

@@ -80,6 +80,14 @@ const API_GATEWAY_APPEND_SYSTEM_PROMPT = [
   'For desktop, screenshot, application-window, filesystem, or automation requests, inspect the real local environment with available tools and report tool failures explicitly.',
   'Avoid exploratory web search unless the request requires up-to-date verification.',
 ].join(' ')
+const CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT = [
+  'Before executing every user request, perform a private capability-routing pass.',
+  'Review the available Skill descriptions, connected MCP servers, and built-in tools before choosing the execution path.',
+  'When a skill matches, invoke the most specific Skill tool before doing the task and follow its instructions; do not merely mention the skill.',
+  'Choose MCP and built-in tools by fitness for the task, and combine them only when each adds concrete value.',
+  'For a simple conversational request where no specialized capability helps, privately select none and answer directly.',
+  'Do not reveal chain-of-thought or the private routing analysis; expose only concise plans, tool activity, results, and relevant failures.',
+].join(' ')
 const OPENRAG_APPEND_SYSTEM_PROMPT = [
   'OpenRAG RAG may be available through MCP tools.',
   'When the user asks about ingested documents, a knowledge base, project knowledge, long-term knowledge, RAG, OpenRAG, or document-grounded answers, prefer OpenRAG tools before answering from memory.',
@@ -262,7 +270,10 @@ function getApiGatewayAppendSystemPrompt(config: AgentGatewayConfig): string {
     config.openRAG.enabled ||
     config.openRAG.mcpEnabled ||
     Boolean(config.openRAG.apiKey)
-  const parts = [API_GATEWAY_APPEND_SYSTEM_PROMPT]
+  const parts = [
+    API_GATEWAY_APPEND_SYSTEM_PROMPT,
+    CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT,
+  ]
   const configuredModel =
     process.env.OPENCLAUDE_MODEL || process.env.OPENAI_MODEL || ''
   if (getReasoningEffortForModel(configuredModel) === 'ultra') {

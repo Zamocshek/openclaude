@@ -52,10 +52,19 @@ import {
   removeManagedMcpServer,
   setManagedMcpServerEnabled,
 } from './mcpRegistry.js'
+import {
+  createManagedSkill,
+  deleteManagedSkill,
+  getSkillStoreItemDetails,
+  listSkillStore,
+  SkillStoreError,
+  type SkillStoreOptions,
+} from './skillStore.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
   onAgentResponse?: (text: string, source: 'api' | 'run') => void | Promise<void>
+  skillStoreRoot?: string
 }
 
 type ApiAgentQueueItem = {
@@ -133,6 +142,7 @@ type LineStreamStripper = {
 export class AgentApiServer {
   private readonly config: AgentGatewayConfig
   private readonly onAgentResponse?: AgentApiServerOptions['onAgentResponse']
+  private readonly skillStoreOptions: SkillStoreOptions
   private server: Server | undefined
   private readonly responseStore = new Map<string, Record<string, unknown>>()
   private readonly responseOrder: string[] = []
@@ -151,6 +161,9 @@ export class AgentApiServer {
   constructor(options: AgentApiServerOptions) {
     this.config = options.config
     this.onAgentResponse = options.onAgentResponse
+    this.skillStoreOptions = options.skillStoreRoot
+      ? { skillsRoot: options.skillStoreRoot }
+      : {}
   }
 
   async start(): Promise<void> {
@@ -390,6 +403,66 @@ export class AgentApiServer {
           400,
           openAiError(error instanceof Error ? error.message : String(error)),
         )
+        return
+      }
+    }
+
+    if (url.pathname === '/api/skills') {
+      const projectRoot = this.config.runner.cwd || process.cwd()
+      try {
+        if (method === 'GET') {
+          this.writeJson(response, 200, {
+            data: await listSkillStore(projectRoot, this.skillStoreOptions),
+          })
+          return
+        }
+        if (method === 'POST') {
+          const body = await this.readJson(request)
+          const created = await createManagedSkill(
+            projectRoot,
+            body.skill ?? body,
+            this.skillStoreOptions,
+          )
+          this.writeJson(response, 201, { data: created })
+          return
+        }
+      } catch (error) {
+        this.writeSkillStoreError(response, error)
+        return
+      }
+    }
+
+    const skillMatch = url.pathname.match(/^\/api\/skills\/([^/]+)$/u)
+    if (skillMatch) {
+      const selector = decodeURIComponent(skillMatch[1]!)
+      const projectRoot = this.config.runner.cwd || process.cwd()
+      try {
+        if (method === 'GET') {
+          const skill = await getSkillStoreItemDetails(
+            projectRoot,
+            selector,
+            this.skillStoreOptions,
+          )
+          if (!skill) {
+            throw new SkillStoreError('not_found', `Skill not found: ${selector}`)
+          }
+          this.writeJson(response, 200, { data: skill })
+          return
+        }
+        if (method === 'DELETE') {
+          const skills = await deleteManagedSkill(
+            projectRoot,
+            selector,
+            this.skillStoreOptions,
+          )
+          this.writeJson(response, 200, {
+            deleted: selector,
+            data: skills,
+          })
+          return
+        }
+      } catch (error) {
+        this.writeSkillStoreError(response, error)
         return
       }
     }
@@ -1208,6 +1281,21 @@ export class AgentApiServer {
       500,
       openAiError(error instanceof Error ? error.message : String(error)),
     )
+  }
+
+  private writeSkillStoreError(response: ServerResponse, error: unknown): void {
+    if (!(error instanceof SkillStoreError)) {
+      this.writeJson(response, 500, openAiError(String(error), 'server_error'))
+      return
+    }
+    const statusCode = error.code === 'not_found'
+      ? 404
+      : error.code === 'conflict'
+        ? 409
+        : error.code === 'forbidden'
+          ? 403
+          : 400
+    this.writeJson(response, statusCode, openAiError(error.message))
   }
 
   private async handleJobRoute(

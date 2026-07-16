@@ -16,6 +16,8 @@ import {
   buildTelegramProviderProfileUpdate,
   buildTelegramReasoningKeyboard,
   buildTelegramRuntimeKeyboard,
+  buildTelegramSkillDetailsKeyboard,
+  buildTelegramSkillStoreKeyboard,
   buildTelegramReplyContext,
   extractTelegramCronDirectives,
   extractTelegramSendDirectives,
@@ -23,6 +25,8 @@ import {
   formatTelegramProgressText,
   formatTelegramQueueNotice,
   formatTelegramMcpMenu,
+  formatTelegramSkillDetails,
+  formatTelegramSkillStoreMenu,
   formatTelegramConversationTranscript,
   formatTelegramAgentFailureForRecovery,
   getAgentRecoveryFailureSignature,
@@ -36,6 +40,7 @@ import {
   hasTelegramMemoryIntent,
   applyTelegramResearchMode,
   repairLikelyMojibakeText,
+  parseTelegramSkillCreateInput,
   summarizeAgentProgressChunk,
   safeTelegramFileName,
   selectLargestPhoto,
@@ -80,6 +85,8 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/provider set <provider> <model> [base_url] [api_key]')
     expect(help).toContain('/panel - open the button control panel')
     expect(help).toContain('/mcp add <json> - import one or more mcpServers definitions')
+    expect(help).toContain('/skills - browse the Skill Store with inline buttons')
+    expect(help).toContain('/skill create <json> - create a persistent native SKILL.md')
     expect(help).toContain('/tools [on|off] - show, enable, or disable model tool calls')
     expect(help).toContain('/bg [start|stop|now|status] - persist, wake, or inspect background consciousness')
     expect(help).toContain('/consciousness [start|stop|now|status] - alias for /bg')
@@ -106,6 +113,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands).toContainEqual({
       command: 'mcp',
       description: 'Manage MCP servers',
+    })
+    expect(commands).toContainEqual({
+      command: 'skills',
+      description: 'Browse and create agent skills',
     })
     expect(commands).toContainEqual({
       command: 'tools',
@@ -156,6 +167,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     const controlActions = buildTelegramControlKeyboard().flat().map(button => button.callback_data)
     expect(controlActions).toContain('menu:providers')
     expect(controlActions).toContain('menu:mcp')
+    expect(controlActions).toContain('menu:skills')
     expect(controlActions).toContain('menu:runtime')
     expect(controlActions).toContain('menu:schedule')
     expect(controlActions).toContain('menu:memory')
@@ -175,6 +187,61 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(runtimeActions).toContain('runtime:evolution')
     expect(runtimeActions).toContain('runtime:wake')
     expect(runtimeActions).toContain('runtime:restart')
+  })
+
+  test('builds a paged Skill Store and validates compact or JSON creation', () => {
+    const skills = Array.from({ length: 9 }, (_, index) => ({
+      id: String(index).padStart(12, '0'),
+      name: `skill-${index}`,
+      label: `Skill ${index}`,
+      description: `Description ${index}`,
+      origin: index === 0 ? 'skills' : 'bundled',
+      managed: index === 0,
+    }))
+
+    const menu = formatTelegramSkillStoreMenu(skills, 0)
+    expect(menu).toContain('9 available, 1 Store-created')
+    expect(menu).toContain('Page 1/2')
+    expect(menu).toContain('CUSTOM skill-0')
+
+    const actions = buildTelegramSkillStoreKeyboard(skills, 0)
+      .flat()
+      .map(button => button.callback_data)
+    expect(actions).toContain('skill:view:000000000000')
+    expect(actions).toContain('skills:page:1')
+    expect(actions).toContain('skills:create')
+
+    const details = formatTelegramSkillDetails({
+      ...skills[0]!,
+      instructions: 'Always verify the observed output.',
+    })
+    expect(details).toContain('Always verify the observed output.')
+    expect(
+      buildTelegramSkillDetailsKeyboard(skills[0]!)
+        .flat()
+        .map(button => button.callback_data),
+    ).toContain('skill:delete:000000000000')
+
+    expect(parseTelegramSkillCreateInput(
+      'verify-output | Use for verification | Run the narrowest check.',
+    )).toEqual({
+      ok: true,
+      input: {
+        name: 'verify-output',
+        description: 'Use for verification',
+        instructions: 'Run the narrowest check.',
+      },
+    })
+    expect(parseTelegramSkillCreateInput(JSON.stringify({
+      skill: {
+        name: 'research-first',
+        description: 'Use for current research.',
+        instructions: 'Search primary sources before answering.',
+      },
+    }))).toMatchObject({ ok: true })
+    expect(parseTelegramSkillCreateInput('../bad | Bad | Bad')).toMatchObject({
+      ok: false,
+    })
   })
 
   test('selects the highest resolution photo Telegram sends', () => {

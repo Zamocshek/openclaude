@@ -289,6 +289,84 @@ describe('AgentApiServer', () => {
     expect(removedBody.data.map(item => item.name)).toEqual(['core'])
   })
 
+  test('browses and creates native skills through the protected Skill Store API', async () => {
+    const projectRoot = join(tempGatewayStateDir!, 'project')
+    await mkdir(projectRoot, { recursive: true })
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({
+        api: { apiKey: 'secret' } as never,
+        runner: { cwd: projectRoot } as never,
+      }),
+      skillStoreRoot: join(tempGatewayStateDir!, 'skills'),
+    })
+    await server.start()
+
+    expect((await fetch(`${server.url}/api/skills`)).status).toBe(401)
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    }
+    const created = await fetch(`${server.url}/api/skills`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        skill: {
+          name: 'api-verifier',
+          description: 'Use when an API task needs explicit verification.',
+          instructions: 'Run a focused API check and report the observed result.',
+        },
+      }),
+    })
+    expect(created.status).toBe(201)
+    const createdBody = await created.json() as {
+      data: { id: string; name: string; managed: boolean; instructions: string }
+    }
+    expect(createdBody.data).toMatchObject({
+      name: 'api-verifier',
+      managed: true,
+    })
+    expect(createdBody.data.instructions).toContain('focused API check')
+
+    const listed = await fetch(`${server.url}/api/skills`, { headers })
+    expect(listed.status).toBe(200)
+    const listedBody = await listed.json() as {
+      data: Array<{ name: string; managed: boolean }>
+    }
+    expect(listedBody.data).toContainEqual(
+      expect.objectContaining({ name: 'api-verifier', managed: true }),
+    )
+
+    const viewed = await fetch(
+      `${server.url}/api/skills/${createdBody.data.id}`,
+      { headers },
+    )
+    expect(viewed.status).toBe(200)
+
+    const duplicate = await fetch(`${server.url}/api/skills`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        name: 'api-verifier',
+        description: 'Duplicate',
+        instructions: 'Must be rejected.',
+      }),
+    })
+    expect(duplicate.status).toBe(409)
+
+    const removed = await fetch(
+      `${server.url}/api/skills/${createdBody.data.id}`,
+      { method: 'DELETE', headers },
+    )
+    expect(removed.status).toBe(200)
+    const removedBody = await removed.json() as {
+      data: Array<{ name: string }>
+    }
+    expect(
+      removedBody.data.filter(skill => skill.name === 'api-verifier'),
+    ).toEqual([])
+  })
+
   test('serves bearer-protected Hermes-style memory endpoints', async () => {
     const { AgentApiServer } = await import('./apiServer.js')
     server = new AgentApiServer({
