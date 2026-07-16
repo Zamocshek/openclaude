@@ -3,7 +3,7 @@
     "mcp-router": {
       "command": "node",
       "args": [
-        "scripts/mcp-router-connect.cjs"
+        "scripts/mcp-router-launcher.cjs"
       ],
       "env": {
         "MCPR_TOKEN": "${MCPR_TOKEN}"

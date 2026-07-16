@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const { resolve } = require('node:path')
+const { createServer } = require('node:http')
 
 const CALL_TIMEOUT_MS = 45_000
 
@@ -21,18 +22,96 @@ function withTimeout(promise, label) {
   ]).finally(() => clearTimeout(timer))
 }
 
-async function connectProjectServer(name, entrypoint, env = {}) {
+async function connectStdioServer(name, args, env = {}) {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
   const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js')
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [resolve('scripts/run-project-mcp.cjs'), entrypoint],
+    args,
     env: { ...process.env, ...env },
     stderr: 'pipe',
   })
   const client = new Client({ name: `${name}-smoke`, version: '0.1.0' })
   await withTimeout(client.connect(transport), `${name} connect`)
   return client
+}
+
+async function connectProjectServer(name, entrypoint, env = {}) {
+  return connectStdioServer(
+    name,
+    [resolve('scripts/run-project-mcp.cjs'), entrypoint],
+    env,
+  )
+}
+
+async function testCodegraph() {
+  const client = await connectStdioServer('codegraph', [
+    resolve('scripts/codegraph-mcp.cjs'),
+    'serve',
+    '--mcp',
+  ], { CODEGRAPH_TELEMETRY: '0' })
+  try {
+    const tools = await withTimeout(client.listTools(), 'CodeGraph listTools')
+    if (!tools.tools.some(tool => tool.name === 'codegraph_explore')) {
+      throw new Error('CodeGraph MCP is missing codegraph_explore')
+    }
+    const result = await withTimeout(client.callTool({
+      name: 'codegraph_explore',
+      arguments: { query: 'Telegram background consciousness lifecycle' },
+    }), 'CodeGraph explore')
+    if (result.isError || textContent(result).length < 50) {
+      throw new Error(`CodeGraph explore failed: ${textContent(result)}`)
+    }
+    console.log('CODEGRAPH_MCP_SMOKE_OK')
+  } finally {
+    await client.close().catch(() => {})
+  }
+}
+
+async function testRouterFallback() {
+  const stalledServer = createServer(() => {})
+  await new Promise((resolveListen, reject) => {
+    stalledServer.once('error', reject)
+    stalledServer.listen(0, '127.0.0.1', resolveListen)
+  })
+  const address = stalledServer.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('Failed to allocate stalled MCP Router test port')
+  }
+
+  let client
+  try {
+    const startedAt = Date.now()
+    client = await connectStdioServer(
+      'mcp-router',
+      [resolve('scripts/mcp-router-launcher.cjs')],
+      {
+        MCPR_HOST: '127.0.0.1',
+        MCPR_PORT: String(address.port),
+        MCPR_CONNECT_TIMEOUT_MS: '250',
+        MCPR_RETRY_MS: '1000',
+      },
+    )
+    const tools = await withTimeout(client.listTools(), 'MCP Router listTools')
+    if (!tools.tools.some(tool => tool.name === 'mcp_router_status')) {
+      throw new Error('MCP Router fallback is missing mcp_router_status')
+    }
+    const status = await withTimeout(client.callTool({
+      name: 'mcp_router_status',
+      arguments: {},
+    }), 'MCP Router status')
+    if (status.isError || !textContent(status).includes('"connected":false')) {
+      throw new Error(`MCP Router fallback failed: ${textContent(status)}`)
+    }
+    if (Date.now() - startedAt > 3000) {
+      throw new Error('MCP Router fallback exceeded the startup deadline')
+    }
+    console.log('MCP_ROUTER_FALLBACK_SMOKE_OK')
+  } finally {
+    await client?.close().catch(() => {})
+    stalledServer.closeAllConnections?.()
+    await new Promise(resolveClose => stalledServer.close(resolveClose))
+  }
 }
 
 async function testSearxng() {
@@ -122,8 +201,10 @@ async function testContext7() {
 }
 
 async function main() {
+  await testCodegraph()
   await testSearxng()
   await testContext7()
+  await testRouterFallback()
 }
 
 main().catch(error => {

@@ -14,14 +14,14 @@
  * The agent can also be commanded to evolve via /evolve.
  */
 
-import { readFile, writeFile, mkdir, readdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, readdir, rename, appendFile } from 'fs/promises'
 import { join, extname } from 'path'
 import {
   getAgentGatewayProjectRoot,
   getAgentGatewayStateDir,
 } from './config.js'
 import type { AgentGatewayConfig } from './config.js'
-import { runOpenClaudeAgent } from './agentRunner.js'
+import { runOpenClaudeAgent, type AgentRunResult } from './agentRunner.js'
 import {
   loadIdentity,
   saveIdentity,
@@ -43,6 +43,10 @@ export type EvolutionState = {
   totalCyclesCompleted: number
   insightsGenerated: number
   codeFilesReviewed: number
+  totalCyclesFailed: number
+  lastFailureAt?: string
+  lastFailureType?: string
+  lastFailureError?: string
 }
 
 export type EvolutionResult = {
@@ -50,12 +54,15 @@ export type EvolutionResult = {
   summary: string
   insights: string[]
   changes: string[]
+  codeFilesReviewed?: number
 }
 
 export type EvolutionRunOptions = {
   signal?: AbortSignal
   onStdout?: (chunk: string) => void
   onProgress?: (event: string) => void
+  allowWhenDisabled?: boolean
+  runAgent?: typeof runOpenClaudeAgent
 }
 
 // ---------------------------------------------------------------------------
@@ -81,28 +88,56 @@ function insightsPath(): string {
 export async function loadEvolutionState(): Promise<EvolutionState> {
   try {
     const raw = await readFile(evolutionStatePath(), 'utf8')
-    return JSON.parse(raw)
+    return normalizeEvolutionState(JSON.parse(raw))
   } catch {
-    return {
-      enabled: false,
-      cycleCount: 0,
-      totalCyclesCompleted: 0,
-      insightsGenerated: 0,
-      codeFilesReviewed: 0,
-    }
+    return normalizeEvolutionState({})
   }
 }
 
 export async function saveEvolutionState(state: EvolutionState): Promise<void> {
-  await mkdir(join(getAgentGatewayStateDir(), 'memory'), { recursive: true })
-  await writeFile(evolutionStatePath(), JSON.stringify(state, null, 2))
+  const memoryDir = join(getAgentGatewayStateDir(), 'memory')
+  await mkdir(memoryDir, { recursive: true })
+  const path = evolutionStatePath()
+  const temporary = `${path}.${process.pid}.tmp`
+  await writeFile(temporary, `${JSON.stringify(normalizeEvolutionState(state), null, 2)}\n`)
+  await rename(temporary, path)
 }
 
-export async function toggleEvolution(enabled: boolean): Promise<EvolutionState> {
-  const state = await loadEvolutionState()
-  state.enabled = enabled
-  await saveEvolutionState(state)
-  return state
+function normalizeEvolutionState(raw: unknown): EvolutionState {
+  const value = raw && typeof raw === 'object'
+    ? raw as Partial<EvolutionState>
+    : {}
+  return {
+    enabled: value.enabled === true,
+    cycleCount: finiteCount(value.cycleCount),
+    totalCyclesCompleted: finiteCount(value.totalCyclesCompleted),
+    insightsGenerated: finiteCount(value.insightsGenerated),
+    codeFilesReviewed: finiteCount(value.codeFilesReviewed),
+    totalCyclesFailed: finiteCount(value.totalCyclesFailed),
+    ...(typeof value.lastCycleAt === 'string' ? { lastCycleAt: value.lastCycleAt } : {}),
+    ...(typeof value.lastCycleType === 'string' ? { lastCycleType: value.lastCycleType } : {}),
+    ...(typeof value.lastFailureAt === 'string' ? { lastFailureAt: value.lastFailureAt } : {}),
+    ...(typeof value.lastFailureType === 'string' ? { lastFailureType: value.lastFailureType } : {}),
+    ...(typeof value.lastFailureError === 'string' ? { lastFailureError: value.lastFailureError } : {}),
+  }
+}
+
+function finiteCount(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0
+}
+
+let evolutionQueue: Promise<void> = Promise.resolve()
+
+export function toggleEvolution(enabled: boolean): Promise<EvolutionState> {
+  const run = evolutionQueue.then(async () => {
+    const state = await loadEvolutionState()
+    state.enabled = enabled
+    await saveEvolutionState(state)
+    return state
+  })
+  evolutionQueue = run.then(() => undefined, () => undefined)
+  return run
 }
 
 // ---------------------------------------------------------------------------
@@ -125,47 +160,72 @@ function pickEvolutionType(state: EvolutionState): EvolutionType {
   return EVOLUTION_TYPES[state.cycleCount % EVOLUTION_TYPES.length]
 }
 
-export async function runEvolutionCycle(
+export function runEvolutionCycle(
+  config: AgentGatewayConfig,
+  requestedType?: EvolutionType,
+  options?: EvolutionRunOptions,
+): Promise<EvolutionResult | null> {
+  const run = evolutionQueue.then(() => runEvolutionCycleExclusive(
+    config,
+    requestedType,
+    options,
+  ))
+  evolutionQueue = run.then(() => undefined, () => undefined)
+  return run
+}
+
+async function runEvolutionCycleExclusive(
   config: AgentGatewayConfig,
   requestedType?: EvolutionType,
   options?: EvolutionRunOptions,
 ): Promise<EvolutionResult | null> {
   const state = await loadEvolutionState()
-  if (!state.enabled) return null
+  if (!state.enabled && !options?.allowWhenDisabled) return null
+  if (options?.signal?.aborted) throw createAbortError()
 
   const type = requestedType ?? pickEvolutionType(state)
   options?.onProgress?.(`evolution: ${type}`)
-  const result = await executeEvolution(type, config, options)
-  if (!result) return null
+  try {
+    const result = await executeEvolution(type, config, options)
+    if (!result) return null
+    if (options?.signal?.aborted) throw createAbortError()
 
-  // Update state
-  state.cycleCount++
-  state.totalCyclesCompleted++
-  state.lastCycleAt = new Date().toISOString()
-  state.lastCycleType = type
-  state.insightsGenerated += result.insights.length
-  await saveEvolutionState(state)
-
-  // Log the cycle
-  const { appendFile } = await import('fs/promises')
-  await mkdir(join(getAgentGatewayStateDir(), 'memory'), { recursive: true })
-  await appendFile(
-    evolutionLogPath(),
-    JSON.stringify({
-      ts: new Date().toISOString(),
+    state.cycleCount++
+    state.totalCyclesCompleted++
+    state.lastCycleAt = new Date().toISOString()
+    state.lastCycleType = type
+    state.insightsGenerated += result.insights.length
+    state.codeFilesReviewed += result.codeFilesReviewed || 0
+    await saveEvolutionState(state)
+    await appendEvolutionLog({
+      ts: state.lastCycleAt,
+      status: 'completed',
       type,
       summary: result.summary,
       insights: result.insights,
       changes: result.changes,
-    }) + '\n',
-  )
+    })
 
-  // Save insights to knowledge base
-  if (result.insights.length > 0) {
-    await appendInsights(result.insights)
+    if (result.insights.length > 0) {
+      await appendInsights(result.insights)
+    }
+    return result
+  } catch (error) {
+    if (options?.signal?.aborted || isAbortError(error)) throw error
+    const detail = error instanceof Error ? error.message : String(error)
+    state.totalCyclesFailed++
+    state.lastFailureAt = new Date().toISOString()
+    state.lastFailureType = type
+    state.lastFailureError = detail.slice(0, 1000)
+    await saveEvolutionState(state)
+    await appendEvolutionLog({
+      ts: state.lastFailureAt,
+      status: 'failed',
+      type,
+      error: state.lastFailureError,
+    })
+    throw error
   }
-
-  return result
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +298,7 @@ async function evolveIdentity(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({
+    const result = await (options?.runAgent || runOpenClaudeAgent)({
       prompt,
       config,
       suppressObservers: true,
@@ -247,14 +307,7 @@ async function evolveIdentity(
       onProgress: options?.onProgress,
       onStdout: options?.onStdout,
     })
-    if (result.exitCode !== 0) {
-      return {
-        type: 'identity_evolution',
-        summary: 'Identity evolution failed',
-        insights: [],
-        changes: [`Error: ${result.stderr.slice(0, 200)}`],
-      }
-    }
+    assertEvolutionAgentSucceeded('Identity evolution', result)
 
     const text = result.text
     const insights: string[] = []
@@ -277,12 +330,7 @@ async function evolveIdentity(
       changes: identityMatch ? ['identity.md updated'] : [],
     }
   } catch (err) {
-    return {
-      type: 'identity_evolution',
-      summary: `Identity evolution error: ${err instanceof Error ? err.message : String(err)}`,
-      insights: [],
-      changes: [],
-    }
+    throwEvolutionError('Identity evolution', err)
   }
 }
 
@@ -326,7 +374,7 @@ async function reviewOwnCode(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({
+    const result = await (options?.runAgent || runOpenClaudeAgent)({
       prompt,
       config,
       suppressObservers: true,
@@ -335,14 +383,7 @@ async function reviewOwnCode(
       onProgress: options?.onProgress,
       onStdout: options?.onStdout,
     })
-    if (result.exitCode !== 0) {
-      return {
-        type: 'code_review',
-        summary: 'Code review failed',
-        insights: [],
-        changes: [`Error: ${result.stderr.slice(0, 200)}`],
-      }
-    }
+    assertEvolutionAgentSucceeded('Code review', result)
 
     const text = result.text
     const insights: string[] = []
@@ -360,14 +401,10 @@ async function reviewOwnCode(
       summary: `Reviewed ${sourceFiles.length} files, found ${insights.length} insights, ${improvements.length} improvements`,
       insights,
       changes: improvements,
+      codeFilesReviewed: sourceFiles.length,
     }
   } catch (err) {
-    return {
-      type: 'code_review',
-      summary: `Code review error: ${err instanceof Error ? err.message : String(err)}`,
-      insights: [],
-      changes: [],
-    }
+    throwEvolutionError('Code review', err)
   }
 }
 
@@ -392,7 +429,7 @@ async function evolvePrompts(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({
+    const result = await (options?.runAgent || runOpenClaudeAgent)({
       prompt,
       config,
       suppressObservers: true,
@@ -401,14 +438,7 @@ async function evolvePrompts(
       onProgress: options?.onProgress,
       onStdout: options?.onStdout,
     })
-    if (result.exitCode !== 0) {
-      return {
-        type: 'prompt_evolution',
-        summary: 'Prompt evolution failed',
-        insights: [],
-        changes: [],
-      }
-    }
+    assertEvolutionAgentSucceeded('Prompt evolution', result)
 
     const text = result.text
     const insights: string[] = []
@@ -423,12 +453,7 @@ async function evolvePrompts(
       changes: [],
     }
   } catch (err) {
-    return {
-      type: 'prompt_evolution',
-      summary: `Prompt evolution error: ${err instanceof Error ? err.message : String(err)}`,
-      insights: [],
-      changes: [],
-    }
+    throwEvolutionError('Prompt evolution', err)
   }
 }
 
@@ -458,7 +483,7 @@ async function extractPatterns(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({
+    const result = await (options?.runAgent || runOpenClaudeAgent)({
       prompt,
       config,
       suppressObservers: true,
@@ -467,14 +492,7 @@ async function extractPatterns(
       onProgress: options?.onProgress,
       onStdout: options?.onStdout,
     })
-    if (result.exitCode !== 0) {
-      return {
-        type: 'pattern_extraction',
-        summary: 'Pattern extraction failed',
-        insights: [],
-        changes: [],
-      }
-    }
+    assertEvolutionAgentSucceeded('Pattern extraction', result)
 
     const text = result.text
     const insights: string[] = []
@@ -489,12 +507,7 @@ async function extractPatterns(
       changes: [],
     }
   } catch (err) {
-    return {
-      type: 'pattern_extraction',
-      summary: `Pattern extraction error: ${err instanceof Error ? err.message : String(err)}`,
-      insights: [],
-      changes: [],
-    }
+    throwEvolutionError('Pattern extraction', err)
   }
 }
 
@@ -519,7 +532,7 @@ async function analyzeTools(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({
+    const result = await (options?.runAgent || runOpenClaudeAgent)({
       prompt,
       config,
       suppressObservers: true,
@@ -528,14 +541,7 @@ async function analyzeTools(
       onProgress: options?.onProgress,
       onStdout: options?.onStdout,
     })
-    if (result.exitCode !== 0) {
-      return {
-        type: 'tool_analysis',
-        summary: 'Tool analysis failed',
-        insights: [],
-        changes: [],
-      }
-    }
+    assertEvolutionAgentSucceeded('Tool analysis', result)
 
     const text = result.text
     const insights: string[] = []
@@ -550,12 +556,7 @@ async function analyzeTools(
       changes: [],
     }
   } catch (err) {
-    return {
-      type: 'tool_analysis',
-      summary: `Tool analysis error: ${err instanceof Error ? err.message : String(err)}`,
-      insights: [],
-      changes: [],
-    }
+    throwEvolutionError('Tool analysis', err)
   }
 }
 
@@ -586,7 +587,7 @@ async function reviewArchitecture(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({
+    const result = await (options?.runAgent || runOpenClaudeAgent)({
       prompt,
       config,
       suppressObservers: true,
@@ -595,14 +596,7 @@ async function reviewArchitecture(
       onProgress: options?.onProgress,
       onStdout: options?.onStdout,
     })
-    if (result.exitCode !== 0) {
-      return {
-        type: 'architecture_review',
-        summary: 'Architecture review failed',
-        insights: [],
-        changes: [],
-      }
-    }
+    assertEvolutionAgentSucceeded('Architecture review', result)
 
     const text = result.text
     const insights: string[] = []
@@ -615,20 +609,47 @@ async function reviewArchitecture(
       summary: `Architecture review complete (${text.length} chars)`,
       insights,
       changes: [],
+      codeFilesReviewed: sourceFiles.length,
     }
   } catch (err) {
-    return {
-      type: 'architecture_review',
-      summary: `Architecture review error: ${err instanceof Error ? err.message : String(err)}`,
-      insights: [],
-      changes: [],
-    }
+    throwEvolutionError('Architecture review', err)
   }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function assertEvolutionAgentSucceeded(
+  label: string,
+  result: AgentRunResult,
+): void {
+  if (result.exitCode === 0) return
+  const detail = result.diagnostic || result.stderr || result.text || result.failureKind || 'unknown agent failure'
+  throw new Error(`${label} failed: ${detail.slice(0, 1000)}`)
+}
+
+function throwEvolutionError(label: string, error: unknown): never {
+  if (isAbortError(error)) throw error
+  const detail = error instanceof Error ? error.message : String(error)
+  if (detail.startsWith(`${label} failed:`)) throw error
+  throw new Error(`${label} failed: ${detail}`)
+}
+
+function createAbortError(): Error {
+  const error = new Error('Evolution cycle aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
+
+async function appendEvolutionLog(entry: Record<string, unknown>): Promise<void> {
+  await mkdir(join(getAgentGatewayStateDir(), 'memory'), { recursive: true })
+  await appendFile(evolutionLogPath(), `${JSON.stringify(entry)}\n`)
+}
 
 type SourceFile = {
   path: string
@@ -703,10 +724,14 @@ export async function getEvolutionStatus(): Promise<string> {
   const state = await loadEvolutionState()
   const lines = [
     `Evolution mode: ${state.enabled ? 'ON' : 'OFF'}`,
-    `Total cycles: ${state.totalCyclesCompleted}`,
+    `Completed cycles: ${state.totalCyclesCompleted}`,
+    `Failed cycles: ${state.totalCyclesFailed}`,
     `Insights generated: ${state.insightsGenerated}`,
     `Code files reviewed: ${state.codeFilesReviewed}`,
     state.lastCycleAt ? `Last cycle: ${state.lastCycleAt.slice(0, 16)} (${state.lastCycleType})` : 'No cycles yet',
+    state.lastFailureAt
+      ? `Last failure: ${state.lastFailureAt.slice(0, 16)} (${state.lastFailureType}) - ${state.lastFailureError || 'unknown error'}`
+      : 'No failed cycles',
   ]
   return lines.join('\n')
 }

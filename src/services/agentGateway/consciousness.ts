@@ -36,21 +36,44 @@ export type ConsciousnessOptions = {
   maxRounds?: number
   /** Budget fraction allowed for consciousness (0.0-1.0, default: 0.1) */
   budgetFraction?: number
+  /** Minimum seconds between automatic evolution cycles (default: 21600 = 6 hours) */
+  evolutionIntervalSeconds?: number
   /** Callback to send proactive message to user */
   onProactiveMessage?: (text: string) => Promise<void>
   /** Callback to check if a task is currently running */
   isTaskRunning?: () => boolean
   /** Config for running agent */
   config: AgentGatewayConfig
+  /** Test/runtime injection point for the background agent runner */
+  runAgent?: typeof runOpenClaudeAgent
+  /** Test/runtime injection point for evolution */
+  runEvolution?: typeof runEvolutionCycle
+}
+
+export type ConsciousnessStatus = {
+  running: boolean
+  paused: boolean
+  inFlight: boolean
+  wakeupCount: number
+  nextWakeupSec: number
+  maxRounds: number
+  lastRoundCount: number
+  budgetSpentUsd: number
+  budgetLimited: boolean
+  lastWakeupAt?: string
+  lastSuccessAt?: string
+  lastError?: string
 }
 
 export type ConsciousnessHandle = {
   stop: () => void
   pause: () => void
   resume: () => void
+  wakeNow: () => boolean
   injectObservation: (text: string) => void
   getNextWakeupSec: () => number
   getBudgetSpent: () => number
+  getStatus: () => ConsciousnessStatus
 }
 
 // ---------------------------------------------------------------------------
@@ -61,12 +84,13 @@ const DEFAULT_WAKEUP_MIN = 300       // 5 minutes
 const DEFAULT_WAKEUP_MAX = 7200      // 2 hours
 const DEFAULT_MAX_ROUNDS = 3
 const DEFAULT_BUDGET_FRACTION = 0.1
+const DEFAULT_EVOLUTION_INTERVAL_SECONDS = 6 * 60 * 60
 
 // ---------------------------------------------------------------------------
 // Consciousness Prompt
 // ---------------------------------------------------------------------------
 
-function buildConsciousnessPrompt(
+export function buildConsciousnessPrompt(
   memoryContext: string,
   recentChatCount: number,
   wakeupCount: number,
@@ -74,6 +98,9 @@ function buildConsciousnessPrompt(
   observations: string[],
   evolutionEnabled: boolean,
   evolutionCycles: number,
+  round = 1,
+  maxRounds = 1,
+  previousThought = '',
 ): string {
   const observationsSection = observations.length > 0
     ? `\n## Recent observations\n\n${observations.map(o => `- ${o}`).join('\n')}`
@@ -96,6 +123,21 @@ function buildConsciousnessPrompt(
         '',
         'You cannot run self-improvement cycles. The user can enable it with /evolution on.',
       ].join('\n')
+
+  const roundSection = maxRounds > 1
+    ? [
+        '',
+        '## Wakeup round',
+        '',
+        `Round ${round} of at most ${maxRounds}.`,
+        previousThought
+          ? `Previous round summary:\n${previousThought.slice(0, 1200)}`
+          : 'This is the first round.',
+        round < maxRounds
+          ? 'Include [CONTINUE] only if another short round is necessary to finish this maintenance item.'
+          : 'This is the final allowed round; do not include [CONTINUE].',
+      ].join('\n')
+    : ''
 
   return [
     'You are the background consciousness of the OpenClaude agent.',
@@ -141,6 +183,7 @@ function buildConsciousnessPrompt(
     `Recent chat messages: ${recentChatCount}`,
     `${observationsSection}`,
     evolutionSection,
+    roundSection,
     '',
     '## Memory context',
     '',
@@ -151,6 +194,7 @@ function buildConsciousnessPrompt(
     'You can also append to your scratchpad by starting a line with',
     '[SCRATCHPAD] followed by the content to append.',
     'To adjust your next wakeup, use [WAKEUP:NNN] where NNN is seconds.',
+    maxRounds > 1 ? 'Use [CONTINUE] only when one more bounded thinking round is genuinely needed.' : '',
     evolutionEnabled ? 'To run a self-improvement cycle, include [EVOLVE] in your response.' : '',
   ].join('\n')
 }
@@ -159,20 +203,28 @@ function buildConsciousnessPrompt(
 // Response Parser
 // ---------------------------------------------------------------------------
 
-type ConsciousnessResult = {
+export type ConsciousnessResult = {
   proactiveMessage?: string
   scratchpadAppend?: string
   nextWakeupSec?: number
   shouldEvolve: boolean
+  shouldContinue: boolean
   thought: string
 }
 
-function parseConsciousnessResponse(text: string): ConsciousnessResult {
-  const result: ConsciousnessResult = { shouldEvolve: false, thought: text }
+export function parseConsciousnessResponse(text: string): ConsciousnessResult {
+  const result: ConsciousnessResult = {
+    shouldEvolve: false,
+    shouldContinue: false,
+    thought: text,
+  }
 
   // Check for evolve request
   if (/\[EVOLVE\]/i.test(text)) {
     result.shouldEvolve = true
+  }
+  if (/\[CONTINUE\]/i.test(text)) {
+    result.shouldContinue = true
   }
 
   // Extract proactive message
@@ -205,9 +257,22 @@ function parseConsciousnessResponse(text: string): ConsciousnessResult {
     .replace(/\[SCRATCHPAD\][\s\S]*?(?=\[|$)/g, '')
     .replace(/\[WAKEUP:\d+\]/g, '')
     .replace(/\[EVOLVE\]/gi, '')
+    .replace(/\[CONTINUE\]/gi, '')
     .trim()
 
   return result
+}
+
+export function isEvolutionCycleDue(
+  state: { enabled: boolean; lastCycleAt?: string },
+  intervalSeconds: number,
+  nowMs = Date.now(),
+): boolean {
+  if (!state.enabled) return false
+  if (!state.lastCycleAt) return true
+  const lastCycleMs = Date.parse(state.lastCycleAt)
+  if (!Number.isFinite(lastCycleMs)) return true
+  return nowMs - lastCycleMs >= Math.max(60, intervalSeconds) * 1000
 }
 
 // ---------------------------------------------------------------------------
@@ -222,28 +287,53 @@ export function createBackgroundConsciousness(
     wakeupMax = DEFAULT_WAKEUP_MAX,
     maxRounds = DEFAULT_MAX_ROUNDS,
     budgetFraction = DEFAULT_BUDGET_FRACTION,
+    evolutionIntervalSeconds = DEFAULT_EVOLUTION_INTERVAL_SECONDS,
     onProactiveMessage,
     isTaskRunning,
     config,
+    runAgent = runOpenClaudeAgent,
+    runEvolution = runEvolutionCycle,
   } = opts
 
+  const effectiveWakeupMin = Math.max(1, Math.floor(wakeupMin))
+  const effectiveWakeupMax = Math.max(
+    effectiveWakeupMin,
+    Math.floor(wakeupMax),
+  )
+  const effectiveMaxRounds = Math.max(1, Math.floor(maxRounds))
   let running = true
   let paused = false
-  let nextWakeupSec = wakeupMin
+  let inFlight = false
+  let nextWakeupSec = effectiveWakeupMin
   let bgSpentUsd = 0
   let wakeupCount = 0
+  let lastRoundCount = 0
+  let lastWakeupAt: string | undefined
+  let lastSuccessAt: string | undefined
+  let lastError: string | undefined
   let observations: string[] = []
   let timer: ReturnType<typeof setTimeout> | null = null
+  let activeController: AbortController | null = null
 
   // -----------------------------------------------------------------------
   // Budget check
   // -----------------------------------------------------------------------
 
   function checkBudget(): boolean {
-    const totalBudget = parseFloat(process.env.TOTAL_BUDGET || '1')
+    const configuredBudget = process.env.TOTAL_BUDGET?.trim()
+    if (!configuredBudget) return true
+    const totalBudget = parseFloat(configuredBudget)
     if (!Number.isFinite(totalBudget) || totalBudget <= 0) return true
     const maxBg = totalBudget * budgetFraction
     return bgSpentUsd < maxBg
+  }
+
+  function setFailure(error: unknown): void {
+    lastError = error instanceof Error ? error.message : String(error)
+    nextWakeupSec = Math.min(
+      Math.max(nextWakeupSec * 2, effectiveWakeupMin),
+      effectiveWakeupMax,
+    )
   }
 
   // -----------------------------------------------------------------------
@@ -254,81 +344,129 @@ export function createBackgroundConsciousness(
     if (paused || !running) return
     if (isTaskRunning?.()) return
     if (!checkBudget()) {
-      nextWakeupSec = wakeupMax
+      nextWakeupSec = effectiveWakeupMax
       return
     }
 
+    inFlight = true
+    lastError = undefined
+    activeController = new AbortController()
+    const controller = activeController
+
     try {
       wakeupCount++
+      lastWakeupAt = new Date().toISOString()
 
       const [memoryContext, chatCount, evolutionState] = await Promise.all([
         buildMemoryContextSection(),
         countChatLogLines(),
         loadEvolutionState(),
       ])
-
-      const prompt = buildConsciousnessPrompt(
-        memoryContext,
-        chatCount,
-        wakeupCount,
-        bgSpentUsd,
-        observations.slice(-10),
-        evolutionState.enabled,
-        evolutionState.totalCyclesCompleted,
+      const observationBoundary = observations.length
+      const wakeupObservations = observations.slice(-10)
+      let previousThought = ''
+      let proactiveSent = false
+      let wakeupAdjusted = false
+      let shouldEvolve = isEvolutionCycleDue(
+        evolutionState,
+        evolutionIntervalSeconds,
       )
 
-      // Clear observations after using them
-      observations = []
+      lastRoundCount = 0
+      for (let round = 1; round <= effectiveMaxRounds; round++) {
+        if (controller.signal.aborted || paused || !running) return
 
-      // Run the agent with the consciousness prompt
-      const result = await runOpenClaudeAgent({
-        prompt,
-        config,
-        suppressObservers: true,
-      })
+        const prompt = buildConsciousnessPrompt(
+          memoryContext,
+          chatCount,
+          wakeupCount,
+          bgSpentUsd,
+          round === 1 ? wakeupObservations : [],
+          evolutionState.enabled,
+          evolutionState.totalCyclesCompleted,
+          round,
+          effectiveMaxRounds,
+          previousThought,
+        )
+        const result = await runAgent({
+          prompt,
+          config,
+          suppressObservers: true,
+          streamEvents: true,
+          signal: controller.signal,
+        })
 
-      if (result.exitCode !== 0) {
-        console.error('[consciousness] Agent run failed:', result.stderr)
-        nextWakeupSec = Math.min(nextWakeupSec * 2, wakeupMax)
-        return
-      }
+        if (controller.signal.aborted || paused || !running) return
+        if (result.costUsd !== undefined) bgSpentUsd += result.costUsd
+        if (result.exitCode !== 0) {
+          const detail = result.diagnostic || result.stderr || result.text || 'unknown agent failure'
+          throw new Error(`Background agent run failed: ${detail.slice(0, 500)}`)
+        }
 
-      const parsed = parseConsciousnessResponse(result.text)
+        lastRoundCount = round
+        if (round === 1) observations = observations.slice(observationBoundary)
+        const parsed = parseConsciousnessResponse(result.text)
 
-      // Handle proactive message
-      if (parsed.proactiveMessage && onProactiveMessage) {
-        await onProactiveMessage(parsed.proactiveMessage)
-      }
-
-      // Handle scratchpad append
-      if (parsed.scratchpadAppend) {
-        await appendScratchpadBlock(parsed.scratchpadAppend, 'consciousness')
-      }
-
-      // Handle evolution request
-      if (parsed.shouldEvolve) {
-        console.log('[consciousness] Running evolution cycle...')
-        const evoResult = await runEvolutionCycle(config)
-        if (evoResult) {
-          console.log(`[consciousness] Evolution: ${evoResult.type} — ${evoResult.summary}`)
-          if (evoResult.insights.length > 0 && onProactiveMessage) {
-            await onProactiveMessage(
-              `Evolution cycle complete (${evoResult.type}):\n${evoResult.insights.slice(0, 2).join('\n')}`,
-            )
+        if (parsed.proactiveMessage && onProactiveMessage && !proactiveSent) {
+          try {
+            await onProactiveMessage(parsed.proactiveMessage)
+            proactiveSent = true
+          } catch (error) {
+            lastError = `Proactive delivery failed: ${error instanceof Error ? error.message : String(error)}`
+            console.error('[consciousness]', lastError)
           }
+        }
+
+        if (parsed.scratchpadAppend) {
+          await appendScratchpadBlock(parsed.scratchpadAppend, 'consciousness')
+        }
+
+        shouldEvolve ||= parsed.shouldEvolve
+        if (parsed.nextWakeupSec) {
+          nextWakeupSec = Math.max(
+            effectiveWakeupMin,
+            Math.min(effectiveWakeupMax, parsed.nextWakeupSec),
+          )
+          wakeupAdjusted = true
+        }
+
+        previousThought = parsed.thought
+        if (!parsed.shouldContinue || round === effectiveMaxRounds) break
+      }
+
+      if (!wakeupAdjusted) nextWakeupSec = effectiveWakeupMin
+
+      if (shouldEvolve && evolutionState.enabled && !controller.signal.aborted) {
+        console.log('[consciousness] Running due evolution cycle...')
+        try {
+          const evoResult = await runEvolution(config, undefined, {
+            signal: controller.signal,
+          })
+          if (evoResult) {
+            console.log(`[consciousness] Evolution: ${evoResult.type} — ${evoResult.summary}`)
+            if (evoResult.insights.length > 0 && onProactiveMessage && !proactiveSent) {
+              await onProactiveMessage(
+                `Evolution cycle complete (${evoResult.type}):\n${evoResult.insights.slice(0, 2).join('\n')}`,
+              )
+            }
+          }
+        } catch (error) {
+          lastError = `Evolution failed: ${error instanceof Error ? error.message : String(error)}`
+          console.error('[consciousness]', lastError)
         }
       }
 
-      // Handle wakeup adjustment
-      if (parsed.nextWakeupSec) {
-        nextWakeupSec = Math.max(wakeupMin, Math.min(wakeupMax, parsed.nextWakeupSec))
-      }
-
-      // Log the thought
-      console.log(`[consciousness] Wakeup #${wakeupCount}: ${parsed.thought.slice(0, 200)}`)
+      lastSuccessAt = new Date().toISOString()
+      console.log(
+        `[consciousness] Wakeup #${wakeupCount} (${lastRoundCount} round${lastRoundCount === 1 ? '' : 's'}): ${previousThought.slice(0, 200)}`,
+      )
     } catch (err) {
+      if (controller.signal.aborted || paused || !running) return
       console.error('[consciousness] Error during think cycle:', err)
-      nextWakeupSec = Math.min(nextWakeupSec * 2, wakeupMax)
+      setFailure(err)
+    } finally {
+      if (activeController === controller) activeController = null
+      inFlight = false
     }
   }
 
@@ -336,16 +474,20 @@ export function createBackgroundConsciousness(
   // Loop
   // -----------------------------------------------------------------------
 
-  function scheduleNext(): void {
+  function scheduleNext(delaySeconds = nextWakeupSec): void {
     if (!running) return
+    if (timer) clearTimeout(timer)
     timer = setTimeout(async () => {
-      if (paused) {
-        scheduleNext()
-        return
-      }
+      timer = null
       await think()
       scheduleNext()
-    }, nextWakeupSec * 1000)
+    }, Math.max(0, delaySeconds) * 1000)
+  }
+
+  function wakeNow(): boolean {
+    if (!running || paused || inFlight || isTaskRunning?.()) return false
+    scheduleNext(0)
+    return true
   }
 
   // Start the loop
@@ -359,13 +501,17 @@ export function createBackgroundConsciousness(
     stop() {
       running = false
       if (timer) clearTimeout(timer)
+      timer = null
+      activeController?.abort()
     },
     pause() {
       paused = true
+      activeController?.abort()
     },
     resume() {
       paused = false
     },
+    wakeNow,
     injectObservation(text: string) {
       observations.push(text)
       if (observations.length > 100) {
@@ -377,6 +523,22 @@ export function createBackgroundConsciousness(
     },
     getBudgetSpent() {
       return bgSpentUsd
+    },
+    getStatus() {
+      return {
+        running,
+        paused,
+        inFlight,
+        wakeupCount,
+        nextWakeupSec,
+        maxRounds: effectiveMaxRounds,
+        lastRoundCount,
+        budgetSpentUsd: bgSpentUsd,
+        budgetLimited: !checkBudget(),
+        ...(lastWakeupAt ? { lastWakeupAt } : {}),
+        ...(lastSuccessAt ? { lastSuccessAt } : {}),
+        ...(lastError ? { lastError } : {}),
+      }
     },
   }
 }

@@ -7,6 +7,7 @@ import {
   buildAgentChildEnv,
   buildPromptFromChatMessages,
   classifyAgentRunFailure,
+  extractStreamJsonResult,
   isIgnorablePostSuccessStderr,
   normalizeMessageContent,
   summarizeStreamJsonProgress,
@@ -176,6 +177,19 @@ describe('agent gateway prompt builder', () => {
     expect(events).toContain('mcp_mcp_router_PowerShell: "Get-ChildItem C:\\Users\\test\\Desktop"')
     expect(events).toContain('skill: "playwright"')
     expect(events.join('\n')).not.toContain('private chain of thought')
+  })
+
+  test('extracts measured cost from a successful stream-json result', () => {
+    expect(extractStreamJsonResult({
+      type: 'result',
+      subtype: 'success',
+      result: 'done',
+      total_cost_usd: 0.0123,
+    })).toEqual({
+      text: 'done',
+      error: '',
+      costUsd: 0.0123,
+    })
   })
 
   test('links stream-json tool result errors to the original tool call', () => {

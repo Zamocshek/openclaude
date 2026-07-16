@@ -353,10 +353,10 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     commands: [
       { syntax: '/restart', description: 'soft-restart the gateway runtime' },
       { syntax: '/panic', description: 'abort active tasks and stop the gateway runtime' },
-      { syntax: '/bg [start|stop]', description: 'show or control background consciousness' },
-      { syntax: '/consciousness [start|stop]', description: 'show, resume, or pause consciousness loop' },
-      { syntax: '/evolution [on|off]', description: 'show or toggle self-improvement cycles' },
-      { syntax: '/evolve [now|stop|status]', description: 'control autonomous evolution mode' },
+      { syntax: '/bg [start|stop|now|status]', description: 'persist, wake, or inspect background consciousness' },
+      { syntax: '/consciousness [start|stop|now|status]', description: 'alias for /bg' },
+      { syntax: '/evolution [on|off|status]', description: 'control scheduled self-improvement cycles' },
+      { syntax: '/evolve [on|off|now|status]', description: 'control evolution or run one cycle immediately' },
       { syntax: '/tools [on|off]', description: 'show, enable, or disable model tool calls', botDescription: 'Control model tools' },
       { syntax: '/review', description: 'run a deep architecture review cycle' },
       { syntax: '/infinite <goal>', description: 'run an opt-in persistent task loop' },
@@ -1023,6 +1023,22 @@ export class TelegramAgentBridge {
       return
     }
 
+    if (commandText === '/consciousness' || commandText.startsWith('/consciousness ')) {
+      await this.handleBgCommand(
+        chatId,
+        commandText.slice('/consciousness'.length).trim(),
+      )
+      return
+    }
+
+    if (commandText === '/evolution' || commandText.startsWith('/evolution ')) {
+      await this.handleEvolutionModeCommand(
+        chatId,
+        commandText.slice('/evolution'.length).trim(),
+      )
+      return
+    }
+
     if (commandText === '/evolve' || commandText.startsWith('/evolve ')) {
       await this.handleEvolveCommand(chatId, commandText.slice('/evolve'.length).trim())
       return
@@ -1065,41 +1081,6 @@ export class TelegramAgentBridge {
 
     if (text.startsWith('/resumejob ')) {
       await this.handleResumeJobCommand(chatId, text.slice('/resumejob '.length))
-      return
-    }
-
-    if (text === '/consciousness') {
-      await this.handleConsciousnessCommand(chatId)
-      return
-    }
-
-    if (text === '/consciousness start') {
-      await this.handleConsciousnessControlCommand(chatId, 'start')
-      return
-    }
-
-    if (text === '/consciousness stop') {
-      await this.handleConsciousnessControlCommand(chatId, 'stop')
-      return
-    }
-
-    if (text === '/evolution') {
-      await this.handleEvolutionCommand(chatId)
-      return
-    }
-
-    if (text === '/evolution on') {
-      await this.handleEvolutionToggleCommand(chatId, true)
-      return
-    }
-
-    if (text === '/evolution off') {
-      await this.handleEvolutionToggleCommand(chatId, false)
-      return
-    }
-
-    if (text === '/evolve') {
-      await this.handleEvolveNowCommand(chatId)
       return
     }
 
@@ -1488,7 +1469,7 @@ export class TelegramAgentBridge {
         mcpTotal: servers.length,
         toolsEnabled: !this.config.runner.disableTools,
         cronEnabled: this.config.cron.enabled,
-        consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+        consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
         evolutionEnabled: evolution.enabled,
       }),
       buildTelegramControlKeyboard(),
@@ -1617,7 +1598,7 @@ export class TelegramAgentBridge {
         buildTelegramRuntimeKeyboard({
           toolsEnabled: !this.config.runner.disableTools,
           cronEnabled: this.config.cron.enabled,
-          consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+          consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
           evolutionEnabled: (await loadEvolutionState()).enabled,
         }),
       )
@@ -1647,13 +1628,13 @@ export class TelegramAgentBridge {
       formatTelegramRuntimePanel({
         toolsEnabled: !this.config.runner.disableTools,
         cronEnabled: this.config.cron.enabled,
-        consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+        consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
         evolutionEnabled: evolution.enabled,
       }),
       buildTelegramRuntimeKeyboard({
         toolsEnabled: !this.config.runner.disableTools,
         cronEnabled: this.config.cron.enabled,
-        consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+        consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
         evolutionEnabled: evolution.enabled,
       }),
     )
@@ -2235,6 +2216,7 @@ export class TelegramAgentBridge {
     )
     const evolution = await loadEvolutionState()
     const consciousness = runtime?.consciousness
+    const consciousnessStatus = consciousness?.getStatus()
     const uptimeMs = runtime ? Date.now() - runtime.startedAt : 0
     const queuedTelegramTasks = [...this.queuedTaskCounts.values()]
       .reduce((sum, count) => sum + count, 0)
@@ -2251,11 +2233,11 @@ export class TelegramAgentBridge {
       `Cron jobs for this chat: ${chatJobs.length} (${chatJobs.filter(job => job.enabled).length} enabled)`,
       '',
       `Ouroboros: ${this.config.ouroboros.enabled ? 'enabled' : 'off'}`,
-      `Background consciousness: ${consciousness ? 'running' : this.config.ouroboros.consciousnessEnabled ? 'configured' : 'off'}`,
-      consciousness ? `Next wakeup: ${consciousness.getNextWakeupSec()}s` : undefined,
-      consciousness ? `Budget spent: $${consciousness.getBudgetSpent().toFixed(4)}` : undefined,
+      `Background consciousness: ${consciousnessStatus ? consciousnessStatus.paused ? 'paused' : consciousnessStatus.inFlight ? 'thinking' : 'running' : this.config.ouroboros.consciousnessEnabled ? 'configured' : 'off'}`,
+      consciousnessStatus ? `Wakeups: ${consciousnessStatus.wakeupCount}; next: ${consciousnessStatus.nextWakeupSec}s` : undefined,
+      consciousnessStatus ? `Measured background cost: $${consciousnessStatus.budgetSpentUsd.toFixed(4)}` : undefined,
       `Evolution mode: ${evolution.enabled ? 'ON' : 'OFF'}`,
-      `Evolution cycles: ${evolution.totalCyclesCompleted}`,
+      `Evolution cycles: ${evolution.totalCyclesCompleted} completed, ${evolution.totalCyclesFailed} failed`,
       evolution.lastCycleAt ? `Last evolution: ${evolution.lastCycleAt.slice(0, 16)} (${evolution.lastCycleType})` : 'Last evolution: never',
     ].filter(Boolean) as string[]
 
@@ -2316,8 +2298,13 @@ export class TelegramAgentBridge {
       await this.sendMessage(chatId, 'Background consciousness: starting.')
       await this.acknowledgeTelegramUpdates()
       const runtime = await restartAgentGateway()
-      runtime?.consciousness?.resume()
-      await this.sendMessage(chatId, 'Background consciousness: running.')
+      const scheduled = runtime?.consciousness?.wakeNow() === true
+      await this.sendMessage(
+        chatId,
+        scheduled
+          ? 'Background consciousness: running; immediate wakeup scheduled.'
+          : 'Background consciousness: running; next wakeup follows the configured interval.',
+      )
       return
     }
 
@@ -2338,6 +2325,27 @@ export class TelegramAgentBridge {
       await this.acknowledgeTelegramUpdates()
       await restartAgentGateway()
       await this.sendMessage(chatId, 'Background consciousness: stopped.')
+      return
+    }
+
+    if (['now', 'wake', 'run'].includes(action)) {
+      const consciousness = getAgentGatewayRuntime()?.consciousness
+      if (!consciousness) {
+        await this.sendMessage(chatId, 'Background consciousness is not running. Start it with /bg start.')
+        return
+      }
+      const scheduled = consciousness.wakeNow()
+      await this.sendMessage(
+        chatId,
+        scheduled
+          ? 'Background consciousness: immediate wakeup scheduled.'
+          : 'Background consciousness is paused, busy, or an agent task is active. Try again after the current run.',
+      )
+      return
+    }
+
+    if (!['status', 'state'].includes(action)) {
+      await this.sendMessage(chatId, 'Usage: /bg [start|stop|now|status]')
       return
     }
 
@@ -2362,7 +2370,7 @@ export class TelegramAgentBridge {
     chatId: string,
     commandBody: string,
   ): Promise<void> {
-    const action = commandBody.trim().toLowerCase() || 'on'
+    const action = commandBody.trim().toLowerCase() || 'status'
 
     if (['stop', 'off', '0'].includes(action)) {
       await this.handleEvolutionToggleCommand(chatId, false)
@@ -2379,21 +2387,53 @@ export class TelegramAgentBridge {
       return
     }
 
-    await this.handleEvolutionToggleCommand(chatId, true)
+    if (['start', 'on', '1'].includes(action)) {
+      await this.handleEvolutionToggleCommand(chatId, true)
+      return
+    }
+
+    await this.sendMessage(chatId, 'Usage: /evolve [on|off|now|status]')
+  }
+
+  private async handleEvolutionModeCommand(
+    chatId: string,
+    commandBody: string,
+  ): Promise<void> {
+    const action = commandBody.trim().toLowerCase() || 'status'
+    if (['on', 'start', '1'].includes(action)) {
+      await this.handleEvolutionToggleCommand(chatId, true)
+      return
+    }
+    if (['off', 'stop', '0'].includes(action)) {
+      await this.handleEvolutionToggleCommand(chatId, false)
+      return
+    }
+    if (['status', 'state'].includes(action)) {
+      await this.handleEvolutionCommand(chatId)
+      return
+    }
+    await this.sendMessage(chatId, 'Usage: /evolution [on|off|status]')
   }
 
   private async handleReviewCommand(chatId: string): Promise<void> {
-    await this.runEvolutionCommandCycle(chatId, 'architecture_review', 'Running deep architecture review')
+    await this.runEvolutionCommandCycle(
+      chatId,
+      'architecture_review',
+      'Running deep architecture review',
+      true,
+    )
   }
 
   private async runEvolutionCommandCycle(
     chatId: string,
     type: EvolutionType | undefined,
     phase: string,
+    allowWhenDisabled = false,
   ): Promise<void> {
     const state = await loadEvolutionState()
-    if (!state.enabled) {
-      await toggleEvolution(true)
+    if (!state.enabled && !allowWhenDisabled) {
+      await this.sendMessage(chatId, 'Evolution mode is OFF. Enable it with /evolution on or run a one-off /review.')
+      return
     }
 
     if (this.activeTasks.has(chatId)) {
@@ -2409,6 +2449,7 @@ export class TelegramAgentBridge {
         signal: controller.signal,
         onProgress: event => progress.addEvent(event),
         onStdout: chunk => progress.observeStdout(chunk),
+        allowWhenDisabled,
       })
       if (this.activeTasks.get(chatId)?.controller === controller) {
         this.activeTasks.delete(chatId)
@@ -2476,9 +2517,16 @@ export class TelegramAgentBridge {
     const lines: string[] = []
 
     if (consciousness) {
-      lines.push('Background consciousness is running.')
-      lines.push(`Next wakeup: ${consciousness.getNextWakeupSec()}s`)
-      lines.push(`Budget spent: $${consciousness.getBudgetSpent().toFixed(4)}`)
+      const status = consciousness.getStatus()
+      lines.push(`Background consciousness is ${status.paused ? 'paused' : status.inFlight ? 'thinking' : 'running'}.`)
+      lines.push(`Wakeups: ${status.wakeupCount}`)
+      lines.push(`Last rounds: ${status.lastRoundCount}/${status.maxRounds}`)
+      lines.push(`Next wakeup: ${status.nextWakeupSec}s`)
+      lines.push(`Measured cost: $${status.budgetSpentUsd.toFixed(4)}`)
+      lines.push(`Budget guard: ${status.budgetLimited ? 'LIMIT REACHED' : process.env.TOTAL_BUDGET ? 'active' : 'unlimited'}`)
+      if (status.lastWakeupAt) lines.push(`Last wakeup: ${status.lastWakeupAt.slice(0, 19)}`)
+      if (status.lastSuccessAt) lines.push(`Last success: ${status.lastSuccessAt.slice(0, 19)}`)
+      if (status.lastError) lines.push(`Last error: ${status.lastError.slice(0, 500)}`)
     } else {
       lines.push(
         configured
@@ -2502,35 +2550,12 @@ export class TelegramAgentBridge {
     await this.sendMessage(chatId, lines.join('\n'))
   }
 
-  private async handleConsciousnessControlCommand(
-    chatId: string,
-    action: 'start' | 'stop',
-  ): Promise<void> {
-    const runtime = getAgentGatewayRuntime()
-    const consciousness = runtime?.consciousness
-
-    if (action === 'start') {
-      if (consciousness) {
-        consciousness.resume()
-        await this.sendMessage(chatId, 'Background consciousness resumed.')
-      } else {
-        await this.sendMessage(chatId, 'Cannot start consciousness - enable Ouroboros consciousness in /agent-gateway and restart the gateway.')
-      }
-    } else {
-      if (consciousness) {
-        consciousness.pause()
-        await this.sendMessage(chatId, 'Background consciousness paused.')
-      } else {
-        await this.sendMessage(chatId, 'Consciousness is not running.')
-      }
-    }
-  }
-
   private async handleEvolutionCommand(chatId: string): Promise<void> {
     const status = await getEvolutionStatus()
+    const consciousness = getAgentGatewayRuntime()?.consciousness
     await this.sendMessage(
       chatId,
-      `${status}\n\nCommands:\n/evolution on - enable self-improvement cycles\n/evolution off - disable evolution\n/evolve - start autonomous evolution mode\n/evolve stop - stop evolution mode\n/evolve now - run one evolution cycle now\n/review - run a deep review cycle`,
+      `${status}\nAutonomous scheduler: ${consciousness ? `background consciousness, every ${this.config.ouroboros.evolutionIntervalSeconds}s` : 'not running; use /bg start'}\n\nCommands:\n/evolution on - enable scheduled self-improvement\n/evolution off - disable scheduled evolution\n/evolve now - run one cycle immediately\n/review - run a one-off architecture review`,
     )
   }
 
@@ -2541,18 +2566,26 @@ export class TelegramAgentBridge {
     const state = await toggleEvolution(enabled)
     await this.sendMessage(
       chatId,
-      `Evolution mode: ${enabled ? 'ON' : 'OFF'}\nTotal cycles completed: ${state.totalCyclesCompleted}`,
+      [
+        `Evolution mode: ${enabled ? 'ON' : 'OFF'}`,
+        `Completed cycles: ${state.totalCyclesCompleted}`,
+        `Failed cycles: ${state.totalCyclesFailed}`,
+        enabled
+          ? getAgentGatewayRuntime()?.consciousness
+            ? `Automatic cycle interval: ${this.config.ouroboros.evolutionIntervalSeconds}s`
+            : 'Automatic cycles require background consciousness. Start it with /bg start.'
+          : 'Manual /evolve now and /review remain available.',
+      ].join('\n'),
     )
   }
 
   private async handleEvolveNowCommand(chatId: string): Promise<void> {
-    const state = await loadEvolutionState()
-    if (!state.enabled) {
-      await this.sendMessage(chatId, 'Evolution mode is OFF. Enable with /evolution on first.')
-      return
-    }
-
-    await this.runEvolutionCommandCycle(chatId, undefined, 'Running evolution cycle')
+    await this.runEvolutionCommandCycle(
+      chatId,
+      undefined,
+      'Running evolution cycle',
+      true,
+    )
   }
 
   private async handleIdentityCommand(chatId: string): Promise<void> {
@@ -2717,7 +2750,7 @@ export class TelegramAgentBridge {
             mcpTotal: servers.length,
             toolsEnabled: !this.config.runner.disableTools,
             cronEnabled: this.config.cron.enabled,
-            consciousnessEnabled: this.config.ouroboros.consciousnessEnabled,
+            consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
             evolutionEnabled: evolution.enabled,
           }),
           buildTelegramControlKeyboard(),
@@ -2817,8 +2850,13 @@ export class TelegramAgentBridge {
       if (data === 'runtime:consciousness') {
         await this.handleBgCommand(
           chatId,
-          this.config.ouroboros.consciousnessEnabled ? 'stop' : 'start',
+          getAgentGatewayRuntime()?.consciousness ? 'stop' : 'start',
         )
+        return
+      }
+
+      if (data === 'runtime:wake') {
+        await this.handleBgCommand(chatId, 'now')
         return
       }
 
@@ -4068,6 +4106,7 @@ export function buildTelegramRuntimeKeyboard(
       { text: 'Evolve now', callback_data: 'runtime:evolve' },
       { text: 'Architecture review', callback_data: 'runtime:review' },
     ],
+    [{ text: 'Wake consciousness now', callback_data: 'runtime:wake' }],
     [
       { text: 'Restart', callback_data: 'runtime:restart' },
       { text: 'Stop runtime', callback_data: 'runtime:panic' },

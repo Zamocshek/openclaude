@@ -54,6 +54,7 @@
     "release:hindsight:test": "node scripts/release/hindsight-control.mjs test",
     "test:hindsight:mcp": "node scripts/release/test-hindsight-mcp-bridge.cjs",
     "test:research:mcp": "node scripts/release/test-research-mcp.cjs",
+    "check:base:mcp": "node scripts/release/check-base-mcp.cjs",
     "test": "bun test",
     "test:coverage": "bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage --max-concurrency=1 && bun run scripts/render-coverage-heatmap.ts",
     "test:coverage:ui": "bun run scripts/render-coverage-heatmap.ts",

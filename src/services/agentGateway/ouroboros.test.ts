@@ -16,6 +16,7 @@ describe('agent gateway Ouroboros config', () => {
         wakeupMaxSeconds: 10,
         maxRounds: 0,
         budgetFraction: 2,
+        evolutionIntervalSeconds: 1,
         infiniteTasksEnabled: true,
       },
     })
@@ -27,6 +28,7 @@ describe('agent gateway Ouroboros config', () => {
     expect(config.ouroboros.wakeupMaxSeconds).toBe(60)
     expect(config.ouroboros.maxRounds).toBe(1)
     expect(config.ouroboros.budgetFraction).toBe(1)
+    expect(config.ouroboros.evolutionIntervalSeconds).toBe(300)
     expect(isAgentGatewayEnabled(config)).toBe(true)
   })
 
@@ -68,6 +70,7 @@ describe('agent gateway Ouroboros config', () => {
         OPENCLAUDE_OUROBOROS_WAKEUP_MAX_SECONDS: '90',
         OPENCLAUDE_OUROBOROS_MAX_ROUNDS: '4',
         OPENCLAUDE_OUROBOROS_BUDGET_FRACTION: '0.25',
+        OPENCLAUDE_EVOLUTION_INTERVAL_SECONDS: '3600',
       },
     )
 
@@ -103,6 +106,7 @@ describe('agent gateway Ouroboros config', () => {
     expect(config.ouroboros.wakeupMaxSeconds).toBe(90)
     expect(config.ouroboros.maxRounds).toBe(4)
     expect(config.ouroboros.budgetFraction).toBe(0.25)
+    expect(config.ouroboros.evolutionIntervalSeconds).toBe(3600)
   })
 })
 

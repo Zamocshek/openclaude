@@ -102,6 +102,7 @@ const DEFAULT_CONFIG = {
     wakeupMaxSeconds: 7200,
     maxRounds: 3,
     budgetFraction: 0.1,
+    evolutionIntervalSeconds: 21600,
     infiniteTasksEnabled: false,
   },
   openWebUI: {
@@ -509,6 +510,7 @@ function normalizeState(input) {
   state.ouroboros.wakeupMaxSeconds = Math.max(60, Number(state.ouroboros.wakeupMaxSeconds || 7200))
   state.ouroboros.maxRounds = Math.max(1, Number(state.ouroboros.maxRounds || 3))
   state.ouroboros.budgetFraction = clamp(Number(state.ouroboros.budgetFraction ?? 0.1), 0, 1)
+  state.ouroboros.evolutionIntervalSeconds = Math.max(300, Number(state.ouroboros.evolutionIntervalSeconds || 21600))
   state.openWebUI.host = String(state.openWebUI.host || 'localhost').trim()
   state.openWebUI.port = toPort(state.openWebUI.port, 8080)
   state.openWebUI.pythonCommand = String(state.openWebUI.pythonCommand || DEFAULT_CONFIG.openWebUI.pythonCommand).trim()
@@ -584,6 +586,7 @@ function toEnvUpdates(state) {
     OPENCLAUDE_OUROBOROS_WAKEUP_MAX_SECONDS: String(state.ouroboros.wakeupMaxSeconds),
     OPENCLAUDE_OUROBOROS_MAX_ROUNDS: String(state.ouroboros.maxRounds),
     OPENCLAUDE_OUROBOROS_BUDGET_FRACTION: String(state.ouroboros.budgetFraction),
+    OPENCLAUDE_EVOLUTION_INTERVAL_SECONDS: String(state.ouroboros.evolutionIntervalSeconds),
     OPENCLAUDE_OPEN_WEBUI_HOST: state.openWebUI.host,
     OPENCLAUDE_OPEN_WEBUI_PORT: String(state.openWebUI.port),
     OPENCLAUDE_OPEN_WEBUI_PYTHON: state.openWebUI.pythonCommand,
@@ -2207,12 +2210,13 @@ function html() {
       <div class="grid">
         <label class="check"><input id="cronEnabled" type="checkbox"> Cron scheduler enabled</label>
         <label>Cron tick seconds<input id="cronTick" type="number"></label>
-        <label class="check"><input id="ouroEnabled" type="checkbox"> Evolution enabled</label>
+        <label class="check"><input id="ouroEnabled" type="checkbox"> Ouroboros runtime enabled</label>
         <label class="check"><input id="consciousnessEnabled" type="checkbox"> Background consciousness</label>
         <label class="check"><input id="infiniteTasksEnabled" type="checkbox"> Infinite tasks</label>
         <label>Wakeup min seconds<input id="wakeupMin" type="number"></label>
         <label>Wakeup max seconds<input id="wakeupMax" type="number"></label>
         <label>Max rounds<input id="maxRounds" type="number"></label>
+        <label>Evolution interval seconds<input id="evolutionInterval" type="number" min="300"></label>
         <label>Budget fraction<input id="budgetFraction" type="number" min="0" max="1" step="0.01"></label>
       </div>
     </section>
@@ -2405,7 +2409,7 @@ function html() {
   <script>
     let state = null;
     const $ = id => document.getElementById(id);
-    const ids = ['language','provider','providerBaseUrl','providerModel','providerApiKey','apiEnabled','apiHost','apiPort','apiModel','apiKey','apiCors','autoAccept','runnerMaxTurns','runnerTimeoutMs','disableTools','availableTools','disallowedTools','cronEnabled','cronTick','ouroEnabled','consciousnessEnabled','infiniteTasksEnabled','wakeupMin','wakeupMax','maxRounds','budgetFraction','telegramEnabled','botToken','homeChatId','allowedUserIds','allowedChatIds','mirrorApi','downloadFiles','transcribeAudio','maxDownloadBytes','maxUploadBytes','transcriptionProvider','transcriptionOpenAIModel','webuiHost','webuiPort','pythonCommand','webuiDataDir','openragEnabled','openragUrl','openragApiKey','openragUseAgentProvider','openragRepoDir','openragWorkspaceDir','openragFrontendPort','openragLangflowPort','openragDoclingPort','openragOpenSearchPassword','openragLangflowUser','openragLangflowPassword','openragLlmProvider','openragLlmModel','openragEmbeddingProvider','openragEmbeddingModel','openragOllamaEndpoint','openragMcpEnabled','openragMcpCommand','openragMcpArgs','openragMcpTimeout','camofoxEnabled','camofoxMcpEnabled','camofoxUrl','camofoxPort','camofoxAccessKey','camofoxApiKey','camofoxUserId','camofoxSessionKey','camofoxMcpTimeout','hindsightEnabled','hindsightMcpEnabled','hindsightUrl','hindsightBankId','hindsightApiKey','hindsightApiPort','hindsightUiPort','hindsightMcpTimeout','hindsightUseAgentProvider','hindsightLlmProvider','hindsightLlmModel','hindsightLlmBaseUrl','hindsightLlmApiKey','dockerProject','dockerApiPort','dockerWebuiPort','dockerUseMainProvider','dockerProvider','dockerProviderBaseUrl','dockerProviderModel','dockerProviderApiKey','dockerTelegramEnabled','dockerTelegramUseMain','dockerBotToken','dockerHomeChatId','dockerAllowedUserIds','dockerAllowedChatIds'];
+    const ids = ['language','provider','providerBaseUrl','providerModel','providerApiKey','apiEnabled','apiHost','apiPort','apiModel','apiKey','apiCors','autoAccept','runnerMaxTurns','runnerTimeoutMs','disableTools','availableTools','disallowedTools','cronEnabled','cronTick','ouroEnabled','consciousnessEnabled','infiniteTasksEnabled','wakeupMin','wakeupMax','maxRounds','evolutionInterval','budgetFraction','telegramEnabled','botToken','homeChatId','allowedUserIds','allowedChatIds','mirrorApi','downloadFiles','transcribeAudio','maxDownloadBytes','maxUploadBytes','transcriptionProvider','transcriptionOpenAIModel','webuiHost','webuiPort','pythonCommand','webuiDataDir','openragEnabled','openragUrl','openragApiKey','openragUseAgentProvider','openragRepoDir','openragWorkspaceDir','openragFrontendPort','openragLangflowPort','openragDoclingPort','openragOpenSearchPassword','openragLangflowUser','openragLangflowPassword','openragLlmProvider','openragLlmModel','openragEmbeddingProvider','openragEmbeddingModel','openragOllamaEndpoint','openragMcpEnabled','openragMcpCommand','openragMcpArgs','openragMcpTimeout','camofoxEnabled','camofoxMcpEnabled','camofoxUrl','camofoxPort','camofoxAccessKey','camofoxApiKey','camofoxUserId','camofoxSessionKey','camofoxMcpTimeout','hindsightEnabled','hindsightMcpEnabled','hindsightUrl','hindsightBankId','hindsightApiKey','hindsightApiPort','hindsightUiPort','hindsightMcpTimeout','hindsightUseAgentProvider','hindsightLlmProvider','hindsightLlmModel','hindsightLlmBaseUrl','hindsightLlmApiKey','dockerProject','dockerApiPort','dockerWebuiPort','dockerUseMainProvider','dockerProvider','dockerProviderBaseUrl','dockerProviderModel','dockerProviderApiKey','dockerTelegramEnabled','dockerTelegramUseMain','dockerBotToken','dockerHomeChatId','dockerAllowedUserIds','dockerAllowedChatIds'];
 
     function log(message) {
       const text = typeof message === 'string' ? message : JSON.stringify(message, null, 2);
@@ -2450,6 +2454,7 @@ function html() {
       $('wakeupMin').value = state.ouroboros.wakeupMinSeconds;
       $('wakeupMax').value = state.ouroboros.wakeupMaxSeconds;
       $('maxRounds').value = state.ouroboros.maxRounds;
+      $('evolutionInterval').value = state.ouroboros.evolutionIntervalSeconds ?? 21600;
       $('budgetFraction').value = state.ouroboros.budgetFraction ?? 0.1;
       $('telegramEnabled').checked = !!state.telegram.enabled;
       $('botToken').value = state.telegram.botToken || '';
@@ -2534,7 +2539,7 @@ function html() {
         api: { enabled: $('apiEnabled').checked, host: $('apiHost').value, port: Number($('apiPort').value), apiKey: $('apiKey').value, modelName: $('apiModel').value, corsOrigins: $('apiCors').value },
         cron: { enabled: $('cronEnabled').checked, tickIntervalSeconds: Number($('cronTick').value) },
         telegram: { enabled: $('telegramEnabled').checked, botToken: $('botToken').value, homeChatId: $('homeChatId').value, allowedUserIds: $('allowedUserIds').value, allowedChatIds: $('allowedChatIds').value, mirrorAgentApiResponses: $('mirrorApi').checked, downloadFiles: $('downloadFiles').checked, maxDownloadBytes: Number($('maxDownloadBytes').value), maxUploadBytes: Number($('maxUploadBytes').value), transcribeAudio: $('transcribeAudio').checked, transcriptionProvider: $('transcriptionProvider').value, transcriptionOpenAIModel: $('transcriptionOpenAIModel').value, transcriptionWhisperModel: state?.telegram?.transcriptionWhisperModel || 'base', replyWithTranscript: true },
-        ouroboros: { enabled: $('ouroEnabled').checked, consciousnessEnabled: $('consciousnessEnabled').checked, infiniteTasksEnabled: $('infiniteTasksEnabled').checked, wakeupMinSeconds: Number($('wakeupMin').value), wakeupMaxSeconds: Number($('wakeupMax').value), maxRounds: Number($('maxRounds').value), budgetFraction: Number($('budgetFraction').value) },
+        ouroboros: { enabled: $('ouroEnabled').checked, consciousnessEnabled: $('consciousnessEnabled').checked, infiniteTasksEnabled: $('infiniteTasksEnabled').checked, wakeupMinSeconds: Number($('wakeupMin').value), wakeupMaxSeconds: Number($('wakeupMax').value), maxRounds: Number($('maxRounds').value), evolutionIntervalSeconds: Number($('evolutionInterval').value), budgetFraction: Number($('budgetFraction').value) },
         openWebUI: { host: $('webuiHost').value, port: Number($('webuiPort').value), pythonCommand: $('pythonCommand').value, dataDir: $('webuiDataDir').value },
         openRAG: { enabled: $('openragEnabled').checked, url: $('openragUrl').value, apiKey: $('openragApiKey').value, useAgentProvider: $('openragUseAgentProvider').checked, repoDir: $('openragRepoDir').value, workspaceDir: $('openragWorkspaceDir').value, frontendPort: Number($('openragFrontendPort').value), langflowPort: Number($('openragLangflowPort').value), doclingPort: Number($('openragDoclingPort').value), openSearchPassword: $('openragOpenSearchPassword').value, langflowSuperuser: $('openragLangflowUser').value, langflowSuperuserPassword: $('openragLangflowPassword').value, llmProvider: $('openragLlmProvider').value, llmModel: $('openragLlmModel').value, embeddingProvider: $('openragEmbeddingProvider').value, embeddingModel: $('openragEmbeddingModel').value, ollamaEndpoint: $('openragOllamaEndpoint').value, mcpEnabled: $('openragMcpEnabled').checked, mcpCommand: $('openragMcpCommand').value, mcpArgs: $('openragMcpArgs').value, mcpTimeoutSeconds: Number($('openragMcpTimeout').value) },
         camofox: { enabled: $('camofoxEnabled').checked, mcpEnabled: $('camofoxMcpEnabled').checked, url: $('camofoxUrl').value, port: Number($('camofoxPort').value), accessKey: $('camofoxAccessKey').value, apiKey: $('camofoxApiKey').value, userId: $('camofoxUserId').value, sessionKey: $('camofoxSessionKey').value, mcpTimeoutSeconds: Number($('camofoxMcpTimeout').value) },

@@ -29,6 +29,7 @@ export type AgentRunResult = {
   exitCode: number
   timedOut: boolean
   durationMs?: number
+  costUsd?: number
   activity?: string[]
   failureKind?: AgentRunFailureKind
   diagnostic?: string
@@ -460,6 +461,7 @@ export function runOpenClaudeAgent(
     let streamLineBuffer = ''
     let streamResultText = ''
     let streamResultError = ''
+    let streamResultCostUsd: number | undefined
     let stderr = ''
     let timedOut = false
     let settled = false
@@ -506,6 +508,7 @@ export function runOpenClaudeAgent(
       if (result) {
         streamResultText = result.text
         streamResultError = result.error
+        streamResultCostUsd = result.costUsd
       }
     }
 
@@ -605,6 +608,9 @@ export function runOpenClaudeAgent(
         exitCode: normalizedExitCode,
         timedOut,
         durationMs,
+        ...(streamResultCostUsd === undefined
+          ? {}
+          : { costUsd: streamResultCostUsd }),
         activity: [...activity],
         ...(failure
           ? {
@@ -896,15 +902,20 @@ function truncateInline(value: string, maxLength: number): string {
   return `${normalized.slice(0, maxLength - 3)}...`
 }
 
-function extractStreamJsonResult(
+export function extractStreamJsonResult(
   message: Record<string, unknown>,
-): { text: string; error: string } | null {
+): { text: string; error: string; costUsd?: number } | null {
   if (message.type !== 'result') return null
+  const rawCost = Number(message.total_cost_usd ?? message.cost_usd)
+  const costUsd = Number.isFinite(rawCost) && rawCost >= 0
+    ? rawCost
+    : undefined
   if (message.subtype === 'success') {
     const text = typeof message.result === 'string' ? message.result : ''
     return {
       text,
       error: message.is_error ? text || 'Agent result was marked as an error.' : '',
+      ...(costUsd === undefined ? {} : { costUsd }),
     }
   }
 
@@ -914,6 +925,7 @@ function extractStreamJsonResult(
   return {
     text: '',
     error: errors || `Agent result error: ${String(message.subtype || 'unknown')}`,
+    ...(costUsd === undefined ? {} : { costUsd }),
   }
 }
 

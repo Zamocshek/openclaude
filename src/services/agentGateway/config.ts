@@ -47,6 +47,7 @@ export type AgentGatewayConfig = {
     wakeupMaxSeconds: number
     maxRounds: number
     budgetFraction: number
+    evolutionIntervalSeconds: number
     infiniteTasksEnabled: boolean
   }
   openWebUI: {
@@ -142,6 +143,7 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
       wakeupMaxSeconds: 7200,
       maxRounds: 3,
       budgetFraction: 0.1,
+      evolutionIntervalSeconds: 6 * 60 * 60,
       infiniteTasksEnabled: false,
     },
     openWebUI: {
@@ -311,6 +313,13 @@ export function normalizeAgentGatewayConfig(
         Number(ouroboros.budgetFraction ?? defaults.ouroboros.budgetFraction),
         0,
         1,
+      ),
+      evolutionIntervalSeconds: Math.max(
+        300,
+        Number(
+          ouroboros.evolutionIntervalSeconds ??
+            defaults.ouroboros.evolutionIntervalSeconds,
+        ),
       ),
       infiniteTasksEnabled: Boolean(ouroboros.infiniteTasksEnabled),
     },
@@ -515,6 +524,9 @@ export function applyAgentGatewayEnvOverrides(
       budgetFraction:
         env.OPENCLAUDE_OUROBOROS_BUDGET_FRACTION ??
         config.ouroboros.budgetFraction,
+      evolutionIntervalSeconds:
+        env.OPENCLAUDE_EVOLUTION_INTERVAL_SECONDS ??
+        config.ouroboros.evolutionIntervalSeconds,
       infiniteTasksEnabled:
         infiniteEnabled ?? config.ouroboros.infiniteTasksEnabled,
     },

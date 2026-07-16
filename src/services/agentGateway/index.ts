@@ -112,6 +112,7 @@ export async function startAgentGatewayFromConfig(): Promise<AgentGatewayRuntime
       wakeupMax: config.ouroboros.wakeupMaxSeconds,
       maxRounds: config.ouroboros.maxRounds,
       budgetFraction: config.ouroboros.budgetFraction,
+      evolutionIntervalSeconds: config.ouroboros.evolutionIntervalSeconds,
       onProactiveMessage: async text => {
         const target = config.telegram.homeChatId
         if (target && nextRuntime.telegram) {

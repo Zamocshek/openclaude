@@ -94,9 +94,9 @@ Telegram:
 - `/schedule every 1h | prompt`, `/cron [list|reload|chatid|path|examples]`,
   `/jobs`, `/runjob <id>`, `/pausejob <id>`, `/resumejob <id>`,
   `/deletejob <id>` - manage scheduled agent jobs
-- `/restart`, `/panic`, `/bg [start|stop]`,
-  `/consciousness [start|stop]`, `/evolution [on|off]`,
-  `/evolve [now|stop|status]`, `/review`, `/infinite <goal>` - control the
+- `/restart`, `/panic`, `/bg [start|stop|now|status]`,
+  `/consciousness [start|stop|now|status]`, `/evolution [on|off|status]`,
+  `/evolve [on|off|now|status]`, `/review`, `/infinite <goal>` - control the
   long-running gateway/Ouroboros loops
 - `/identity`, `/scratchpad`, `/bible`, `/architecture`, `/git`,
   `/git status`, `/git log`, `/git diff [path]`, `/git commit <msg>`,
@@ -104,6 +104,15 @@ Telegram:
 
 The bridge also registers the same base commands with Telegram's command menu
 through `setMyCommands` at startup.
+
+Background consciousness persists its enabled state in both `.env` and the
+gateway config. `start` restarts the gateway and schedules an immediate wakeup;
+`now` requests another wakeup without restarting. A wakeup performs one short
+round by default and continues only when the model emits `[CONTINUE]`, bounded
+by `OPENCLAUDE_OUROBOROS_MAX_ROUNDS`. Enabling evolution schedules the first
+cycle on the next background wakeup and later cycles no more often than
+`OPENCLAUDE_EVOLUTION_INTERVAL_SECONDS` (default: six hours). `/evolve now` and
+`/review` are one-off runs and do not silently enable autonomous evolution.
 
 ### Release Scripts
 
@@ -275,6 +284,14 @@ Start or refresh the stack with:
 ```bash
 docker compose -f docker-compose.agent-gateway.yml up -d --build
 ```
+
+Production containers run a strict base-MCP preflight after CodeGraph indexing
+and before the gateway starts. It verifies the tracked `.mcp.json`, the pinned
+CodeGraph/SearXNG/Context7 packages, the CodeGraph database, and SearXNG health.
+Run the same local check with `bun run check:base:mcp`; use
+`OPENCLAUDE_MCP_PREFLIGHT_STRICT=0` only when intentionally accepting a degraded
+startup. The full protocol smoke test is `bun run test:research:mcp` and also
+checks CodeGraph plus the disconnected MCP Router fallback.
 
 For host-native MCP use, set `SEARXNG_URL=http://127.0.0.1:18088`. Docker uses
 the internal `http://searxng:8080` service address automatically. Keep SearXNG

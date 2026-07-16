@@ -35,7 +35,10 @@ COPY --from=build /app/bin/ bin/
 COPY --from=build /app/node_modules/ node_modules/
 COPY --from=build /app/package.json package.json
 COPY README.md ./
+COPY .mcp.json .mcp.json
 COPY scripts/docker-entrypoint.sh scripts/docker-entrypoint.sh
+COPY scripts/codegraph-mcp.cjs scripts/codegraph-mcp.cjs
+COPY scripts/mcp-router-launcher.cjs scripts/mcp-router-launcher.cjs
 COPY scripts/release/openrag-mcp-bridge.cjs scripts/release/openrag-mcp-bridge.cjs
 COPY scripts/release/camofox-mcp-bridge.cjs scripts/release/camofox-mcp-bridge.cjs
 COPY scripts/release/camofox-control.mjs scripts/release/camofox-control.mjs
@@ -62,6 +65,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 
 COPY --from=build /app/scripts/release/test-research-mcp.cjs scripts/release/test-research-mcp.cjs
+COPY scripts/release/check-base-mcp.cjs scripts/release/check-base-mcp.cjs
 
 RUN chmod +x scripts/docker-entrypoint.sh \
     && ln -sf /app/node_modules/@colbymchenry/codegraph/npm-shim.js /usr/local/bin/codegraph \

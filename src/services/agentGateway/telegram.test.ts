@@ -81,6 +81,9 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/panel - open the button control panel')
     expect(help).toContain('/mcp add <json> - import one or more mcpServers definitions')
     expect(help).toContain('/tools [on|off] - show, enable, or disable model tool calls')
+    expect(help).toContain('/bg [start|stop|now|status] - persist, wake, or inspect background consciousness')
+    expect(help).toContain('/consciousness [start|stop|now|status] - alias for /bg')
+    expect(help).toContain('/evolve [on|off|now|status] - control evolution or run one cycle immediately')
     expect(help).toContain('/dsflash - switch to DeepSeek V4 Flash')
     expect(help).toContain('/gemmacoder - switch to LM Studio Huihui Gemma Coder')
     expect(help).toContain('/context auto|1m|<tokens> - set manual context window or return to model auto mode')
@@ -170,6 +173,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(runtimeActions).toContain('runtime:tools')
     expect(runtimeActions).toContain('runtime:cron')
     expect(runtimeActions).toContain('runtime:evolution')
+    expect(runtimeActions).toContain('runtime:wake')
     expect(runtimeActions).toContain('runtime:restart')
   })
 

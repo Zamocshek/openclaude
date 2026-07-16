@@ -110,6 +110,31 @@ bootstrap_codegraph() {
 
 bootstrap_codegraph
 
+run_base_mcp_preflight() {
+  if ! is_truthy "${OPENCLAUDE_MCP_PREFLIGHT:-1}"; then
+    return
+  fi
+
+  project_root="${OPENCLAUDE_AGENT_RUNNER_CWD:-/workspace}"
+  preflight_script="$project_root/scripts/release/check-base-mcp.cjs"
+  if [ ! -f "$preflight_script" ]; then
+    preflight_script="/app/scripts/release/check-base-mcp.cjs"
+  fi
+
+  printf '[mcp] checking required base servers\n' >&2
+  if node "$preflight_script"; then
+    return
+  fi
+
+  if is_truthy "${OPENCLAUDE_MCP_PREFLIGHT_STRICT:-1}"; then
+    printf '[mcp] required base MCP preflight failed; refusing an unhealthy production start\n' >&2
+    exit 1
+  fi
+  printf '[mcp] base MCP preflight failed; continuing because strict mode is disabled\n' >&2
+}
+
+run_base_mcp_preflight
+
 latest_backup="$(ls -1t "$CONFIG_DIR"/backups/.claude.json.backup.* 2>/dev/null | head -n 1 || true)"
 if [ ! -f "$CONFIG_FILE" ]; then
   if [ -n "$latest_backup" ] && [ -f "$latest_backup" ]; then
