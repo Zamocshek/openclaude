@@ -54,14 +54,7 @@ import {
   removeManagedMcpServer,
   setManagedMcpServerEnabled,
 } from './mcpRegistry.js'
-import {
-  createManagedSkill,
-  deleteManagedSkill,
-  getSkillStoreItemDetails,
-  listSkillStore,
-  SkillStoreError,
-  type SkillStoreOptions,
-} from './skillStore.js'
+import type { SkillStoreOptions } from './skillStore.js'
 import {
   deleteStoredApiResponse,
   loadLatestConversationResponseId,
@@ -89,6 +82,10 @@ type QueuedApiAgentExecution<T> = {
   promise: Promise<T>
 }
 
+type SkillStoreErrorLike = Error & {
+  code?: string
+}
+
 class AgentApiHttpError extends Error {
   constructor(
     readonly statusCode: number,
@@ -102,6 +99,19 @@ class AgentApiHttpError extends Error {
 
 function isAgentApiHttpError(error: unknown): error is AgentApiHttpError {
   return error instanceof AgentApiHttpError
+}
+
+function shouldUseJsonKeepalive(
+  request: IncomingMessage,
+  body: Record<string, any>,
+): boolean {
+  const header = request.headers['x-hermes-keepalive-json']
+  const headerValue = Array.isArray(header) ? header[0] : header
+  if (typeof headerValue === 'string') {
+    const normalized = headerValue.trim().toLowerCase()
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  }
+  return body.hermes_keepalive === true || body.keepalive_json === true
 }
 
 type SseEvent = Record<string, unknown> | null
@@ -210,7 +220,28 @@ export class AgentApiServer {
     if (!this.server) return
     const server = this.server
     this.server = undefined
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    const closeableServer = server as Server & {
+      closeAllConnections?: () => void
+      closeIdleConnections?: () => void
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const finish = (error?: Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(forceCloseTimer)
+        if (error) reject(error)
+        else resolve()
+      }
+      const forceCloseTimer = setTimeout(() => {
+        closeableServer.closeAllConnections?.()
+        finish()
+      }, 2_000)
+      forceCloseTimer.unref?.()
+
+      server.close(error => finish(error || undefined))
+      closeableServer.closeIdleConnections?.()
+    })
   }
 
   get url(): string {
@@ -421,15 +452,19 @@ export class AgentApiServer {
     if (url.pathname === '/api/skills') {
       const projectRoot = this.config.runner.cwd || process.cwd()
       try {
+        const skillStore = await this.loadSkillStore()
         if (method === 'GET') {
           this.writeJson(response, 200, {
-            data: await listSkillStore(projectRoot, this.skillStoreOptions),
+            data: await skillStore.listSkillStore(
+              projectRoot,
+              this.skillStoreOptions,
+            ),
           })
           return
         }
         if (method === 'POST') {
           const body = await this.readJson(request)
-          const created = await createManagedSkill(
+          const created = await skillStore.createManagedSkill(
             projectRoot,
             body.skill ?? body,
             this.skillStoreOptions,
@@ -448,20 +483,24 @@ export class AgentApiServer {
       const selector = decodeURIComponent(skillMatch[1]!)
       const projectRoot = this.config.runner.cwd || process.cwd()
       try {
+        const skillStore = await this.loadSkillStore()
         if (method === 'GET') {
-          const skill = await getSkillStoreItemDetails(
+          const skill = await skillStore.getSkillStoreItemDetails(
             projectRoot,
             selector,
             this.skillStoreOptions,
           )
           if (!skill) {
-            throw new SkillStoreError('not_found', `Skill not found: ${selector}`)
+            throw new skillStore.SkillStoreError(
+              'not_found',
+              `Skill not found: ${selector}`,
+            )
           }
           this.writeJson(response, 200, { data: skill })
           return
         }
         if (method === 'DELETE') {
-          const skills = await deleteManagedSkill(
+          const skills = await skillStore.deleteManagedSkill(
             projectRoot,
             selector,
             this.skillStoreOptions,
@@ -597,6 +636,7 @@ export class AgentApiServer {
     const id = `chatcmpl-${randomUUID().replace(/-/g, '')}`
     const model = String(body.model || this.config.api.modelName)
     const contextModel = resolveApiContextModel(model, this.config)
+    const jsonKeepalive = shouldUseJsonKeepalive(request, body)
 
     if (body.stream) {
       await this.streamChatCompletion(response, id, model, {
@@ -663,6 +703,13 @@ export class AgentApiServer {
         return { result, responseText, history }
       },
     )
+    const responseHeaders = {
+      'X-Hermes-Session-Id': sessionId,
+      ...this.apiQueueHeaders(queued),
+    }
+    const keepaliveResponse = jsonKeepalive
+      ? this.startJsonKeepaliveResponse(response, responseHeaders)
+      : undefined
     const { result, responseText } = await queued.promise
     if (requestAbort.signal.aborted && response.destroyed) {
       requestAbort.complete()
@@ -670,38 +717,35 @@ export class AgentApiServer {
     }
     if (result.exitCode !== 0) {
       requestAbort.complete()
-      this.writeJson(
-        response,
-        500,
-        openAiError(formatAgentFailureForApi(result), 'server_error'),
-        this.apiQueueHeaders(queued),
-      )
+      const payload = openAiError(formatAgentFailureForApi(result), 'server_error')
+      if (keepaliveResponse) {
+        keepaliveResponse.end(payload)
+      } else {
+        this.writeJson(response, 500, payload, this.apiQueueHeaders(queued))
+      }
       return
     }
 
     requestAbort.complete()
-    this.writeJson(
-      response,
-      200,
-      {
-        id,
-        object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000),
-        model,
-        choices: [
-          {
-            index: 0,
-            message: { role: 'assistant', content: responseText },
-            finish_reason: 'stop',
-          },
-        ],
-        usage: emptyUsage(),
-      },
-      {
-        'X-Hermes-Session-Id': sessionId,
-        ...this.apiQueueHeaders(queued),
-      },
-    )
+    const payload = {
+      id,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: responseText },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: emptyUsage(),
+    }
+    if (keepaliveResponse) {
+      keepaliveResponse.end(payload)
+    } else {
+      this.writeJson(response, 200, payload, responseHeaders)
+    }
   }
 
   private async buildChatCompletionRun(input: {
@@ -1328,15 +1372,24 @@ export class AgentApiServer {
   }
 
   private writeSkillStoreError(response: ServerResponse, error: unknown): void {
-    if (!(error instanceof SkillStoreError)) {
+    if (!(error instanceof Error)) {
       this.writeJson(response, 500, openAiError(String(error), 'server_error'))
       return
     }
-    const statusCode = error.code === 'not_found'
+    const skillStoreError = error as SkillStoreErrorLike
+    if (
+      !['invalid', 'not_found', 'conflict', 'forbidden'].includes(
+        skillStoreError.code || '',
+      )
+    ) {
+      this.writeJson(response, 500, openAiError(error.message, 'server_error'))
+      return
+    }
+    const statusCode = skillStoreError.code === 'not_found'
       ? 404
-      : error.code === 'conflict'
+      : skillStoreError.code === 'conflict'
         ? 409
-        : error.code === 'forbidden'
+        : skillStoreError.code === 'forbidden'
           ? 403
           : 400
     this.writeJson(response, statusCode, openAiError(error.message))
@@ -1524,6 +1577,10 @@ export class AgentApiServer {
     await saveStoredApiResponse(responseId, payload)
   }
 
+  private async loadSkillStore(): Promise<typeof import('./skillStore.js')> {
+    return import('./skillStore.js')
+  }
+
   private forgetStoredResponse(responseId: string): void {
     this.responseStore.delete(responseId)
     const index = this.responseOrder.indexOf(responseId)
@@ -1677,6 +1734,41 @@ export class AgentApiServer {
       ...headers,
     })
     response.end(JSON.stringify(payload))
+  }
+
+  private startJsonKeepaliveResponse(
+    response: ServerResponse,
+    headers: Record<string, string> = {},
+  ): { end: (payload: unknown) => void } {
+    let ended = false
+    response.writeHead(200, {
+      ...this.corsHeaders(),
+      'Content-Type': 'application/json',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Hermes-Keepalive-Json': '1',
+      ...headers,
+    })
+    response.flushHeaders()
+
+    const writeHeartbeat = () => {
+      if (!ended && !response.destroyed) {
+        response.write('\n')
+      }
+    }
+    writeHeartbeat()
+    const timer = setInterval(writeHeartbeat, 15_000)
+    timer.unref?.()
+
+    return {
+      end: payload => {
+        if (ended) return
+        ended = true
+        clearInterval(timer)
+        if (!response.destroyed) {
+          response.end(`${JSON.stringify(payload)}\n`)
+        }
+      },
+    }
   }
 
   private corsHeaders(): Record<string, string> {

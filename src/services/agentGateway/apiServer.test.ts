@@ -174,6 +174,56 @@ describe('AgentApiServer', () => {
     )
   })
 
+  test('can keep long non-stream chat completions alive until the agent finishes', async () => {
+    const deferred = createDeferred<void>()
+    runOpenClaudeAgent.mockImplementation(async () => {
+      await deferred.promise
+      return successfulAgentResult('delayed response')
+    })
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const responsePromise = fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Hermes-Keepalive-Json': '1',
+      },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        hermes_keepalive: true,
+        messages: [{ role: 'user', content: 'slow task' }],
+      }),
+    })
+    const earlyResponse = await Promise.race([
+      responsePromise,
+      new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), 500)),
+    ])
+
+    expect(earlyResponse).not.toBe('timeout')
+    if (earlyResponse === 'timeout') return
+    expect(earlyResponse.status).toBe(200)
+    expect(earlyResponse.headers.get('x-hermes-keepalive-json')).toBe('1')
+
+    let bodyFinished = false
+    const bodyPromise = earlyResponse.text().then(text => {
+      bodyFinished = true
+      return text
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(bodyFinished).toBe(false)
+
+    deferred.resolve()
+    const raw = await bodyPromise
+    expect(raw.startsWith('\n')).toBe(true)
+    const body = JSON.parse(raw) as {
+      choices: Array<{ message: { content: string } }>
+    }
+    expect(body.choices[0]?.message.content).toBe('delayed response')
+  })
+
   test('returns a client error for malformed JSON bodies', async () => {
     const { AgentApiServer } = await import('./apiServer.js')
     server = new AgentApiServer({ config: testConfig() })

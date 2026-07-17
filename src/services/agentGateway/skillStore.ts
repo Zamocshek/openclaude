@@ -10,12 +10,6 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { join, resolve } from 'path'
-import { getBundledSkills } from '../../skills/bundledSkills.js'
-import { initBundledSkills } from '../../skills/bundled/index.js'
-import {
-  clearSkillCaches,
-  getSkillDirCommands,
-} from '../../skills/loadSkillsDir.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 const SKILL_IMPORT_MAX_CHARS = 72 * 1024
@@ -198,10 +192,26 @@ function normalizeDescription(value: string | undefined): string {
   return (value || 'No description provided.').replace(/\s+/gu, ' ').trim()
 }
 
-function ensureBundledSkillsForStore(): void {
-  if (bundledSkillInitializationAttempted) return
-  bundledSkillInitializationAttempted = true
-  if (getBundledSkills().length === 0) initBundledSkills()
+async function getBundledSkillsForStore() {
+  const bundledSkills = await import('../../skills/bundledSkills.js')
+  if (!bundledSkillInitializationAttempted) {
+    bundledSkillInitializationAttempted = true
+    if (bundledSkills.getBundledSkills().length === 0) {
+      const { initBundledSkills } = await import('../../skills/bundled/index.js')
+      initBundledSkills()
+    }
+  }
+  return bundledSkills.getBundledSkills()
+}
+
+async function getProjectSkillDirCommands(projectRoot: string) {
+  const { getSkillDirCommands } = await import('../../skills/loadSkillsDir.js')
+  return getSkillDirCommands(projectRoot)
+}
+
+async function clearLoadedSkillCaches(): Promise<void> {
+  const { clearSkillCaches } = await import('../../skills/loadSkillsDir.js')
+  clearSkillCaches()
 }
 
 function readStoreDescription(content: string): string {
@@ -252,14 +262,12 @@ export async function listSkillStore(
   projectRoot: string,
   options: SkillStoreOptions = {},
 ): Promise<SkillStoreItem[]> {
-  ensureBundledSkillsForStore()
-  const fileSkills = options.skillsRoot
+  const commands = options.skillsRoot
     ? []
-    : await getSkillDirCommands(resolve(projectRoot))
-  const commands = [
-    ...getBundledSkills(),
-    ...fileSkills,
-  ]
+    : [
+        ...await getBundledSkillsForStore(),
+        ...await getProjectSkillDirCommands(resolve(projectRoot)),
+      ]
   const byName = new Map<string, SkillStoreItem>()
 
   for (const command of commands) {
@@ -420,7 +428,7 @@ export async function createManagedSkill(
       throw error
     }
 
-    clearSkillCaches()
+    if (!options.skillsRoot) await clearLoadedSkillCaches()
     const created = await getSkillStoreItemDetails(
       projectRoot,
       input.name,
@@ -462,7 +470,7 @@ export async function deleteManagedSkill(
     }
 
     rmSync(item.skillRoot, { recursive: true })
-    clearSkillCaches()
+    if (!options.skillsRoot) await clearLoadedSkillCaches()
     return listSkillStore(projectRoot, options)
   })
 }
