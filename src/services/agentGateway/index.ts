@@ -78,6 +78,10 @@ export async function startAgentGatewayFromConfig(): Promise<AgentGatewayRuntime
   if (config.api.enabled) {
     nextRuntime.api = new AgentApiServer({
       config,
+      getRuntimeStatus: () => ({
+        telegram: nextRuntime.telegram?.getStatus(),
+        consciousness: nextRuntime.consciousness?.getStatus(),
+      }),
       onAgentResponse: async text => {
         if (
           config.telegram.enabled &&

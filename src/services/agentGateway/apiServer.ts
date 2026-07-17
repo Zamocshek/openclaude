@@ -72,6 +72,7 @@ import {
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
   onAgentResponse?: (text: string, source: 'api' | 'run') => void | Promise<void>
+  getRuntimeStatus?: () => Record<string, unknown>
   skillStoreRoot?: string
 }
 
@@ -150,6 +151,7 @@ type LineStreamStripper = {
 export class AgentApiServer {
   private readonly config: AgentGatewayConfig
   private readonly onAgentResponse?: AgentApiServerOptions['onAgentResponse']
+  private readonly getRuntimeStatus?: AgentApiServerOptions['getRuntimeStatus']
   private readonly skillStoreOptions: SkillStoreOptions
   private server: Server | undefined
   private readonly responseStore = new Map<string, Record<string, unknown>>()
@@ -167,6 +169,7 @@ export class AgentApiServer {
   constructor(options: AgentApiServerOptions) {
     this.config = options.config
     this.onAgentResponse = options.onAgentResponse
+    this.getRuntimeStatus = options.getRuntimeStatus
     this.skillStoreOptions = options.skillStoreRoot
       ? { skillsRoot: options.skillStoreRoot }
       : {}
@@ -246,12 +249,14 @@ export class AgentApiServer {
     }
 
     if (url.pathname === '/health' || url.pathname === '/v1/health') {
+      const runtime = this.getRuntimeStatus?.()
       this.writeJson(response, 200, {
         status: 'ok',
         platform: 'openclaude-agent',
         api: this.config.api.enabled,
         cron: this.config.cron.enabled,
         telegram: this.config.telegram.enabled,
+        ...(runtime ? { runtime } : {}),
       })
       return
     }

@@ -138,6 +138,22 @@ type ActiveTelegramTask = {
   progress?: TelegramTaskProgress
 }
 
+export type TelegramBridgeStatus = {
+  stopped: boolean
+  polling: boolean
+  pollStartedAt?: string
+  lastPollStartedAt?: string
+  lastPollOkAt?: string
+  lastUpdateAt?: string
+  lastPollErrorAt?: string
+  lastPollError?: string
+  consecutivePollErrors: number
+  offset: number
+  activeTasks: number
+  queuedChats: number
+  queuedTasks: number
+}
+
 export type TelegramResearchMode = 'bio' | 'social' | 'code'
 
 export type TelegramGetFileResult = {
@@ -466,6 +482,14 @@ export class TelegramAgentBridge {
   private readonly config: AgentGatewayConfig
   private stopped = false
   private offset = 0
+  private pollLoopRunning = false
+  private pollStartedAt: string | undefined
+  private lastPollStartedAt: string | undefined
+  private lastPollOkAt: string | undefined
+  private lastUpdateAt: string | undefined
+  private lastPollErrorAt: string | undefined
+  private lastPollError: string | undefined
+  private consecutivePollErrors = 0
   /** Active AbortControllers per chatId — for /stop */
   private activeTasks = new Map<string, ActiveTelegramTask>()
   /** FIFO agent task queue per chatId. Commands still run immediately. */
@@ -484,7 +508,32 @@ export class TelegramAgentBridge {
   start(): void {
     if (!this.config.telegram.enabled || !this.config.telegram.botToken) return
     void this.registerBotCommands()
-    void this.pollLoop()
+    void this.pollLoop().catch(error => {
+      this.pollLoopRunning = false
+      this.lastPollErrorAt = new Date().toISOString()
+      this.lastPollError = summarizeTelegramError(error)
+      void recordTelegramError('system', 'telegram-poll-fatal', error)
+    })
+  }
+
+  getStatus(): TelegramBridgeStatus {
+    const queuedTasks = [...this.queuedTaskCounts.values()]
+      .reduce((total, count) => total + count, 0)
+    return {
+      stopped: this.stopped,
+      polling: this.pollLoopRunning && !this.stopped,
+      pollStartedAt: this.pollStartedAt,
+      lastPollStartedAt: this.lastPollStartedAt,
+      lastPollOkAt: this.lastPollOkAt,
+      lastUpdateAt: this.lastUpdateAt,
+      lastPollErrorAt: this.lastPollErrorAt,
+      lastPollError: this.lastPollError,
+      consecutivePollErrors: this.consecutivePollErrors,
+      offset: this.offset,
+      activeTasks: this.activeTasks.size,
+      queuedChats: this.taskQueues.size,
+      queuedTasks,
+    }
   }
 
   private async registerBotCommands(): Promise<void> {
@@ -869,21 +918,37 @@ export class TelegramAgentBridge {
   }
 
   private async pollLoop(): Promise<void> {
-    while (!this.stopped) {
-      try {
-        const updates = await this.getUpdates()
-        for (const update of updates) {
-          this.offset = Math.max(this.offset, update.update_id + 1)
-          if (update.callback_query) {
-            await this.handleCallbackQuery(update.callback_query)
+    this.pollLoopRunning = true
+    this.pollStartedAt = new Date().toISOString()
+    try {
+      while (!this.stopped) {
+        try {
+          this.lastPollStartedAt = new Date().toISOString()
+          const updates = await this.getUpdates()
+          this.lastPollOkAt = new Date().toISOString()
+          this.consecutivePollErrors = 0
+          if (updates.length > 0) this.lastUpdateAt = this.lastPollOkAt
+          for (const update of updates) {
+            this.offset = Math.max(this.offset, update.update_id + 1)
+            if (update.callback_query) {
+              await this.handleCallbackQuery(update.callback_query)
+            }
+            if (update.message) {
+              this.handleMessageUpdateInBackground(update)
+            }
           }
-          if (update.message) {
-            this.handleMessageUpdateInBackground(update)
+        } catch (error) {
+          this.consecutivePollErrors++
+          this.lastPollErrorAt = new Date().toISOString()
+          this.lastPollError = summarizeTelegramError(error)
+          if (this.consecutivePollErrors === 1 || this.consecutivePollErrors % 12 === 0) {
+            await recordTelegramError('system', 'telegram-poll', error)
           }
+          await sleep(5_000)
         }
-      } catch {
-        await sleep(5_000)
       }
+    } finally {
+      this.pollLoopRunning = false
     }
   }
 
