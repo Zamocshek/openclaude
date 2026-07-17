@@ -167,7 +167,7 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
     },
     runner: {
       maxTurns: 120,
-      timeoutMs: 60 * 60 * 1000,
+      timeoutMs: 30 * 60 * 1000,
       permissionMode: 'default',
       disableTools: false,
       availableTools: [],

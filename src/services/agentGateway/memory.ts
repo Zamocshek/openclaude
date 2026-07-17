@@ -10,8 +10,10 @@
  */
 
 import { randomUUID } from 'crypto'
-import { mkdir, readFile, writeFile, stat } from 'fs/promises'
+import { createReadStream } from 'fs'
+import { appendFile, mkdir, readFile, writeFile, stat } from 'fs/promises'
 import { join } from 'path'
+import { createInterface } from 'readline'
 import {
   getAgentGatewayProjectRoot,
   getAgentGatewayStateDir,
@@ -132,6 +134,10 @@ function scratchpadBlocksPath(): string {
   return join(memoryDir(), 'scratchpad_blocks.json')
 }
 
+function scratchpadArchivePath(): string {
+  return join(memoryDir(), 'scratchpad_archive.jsonl')
+}
+
 function scratchpadPath(): string {
   return join(memoryDir(), 'scratchpad.md')
 }
@@ -169,19 +175,19 @@ function patternsPath(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Scratchpad (append-block model with FIFO rotation)
+// Scratchpad (append-block model with durable archival)
 // ---------------------------------------------------------------------------
 
-const DEFAULT_SCRATCHPAD_MAX_BLOCKS = 200
+const DEFAULT_SCRATCHPAD_MAX_BLOCKS = UNLIMITED_LIMIT
 const DEFAULT_CURATED_MEMORY_LIMITS: Record<CuratedMemoryKind, number> = {
-  memory: 1_000_000,
-  user: 512_000,
+  memory: UNLIMITED_LIMIT,
+  user: UNLIMITED_LIMIT,
 }
-const DEFAULT_DIALOGUE_CONTEXT_BLOCKS = 50
-const DEFAULT_DIALOGUE_BLOCK_MAX_CHARS = 8_000
-const DEFAULT_BIBLE_CONTEXT_MAX_CHARS = 100_000
-const DEFAULT_ARCHITECTURE_CONTEXT_MAX_CHARS = 100_000
-const DEFAULT_REPO_GUIDE_CONTEXT_MAX_CHARS = 100_000
+const DEFAULT_DIALOGUE_CONTEXT_BLOCKS = UNLIMITED_LIMIT
+const DEFAULT_DIALOGUE_BLOCK_MAX_CHARS = UNLIMITED_LIMIT
+const DEFAULT_BIBLE_CONTEXT_MAX_CHARS = UNLIMITED_LIMIT
+const DEFAULT_ARCHITECTURE_CONTEXT_MAX_CHARS = UNLIMITED_LIMIT
+const DEFAULT_REPO_GUIDE_CONTEXT_MAX_CHARS = UNLIMITED_LIMIT
 const INVISIBLE_UNICODE_RE = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u
 const SECRET_LIKE_PATTERNS = [
   /\bsk-[A-Za-z0-9_-]{16,}\b/u,
@@ -767,14 +773,20 @@ export async function loadChatLogTranscript(options: {
   sessionId?: string
   conversation?: string
   limit?: number
+  maxChars?: number
   excludeMessageId?: number | string
 } = {}): Promise<Record<string, unknown>[]> {
-  const limit = Math.max(1, options.limit ?? 20)
+  const limit = Math.max(1, options.limit ?? Number.MAX_SAFE_INTEGER)
+  const maxChars = Math.max(1_000, options.maxChars ?? Number.MAX_SAFE_INTEGER)
+  const matches: Record<string, unknown>[] = []
+  let usedChars = 0
+  let input: ReturnType<typeof createReadStream> | undefined
+  let lines: ReturnType<typeof createInterface> | undefined
   try {
-    const raw = await readFile(chatLogPath(), 'utf8')
-    const lines = raw.split('\n').filter(line => line.trim())
-    const matches: Record<string, unknown>[] = []
-    for (const line of lines.reverse()) {
+    input = createReadStream(chatLogPath(), { encoding: 'utf8' })
+    lines = createInterface({ input, crlfDelay: Infinity })
+    for await (const line of lines) {
+      if (!line.trim()) continue
       let parsed: Record<string, unknown>
       try {
         parsed = JSON.parse(line)
@@ -783,12 +795,26 @@ export async function loadChatLogTranscript(options: {
       }
       if (!matchesChatLogFilter(parsed, options)) continue
       matches.push(parsed)
-      if (matches.length >= limit) break
+      usedChars += chatLogEntryContextCost(parsed)
+      while (matches.length > limit || usedChars > maxChars) {
+        const removed = matches.shift()
+        if (!removed) break
+        usedChars -= chatLogEntryContextCost(removed)
+      }
     }
-    return matches.reverse()
+    return matches
   } catch {
     return []
+  } finally {
+    lines?.close()
+    input?.destroy()
   }
+}
+
+function chatLogEntryContextCost(entry: Record<string, unknown>): number {
+  return String(entry.text ?? '').length
+    + String(entry.replyToText ?? '').length
+    + 256
 }
 
 function matchesChatLogFilter(
@@ -1372,12 +1398,27 @@ export async function loadScratchpadBlocks(): Promise<MemoryBlock[]> {
   }
 }
 
+export async function saveScratchpadBlocks(
+  blocks: MemoryBlock[],
+  options: { archiveBlocks?: MemoryBlock[]; reason?: string } = {},
+): Promise<void> {
+  await mkdir(memoryDir(), { recursive: true })
+  if (options.archiveBlocks?.length) {
+    const archivedAt = new Date().toISOString()
+    const reason = options.reason || 'compaction'
+    const lines = options.archiveBlocks
+      .map(block => JSON.stringify({ archivedAt, reason, ...block }))
+      .join('\n')
+    await appendFile(scratchpadArchivePath(), `${lines}\n`)
+  }
+  await writeFile(scratchpadBlocksPath(), JSON.stringify(blocks, null, 2))
+  await regenerateScratchpadMdFromBlocks(blocks)
+}
+
 export async function appendScratchpadBlock(
   content: string,
   source = 'consciousness',
 ): Promise<MemoryBlock> {
-  await mkdir(memoryDir(), { recursive: true })
-
   const blocks = await loadScratchpadBlocks()
   const newBlock: MemoryBlock = {
     ts: new Date().toISOString(),
@@ -1386,14 +1427,14 @@ export async function appendScratchpadBlock(
   }
   blocks.push(newBlock)
 
-  // FIFO rotation
   const maxBlocks = getScratchpadMaxBlocks()
-  if (blocks.length > maxBlocks) {
-    blocks.splice(0, blocks.length - maxBlocks)
-  }
-
-  await writeFile(scratchpadBlocksPath(), JSON.stringify(blocks, null, 2))
-  await regenerateScratchpadMd()
+  const archiveBlocks = blocks.length > maxBlocks
+    ? blocks.splice(0, blocks.length - maxBlocks)
+    : []
+  await saveScratchpadBlocks(blocks, {
+    archiveBlocks,
+    reason: 'configured-active-window',
+  })
   return newBlock
 }
 
@@ -1406,8 +1447,13 @@ export async function loadScratchpad(): Promise<string> {
 }
 
 export async function regenerateScratchpadMd(): Promise<void> {
+  await regenerateScratchpadMdFromBlocks(await loadScratchpadBlocks())
+}
+
+async function regenerateScratchpadMdFromBlocks(
+  blocks: MemoryBlock[],
+): Promise<void> {
   await mkdir(memoryDir(), { recursive: true })
-  const blocks = await loadScratchpadBlocks()
   if (blocks.length === 0) {
     await writeFile(scratchpadPath(), '# Scratchpad\n\n(empty)\n')
     return
@@ -1415,10 +1461,11 @@ export async function regenerateScratchpadMd(): Promise<void> {
 
   const n = blocks.length
   const maxBlocks = getScratchpadMaxBlocks()
-  const parts = [`## Scratchpad (working memory — ${n}/${maxBlocks} blocks)\n`]
+  const capacity = maxBlocks === UNLIMITED_LIMIT ? 'unlimited' : String(maxBlocks)
+  const parts = [`## Scratchpad (working memory - ${n}/${capacity} blocks)\n`]
   for (const block of [...blocks].reverse()) {
     const ts = block.ts.slice(0, 16)
-    parts.push(`### [${ts} — ${block.source}]\n${block.content}\n\n---\n`)
+    parts.push(`### [${ts} - ${block.source}]\n${block.content}\n\n---\n`)
   }
   await writeFile(scratchpadPath(), parts.join('\n'))
 }
@@ -1510,28 +1557,55 @@ export async function appendChatLog(entry: Record<string, unknown>): Promise<voi
 }
 
 export async function countChatLogLines(): Promise<number> {
+  let count = 0
+  let input: ReturnType<typeof createReadStream> | undefined
+  let lines: ReturnType<typeof createInterface> | undefined
   try {
-    const raw = await readFile(chatLogPath(), 'utf8')
-    return raw.split('\n').filter(line => line.trim()).length
+    input = createReadStream(chatLogPath(), { encoding: 'utf8' })
+    lines = createInterface({ input, crlfDelay: Infinity })
+    for await (const line of lines) {
+      if (line.trim()) count += 1
+    }
+    return count
   } catch {
     return 0
+  } finally {
+    lines?.close()
+    input?.destroy()
   }
 }
 
-export async function readChatLogFromOffset(offset: number, limit: number): Promise<Record<string, unknown>[]> {
+export async function readChatLogFromOffset(
+  offset: number,
+  limit: number,
+): Promise<Record<string, unknown>[]> {
+  const start = Math.max(0, Math.floor(offset))
+  const maxEntries = Math.max(0, Math.floor(limit))
+  if (maxEntries === 0) return []
+
+  const entries: Record<string, unknown>[] = []
+  let lineIndex = 0
+  let input: ReturnType<typeof createReadStream> | undefined
+  let lines: ReturnType<typeof createInterface> | undefined
   try {
-    const raw = await readFile(chatLogPath(), 'utf8')
-    const lines = raw.split('\n').filter(line => line.trim())
-    const slice = lines.slice(offset, offset + limit)
-    return slice.map(line => {
+    input = createReadStream(chatLogPath(), { encoding: 'utf8' })
+    lines = createInterface({ input, crlfDelay: Infinity })
+    for await (const line of lines) {
+      if (!line.trim()) continue
+      if (lineIndex++ < start) continue
       try {
-        return JSON.parse(line)
+        entries.push(JSON.parse(line))
       } catch {
-        return {}
+        entries.push({})
       }
-    })
+      if (entries.length >= maxEntries) break
+    }
+    return entries
   } catch {
     return []
+  } finally {
+    lines?.close()
+    input?.destroy()
   }
 }
 
@@ -1604,6 +1678,7 @@ export async function buildMemoryContextSection(options: {
   memoryEnabled?: boolean
   userProfileEnabled?: boolean
   writeApproval?: boolean
+  maxChars?: number
 } = {}): Promise<string> {
   const [
     curatedMemory,
@@ -1625,50 +1700,127 @@ export async function buildMemoryContextSection(options: {
     loadRepoGuide(),
   ])
 
-  const parts: string[] = []
+  const sections: Array<{
+    title: string
+    content: string
+    preserve: 'start' | 'end'
+  }> = []
 
+  if (identity) {
+    sections.push({ title: 'Identity', content: identity, preserve: 'start' })
+  }
   if (curatedMemory) {
-    parts.push('## Curated memory (Hermes-style MEMORY.md / USER.md)\n')
-    parts.push(curatedMemory)
+    sections.push({
+      title: 'Curated memory (Hermes-style MEMORY.md / USER.md)',
+      content: curatedMemory,
+      preserve: 'start',
+    })
   }
-
-  // Constitution (BIBLE.md) — always included, truncated if needed
-  if (bible) {
-    parts.push('## Constitution (BIBLE.md)\n')
-    parts.push(bible.slice(0, getBibleContextMaxChars()))
+  if (scratchpad) {
+    sections.push({
+      title: 'Scratchpad (working memory)',
+      content: scratchpad,
+      preserve: 'start',
+    })
   }
-
-  // Architecture — always included
-  if (architecture) {
-    parts.push('\n## Architecture (ARCHITECTURE.md)\n')
-    parts.push(architecture.slice(0, getArchitectureContextMaxChars()))
-  }
-
-  if (repoGuide) {
-    parts.push('\n## Repository Guide (REPO_GUIDE.md)\n')
-    parts.push(repoGuide.slice(0, getRepoGuideContextMaxChars()))
-  }
-
-  parts.push('\n## Scratchpad (working memory)\n')
-  parts.push(scratchpad)
-
-  parts.push('\n## Identity\n')
-  parts.push(identity)
-
   if (dialogueBlocks.length > 0) {
-    parts.push('\n## Recent dialogue memory\n')
     const recent = dialogueBlocks.slice(-getDialogueContextBlocks())
-    for (const block of recent) {
-      parts.push(`### ${block.range} (${block.type}, ${block.messageCount} msgs)\n`)
-      parts.push(block.content.slice(0, getDialogueBlockMaxChars()))
-      parts.push('\n---\n')
-    }
+    const content = recent.map(block => [
+      `### ${block.range} (${block.type}, ${block.messageCount} msgs)`,
+      block.content.slice(0, getDialogueBlockMaxChars()),
+    ].join('\n')).join('\n\n---\n\n')
+    sections.push({
+      title: 'Recent dialogue memory',
+      content,
+      preserve: 'end',
+    })
+  }
+  if (patterns) {
+    sections.push({
+      title: 'Pattern Register (recurring error classes)',
+      content: patterns,
+      preserve: 'start',
+    })
+  }
+  if (bible) {
+    sections.push({
+      title: 'Constitution (BIBLE.md)',
+      content: bible.slice(0, getBibleContextMaxChars()),
+      preserve: 'start',
+    })
+  }
+  if (architecture) {
+    sections.push({
+      title: 'Architecture (ARCHITECTURE.md)',
+      content: architecture.slice(0, getArchitectureContextMaxChars()),
+      preserve: 'start',
+    })
+  }
+  if (repoGuide) {
+    sections.push({
+      title: 'Repository Guide (REPO_GUIDE.md)',
+      content: repoGuide.slice(0, getRepoGuideContextMaxChars()),
+      preserve: 'start',
+    })
   }
 
-  parts.push('\n## Pattern Register (recurring error classes)\n')
-  parts.push(patterns)
+  return fitMemoryContextSections(
+    sections,
+    Math.max(1_000, options.maxChars ?? Number.MAX_SAFE_INTEGER),
+  )
+}
 
-  return parts.join('\n')
+function fitMemoryContextSections(
+  sections: Array<{
+    title: string
+    content: string
+    preserve: 'start' | 'end'
+  }>,
+  maxChars: number,
+): string {
+  const full = sections
+    .map(section => `## ${section.title}\n\n${section.content.trim()}`)
+    .join('\n\n')
+  if (full.length <= maxChars) return full
+
+  const notice = [
+    '## Active memory view',
+    '',
+    'This prompt view is compacted to the physical model window. Full durable memory remains in the gateway memory files and append-only chat/scratchpad archives.',
+    '',
+  ].join('\n')
+  let remaining = Math.max(0, maxChars - notice.length)
+  const selected: string[] = []
+
+  for (const section of sections) {
+    if (remaining <= 100) break
+    const header = `## ${section.title}\n\n`
+    const separator = selected.length > 0 ? 2 : 0
+    const available = remaining - header.length - separator
+    if (available <= 100) continue
+    const content = section.content.trim()
+    const fitted = content.length <= available
+      ? content
+      : truncateMemorySection(content, available, section.preserve)
+    const block = header + fitted
+    selected.push(block)
+    remaining -= block.length + separator
+  }
+
+  return (notice + selected.join('\n\n')).slice(0, maxChars)
+}
+
+function truncateMemorySection(
+  content: string,
+  maxChars: number,
+  preserve: 'start' | 'end',
+): string {
+  const marker = '\n[active view truncated; durable source retained]\n'
+  if (maxChars <= marker.length) return marker.slice(0, maxChars)
+  const available = maxChars - marker.length
+  return preserve === 'end'
+    ? marker + content.slice(-available)
+    : content.slice(0, available) + marker
 }
 
 // ---------------------------------------------------------------------------

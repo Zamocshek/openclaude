@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import type { AddressInfo } from 'net'
 import { randomUUID } from 'crypto'
+import { parseHumanLimit } from '../../utils/limitParsing.js'
 import type { AgentGatewayConfig } from './config.js'
 import {
   buildPromptFromChatMessages,
@@ -23,7 +24,7 @@ import {
   applyCuratedMemoryDirectives,
   applyOrStageCuratedMemoryAction,
   appendChatLog,
-  buildCuratedMemoryContextSection,
+  buildMemoryContextSection,
   buildCuratedMemorySystemInstructions,
   approvePendingCuratedMemoryAction,
   extractCuratedMemoryDirectives,
@@ -42,6 +43,7 @@ import {
 import {
   getConversationContextMaxChars,
   getConversationContextTurnLimit,
+  getMemoryContextMaxChars,
   trimConversationMessagesWithinCharBudget,
 } from './conversationContext.js'
 import {
@@ -60,6 +62,12 @@ import {
   SkillStoreError,
   type SkillStoreOptions,
 } from './skillStore.js'
+import {
+  deleteStoredApiResponse,
+  loadLatestConversationResponseId,
+  loadStoredApiResponse,
+  saveStoredApiResponse,
+} from './responseStore.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -149,8 +157,6 @@ export class AgentApiServer {
   private readonly conversationLatest = new Map<string, string>()
   private readonly chatSessions = new Map<string, ConversationMessage[]>()
   private readonly chatSessionOrder: string[] = []
-  private readonly memorySnapshots = new Map<string, string>()
-  private readonly memorySnapshotOrder: string[] = []
   private readonly runs = new Map<string, SseQueue>()
   private apiAgentQueueTail: Promise<unknown> = Promise.resolve()
   private apiAgentQueueActive: ApiAgentQueueItem | undefined
@@ -287,7 +293,7 @@ export class AgentApiServer {
 
     const responseMatch = apiPath.match(/^\/responses\/([^/]+)$/)
     if (responseMatch && method === 'GET') {
-      const stored = this.responseStore.get(responseMatch[1]!)
+      const stored = await this.getStoredResponse(responseMatch[1]!)
       if (!stored) {
         this.writeJson(response, 404, openAiError('Response not found'))
         return
@@ -296,12 +302,12 @@ export class AgentApiServer {
       return
     }
     if (responseMatch && method === 'DELETE') {
-      const deleted = this.responseStore.delete(responseMatch[1]!)
-      if (deleted) {
-        this.forgetStoredResponse(responseMatch[1]!)
-      }
+      const responseId = responseMatch[1]!
+      const deleted = await deleteStoredApiResponse(responseId)
+        || this.responseStore.delete(responseId)
+      if (deleted) this.forgetStoredResponse(responseId)
       this.writeJson(response, deleted ? 200 : 404, {
-        id: responseMatch[1],
+        id: responseId,
         object: 'response',
         deleted,
       })
@@ -693,12 +699,13 @@ export class AgentApiServer {
       ? this.chatSessions.get(input.sessionId)
       : undefined
     const history = sessionHistory || input.chatInput.history
+    const maxContextChars = getApiConversationMaxChars(input.contextModel)
     const conversationHistory = history.length > 0 || !input.requestedSessionId
       ? history
-      : await loadApiSessionTranscript(input.sessionId)
+      : await loadApiSessionTranscript(input.sessionId, maxContextChars)
     const promptHistory = trimConversationMessagesWithinCharBudget(
       conversationHistory,
-      getApiConversationMaxChars(input.contextModel),
+      maxContextChars,
     )
     const promptMessages = buildChatPromptMessages({
       systemMessages: input.chatInput.systemMessages,
@@ -708,7 +715,7 @@ export class AgentApiServer {
     const { prompt: baseRunnerPrompt } = buildPromptFromChatMessages(promptMessages)
     const runnerPrompt = await this.buildRunnerPromptWithMemory(
       baseRunnerPrompt,
-      `chat:${input.sessionId}`,
+      input.contextModel,
     )
     if (!runnerPrompt.trim()) {
       throw new AgentApiHttpError(400, 'No user message found')
@@ -895,9 +902,9 @@ export class AgentApiServer {
     const queued = this.enqueueAgentExecution(
       `responses:${conversation || 'default'}`,
       async () => {
-        const previousResponseId = this.resolvePreviousResponseId(body)
+        const previousResponseId = await this.resolvePreviousResponseId(body)
         const previous = previousResponseId
-          ? this.responseStore.get(previousResponseId)
+          ? await this.getStoredResponse(previousResponseId)
           : undefined
         if (previousResponseId && !previous) {
           throw new AgentApiHttpError(404, 'Previous response not found')
@@ -908,7 +915,10 @@ export class AgentApiServer {
           : previous
             ? normalizeConversationHistory(previous.conversation_history)
             : conversation
-              ? await loadApiConversationTranscript(conversation)
+              ? await loadApiConversationTranscript(
+                  conversation,
+                  getApiConversationMaxChars(contextModel),
+                )
               : []
         const promptHistory = trimConversationMessagesWithinCharBudget(
           previousHistory,
@@ -919,14 +929,9 @@ export class AgentApiServer {
           previousHistory: promptHistory,
           prompt,
         })
-        const memorySnapshotKey = conversation
-          ? `responses:${conversation}`
-          : typeof previous?.memory_snapshot_key === 'string'
-            ? previous.memory_snapshot_key
-            : `responses:${randomUUID()}`
         const runnerPrompt = await this.buildRunnerPromptWithMemory(
           baseRunnerPrompt,
-          memorySnapshotKey,
+          contextModel,
         )
         recordApiChatLog({
           direction: 'in',
@@ -974,7 +979,7 @@ export class AgentApiServer {
         }
 
         if (body.store !== false) {
-          this.storeResponse(responseId, {
+          await this.storeResponse(responseId, {
             response: data,
             conversation_history: [
               ...previousHistory,
@@ -984,7 +989,6 @@ export class AgentApiServer {
             instructions,
             previous_response_id: previousResponseId || undefined,
             conversation: conversation || undefined,
-            memory_snapshot_key: memorySnapshotKey,
           })
         }
 
@@ -1023,9 +1027,11 @@ export class AgentApiServer {
     const prompt = normalizeResponsesInput(input)
     const instructions =
       typeof body.instructions === 'string' ? body.instructions.trim() : ''
+    const model = String(body.model || this.config.api.modelName)
+    const contextModel = resolveApiContextModel(model, this.config)
     const runnerPrompt = await this.buildRunnerPromptWithMemory(
       instructions ? `${instructions}\n\n${prompt}` : prompt,
-      `run:${runId}`,
+      contextModel,
     )
     recordApiChatLog({
       direction: 'in',
@@ -1353,11 +1359,9 @@ export class AgentApiServer {
 
   private async buildRunnerPromptWithMemory(
     prompt: string,
-    snapshotKey?: string,
+    model?: string,
   ): Promise<string> {
-    const memory = snapshotKey
-      ? await this.getMemorySnapshot(snapshotKey)
-      : await this.loadMemoryContext()
+    const memory = await this.loadMemoryContext(model)
     const instructions = buildCuratedMemorySystemInstructions({
       memoryEnabled: this.config.memory.enabled,
       userProfileEnabled: this.config.memory.userProfileEnabled,
@@ -1376,26 +1380,12 @@ export class AgentApiServer {
     ].filter(part => part !== '').join('\n')
   }
 
-  private async getMemorySnapshot(snapshotKey: string): Promise<string> {
-    const existing = this.memorySnapshots.get(snapshotKey)
-    if (existing !== undefined) return existing
-
-    const memory = await this.loadMemoryContext()
-    this.memorySnapshots.set(snapshotKey, memory)
-    this.memorySnapshotOrder.push(snapshotKey)
-    while (this.memorySnapshotOrder.length > 100) {
-      const oldest = this.memorySnapshotOrder.shift()
-      if (!oldest) break
-      this.memorySnapshots.delete(oldest)
-    }
-    return memory
-  }
-
-  private async loadMemoryContext(): Promise<string> {
-    return buildCuratedMemoryContextSection({
+  private async loadMemoryContext(model?: string): Promise<string> {
+    return buildMemoryContextSection({
       memoryEnabled: this.config.memory.enabled,
       userProfileEnabled: this.config.memory.userProfileEnabled,
       writeApproval: this.config.memory.writeApproval,
+      maxChars: getMemoryContextMaxChars(model),
     }).catch(() => '')
   }
 
@@ -1439,42 +1429,65 @@ export class AgentApiServer {
       const oldest = this.chatSessionOrder.shift()
       if (!oldest) break
       this.chatSessions.delete(oldest)
-      this.memorySnapshots.delete(`chat:${oldest}`)
     }
   }
 
-  private resolvePreviousResponseId(body: Record<string, any>): string {
+  private async resolvePreviousResponseId(
+    body: Record<string, any>,
+  ): Promise<string> {
     const explicit =
       typeof body.previous_response_id === 'string'
         ? body.previous_response_id.trim()
         : ''
     if (explicit) return explicit
+
     const conversation =
       typeof body.conversation === 'string' ? body.conversation.trim() : ''
-    return conversation ? this.conversationLatest.get(conversation) || '' : ''
+    if (!conversation) return ''
+    return this.conversationLatest.get(conversation)
+      || await loadLatestConversationResponseId(conversation)
   }
 
-  private storeResponse(
+  private async getStoredResponse(
+    responseId: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    const cached = this.responseStore.get(responseId)
+    if (cached) return cached
+
+    const stored = await loadStoredApiResponse(responseId)
+    if (stored) this.cacheResponse(responseId, stored)
+    return stored
+  }
+
+  private cacheResponse(
     responseId: string,
     payload: Record<string, unknown>,
   ): void {
+    if (!this.responseStore.has(responseId)) {
+      this.responseOrder.push(responseId)
+    }
     this.responseStore.set(responseId, payload)
-    this.responseOrder.push(responseId)
 
     const conversation = String(payload.conversation || '').trim()
-    if (conversation) {
-      this.conversationLatest.set(conversation, responseId)
-    }
+    if (conversation) this.conversationLatest.set(conversation, responseId)
 
     while (this.responseOrder.length > 100) {
       const oldest = this.responseOrder.shift()
       if (!oldest) break
       this.responseStore.delete(oldest)
-      this.forgetStoredResponse(oldest)
     }
   }
 
+  private async storeResponse(
+    responseId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    this.cacheResponse(responseId, payload)
+    await saveStoredApiResponse(responseId, payload)
+  }
+
   private forgetStoredResponse(responseId: string): void {
+    this.responseStore.delete(responseId)
     const index = this.responseOrder.indexOf(responseId)
     if (index !== -1) this.responseOrder.splice(index, 1)
     for (const [conversation, latestId] of this.conversationLatest) {
@@ -1568,11 +1581,12 @@ export class AgentApiServer {
 
   private async readJson(request: IncomingMessage): Promise<Record<string, any>> {
     const chunks: Buffer[] = []
+    const maxBodyBytes = getApiRequestBodyMaxBytes()
     let total = 0
     for await (const chunk of request) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
       total += buffer.length
-      if (total > 1_000_000) {
+      if (total > maxBodyBytes) {
         throw new AgentApiHttpError(413, 'Request body too large')
       }
       chunks.push(buffer)
@@ -1812,20 +1826,24 @@ function firstStringValue(
 
 async function loadApiSessionTranscript(
   sessionId: string,
+  maxChars: number,
 ): Promise<ConversationMessage[]> {
   const entries = await loadChatLogTranscript({
     sessionId,
     limit: getApiConversationTurnLimit(),
+    maxChars,
   })
   return chatLogEntriesToConversationMessages(entries)
 }
 
 async function loadApiConversationTranscript(
   conversation: string,
+  maxChars: number,
 ): Promise<ConversationMessage[]> {
   const entries = await loadChatLogTranscript({
     conversation,
     limit: getApiConversationTurnLimit(),
+    maxChars,
   })
   return chatLogEntriesToConversationMessages(entries)
 }
@@ -1844,6 +1862,13 @@ function chatLogEntriesToConversationMessages(
       }
     })
     .filter((message): message is ConversationMessage => Boolean(message))
+}
+
+function getApiRequestBodyMaxBytes(): number {
+  return parseHumanLimit(process.env.OPENCLAUDE_API_MAX_BODY_BYTES, {
+    unlimitedValue: Number.MAX_SAFE_INTEGER,
+    zeroValue: Number.MAX_SAFE_INTEGER,
+  }) ?? 256 * 1024 * 1024
 }
 
 function getApiConversationTurnLimit(): number {

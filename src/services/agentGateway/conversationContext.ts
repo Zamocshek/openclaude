@@ -1,10 +1,55 @@
 import { parseHumanLimit } from '../../utils/limitParsing.js'
+import {
+  getOpenAIContextWindow,
+  getOpenAIMaxOutputTokens,
+} from '../../utils/model/openaiContextWindows.js'
 
 const UNLIMITED_SAFE_LIMIT = Number.MAX_SAFE_INTEGER
+const DEFAULT_MODEL_CONTEXT_TOKENS = 128_000
+const DEFAULT_MODEL_OUTPUT_TOKENS = 8_192
+const CHARS_PER_TOKEN = 3
 
 export type TextConversationMessage = {
   role: string
   content: string
+}
+
+export type ConversationContextBudgets = {
+  contextTokens: number
+  outputReserveTokens: number
+  conversationChars: number
+  memoryChars: number
+}
+
+export function getConversationContextBudgets(
+  model?: string,
+): ConversationContextBudgets | undefined {
+  const normalizedModel = model?.trim()
+  if (!normalizedModel) return undefined
+
+  const contextTokens =
+    getOpenAIContextWindow(normalizedModel) ?? DEFAULT_MODEL_CONTEXT_TOKENS
+  const knownOutput = getOpenAIMaxOutputTokens(normalizedModel)
+    ?? DEFAULT_MODEL_OUTPUT_TOKENS
+  const outputReserveTokens = Math.min(
+    knownOutput,
+    Math.max(1_024, Math.floor(contextTokens / 2)),
+  )
+  const usableInputTokens = Math.max(1_024, contextTokens - outputReserveTokens)
+  const usableChars = usableInputTokens * CHARS_PER_TOKEN
+
+  const allocation = contextTokens <= 16_384
+    ? { conversation: 0.30, memory: 0.12 }
+    : contextTokens <= 65_536
+      ? { conversation: 0.50, memory: 0.20 }
+      : { conversation: 0.60, memory: 0.25 }
+
+  return {
+    contextTokens,
+    outputReserveTokens,
+    conversationChars: Math.max(1_000, Math.floor(usableChars * allocation.conversation)),
+    memoryChars: Math.max(1_000, Math.floor(usableChars * allocation.memory)),
+  }
 }
 
 export function getConversationContextTurnLimit(
@@ -16,6 +61,7 @@ export function getConversationContextTurnLimit(
   for (const envName of envNames) {
     const parsed = parseHumanLimit(process.env[envName], {
       unlimitedValue: maxLimit,
+      zeroValue: maxLimit,
     })
     if (parsed !== undefined) return Math.min(Math.max(1, parsed), maxLimit)
   }
@@ -26,14 +72,28 @@ export function getConversationContextMaxChars(input: {
   model?: string
   envNames: string[]
 }): number {
+  let configuredLimit: number | undefined
   for (const envName of input.envNames) {
     const parsed = parseHumanLimit(process.env[envName], {
       unlimitedValue: UNLIMITED_SAFE_LIMIT,
+      zeroValue: UNLIMITED_SAFE_LIMIT,
     })
-    if (parsed !== undefined) return Math.max(1_000, parsed)
+    if (parsed !== undefined) {
+      configuredLimit = Math.max(1_000, parsed)
+      break
+    }
   }
 
-  return UNLIMITED_SAFE_LIMIT
+  const modelLimit = getConversationContextBudgets(input.model)?.conversationChars
+  if (configuredLimit !== undefined && modelLimit !== undefined) {
+    return Math.min(configuredLimit, modelLimit)
+  }
+  return configuredLimit ?? modelLimit ?? UNLIMITED_SAFE_LIMIT
+}
+
+export function getMemoryContextMaxChars(model?: string): number {
+  return getConversationContextBudgets(model)?.memoryChars
+    ?? UNLIMITED_SAFE_LIMIT
 }
 
 export function selectTextBlocksWithinCharBudget(
@@ -92,5 +152,6 @@ export function trimConversationMessagesWithinCharBudget<
 function truncateTextFromStart(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   if (maxChars <= 20) return text.slice(-maxChars)
-  return `[truncated]\n${text.slice(-(maxChars - 12))}`
+  return `[truncated]
+${text.slice(-(maxChars - 12))}`
 }

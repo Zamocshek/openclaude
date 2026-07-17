@@ -835,4 +835,69 @@ describe('AgentApiServer', () => {
       'Создал файл Одесса2.txt на рабочем столе.',
     )
   })
+  test('accepts OpenWebUI request bodies larger than the former 1MB cap', async () => {
+    runOpenClaudeAgent.mockImplementationOnce(async () =>
+      successfulAgentResult('large body accepted'),
+    )
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const response = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'x'.repeat(1_100_000) }],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(runOpenClaudeAgent.mock.calls.at(-1)?.[0]?.prompt.length)
+      .toBeGreaterThan(1_000_000)
+  })
+
+  test('restores previous_response_id chains after an API restart', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const first = await fetch(`${server.url}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: 'persist this response chain',
+        conversation: 'durable-response-chat',
+      }),
+    })
+    expect(first.status).toBe(200)
+    const firstBody = await first.json() as { id: string }
+
+    await server.stop()
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const restored = await fetch(
+      `${server.url}/v1/responses/${firstBody.id}`,
+    )
+    expect(restored.status).toBe(200)
+
+    const second = await fetch(`${server.url}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: 'continue after restart',
+        previous_response_id: firstBody.id,
+      }),
+    })
+    expect(second.status).toBe(200)
+    const secondBody = await second.json() as {
+      output: Array<{ content: Array<{ text: string }> }>
+    }
+    expect(secondBody.output[0]?.content[0]?.text)
+      .toContain('persist this response chain')
+    expect(secondBody.output[0]?.content[0]?.text)
+      .toContain('continue after restart')
+  })
+
 })

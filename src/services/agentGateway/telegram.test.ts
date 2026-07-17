@@ -647,6 +647,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     })).toBe(false)
     expect(shouldRetryTelegramAgentFailure({
       ...base,
+      failureKind: 'content_policy',
+    })).toBe(false)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
       failureKind: 'tool_error',
     })).toBe(true)
   })

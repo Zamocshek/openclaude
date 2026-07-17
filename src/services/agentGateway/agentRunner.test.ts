@@ -370,6 +370,21 @@ describe('agent gateway prompt builder', () => {
     expect(missingModel.kind).toBe('model_not_found')
   })
 
+  test('classifies provider content-policy blocks as non-tool provider state', () => {
+    const failure = classifyAgentRunFailure({
+      text: '',
+      stderr: 'API Error: 500 This content was flagged for possible cybersecurity risk.',
+      exitCode: 1,
+      timedOut: false,
+      activity: [
+        'api retry: attempt 10/10 status 500, server_error',
+      ],
+    })
+
+    expect(failure.kind).toBe('content_policy')
+    expect(failure.diagnostic).toContain('safety/content policy')
+  })
+
   test('classifies zero-exit failed tool completions as tool errors', () => {
     const failure = classifyAgentRunFailure({
       text: 'Не удалось создать файл: missing required parameter content.',
@@ -423,6 +438,8 @@ describe('agent gateway prompt builder', () => {
     expect(env.OPENCLAUDE_AGENT_GATEWAY_CHILD).toBe('1')
     expect(env.OPENCLAUDE_AGENT_API_ENABLED).toBe('1')
     expect(env.OPENAI_API_KEY).toBe('provider-key')
+    expect(env.CLAUDE_CODE_MAX_RETRIES).toBe('3')
+    expect(env.API_TIMEOUT_MS).toBe('60000')
     expect(env.OPENCLAUDE_AGENT_GATEWAY_SERVER).toBeUndefined()
   })
 

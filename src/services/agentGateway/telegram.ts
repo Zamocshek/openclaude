@@ -43,6 +43,7 @@ import {
 import {
   getConversationContextMaxChars,
   getConversationContextTurnLimit,
+  getMemoryContextMaxChars,
   selectTextBlocksWithinCharBudget,
 } from './conversationContext.js'
 import {
@@ -1348,6 +1349,7 @@ export class TelegramAgentBridge {
       text: effectiveText,
       attachments,
       config: this.config,
+      model: providerProfile.model,
       conversationTranscript,
       replyContext,
     })
@@ -1483,6 +1485,7 @@ export class TelegramAgentBridge {
         text: effectiveAgentText,
         attachments: [attachment],
         config: this.config,
+        model: providerProfile.model,
         conversationTranscript,
         replyContext,
       })
@@ -1891,16 +1894,19 @@ export class TelegramAgentBridge {
         return
       }
       const previous = await loadProviderProfile()
-      const profile = await hydrateShortcutProviderProfile(
+      const resolved = await resolveShortcutProviderProfile(
+        await hydrateShortcutProviderProfile(
         buildTelegramProviderProfileUpdate(previous, parsed),
+        ),
       )
-      await saveProviderProfile(profile)
+      await saveProviderProfile(resolved.profile)
       await this.sendMessage(
         chatId,
         [
           'Provider updated for next agent runs.',
           '',
-          formatProviderProfile(profile),
+          formatProviderProfile(resolved.profile),
+          ...(resolved.warning ? ['', resolved.warning] : []),
           '',
           'Use /restart if you need to restart the long-lived gateway runtime; normal child agent runs pick this up from .env.',
         ].join('\n'),
@@ -1948,25 +1954,28 @@ export class TelegramAgentBridge {
     shortcut: TelegramProviderShortcut,
   ): Promise<void> {
     const previous = await loadProviderProfile()
-    const profile = await hydrateShortcutProviderProfile(
+    const resolved = await resolveShortcutProviderProfile(
+      await hydrateShortcutProviderProfile(
       buildTelegramProviderProfileUpdate(previous, {
         provider: shortcut.provider,
         model: shortcut.model,
       }),
+      ),
     )
-    await saveProviderProfile(profile)
+    await saveProviderProfile(resolved.profile)
     await this.sendMessageWithKeyboard(
       chatId,
       [
         `Switched: ${shortcut.command}`,
         '',
-        formatProviderProfile(profile),
+        formatProviderProfile(resolved.profile),
+        ...(resolved.warning ? ['', resolved.warning] : []),
         '',
-        profile.provider === 'lmstudio-lan'
+        resolved.profile.provider === 'lmstudio-lan'
           ? 'LM Studio Gemma profiles run with model tools disabled because the current LM Studio templates reject OpenAI tool schemas.'
           : 'Model tools are enabled for this provider.',
       ].join('\n'),
-      buildTelegramActiveProfileKeyboard(profile),
+      buildTelegramActiveProfileKeyboard(resolved.profile),
     )
   }
 
@@ -3326,14 +3335,19 @@ export class TelegramAgentBridge {
         if (!isKnownTelegramProvider(provider)) return
         const previous = await loadProviderProfile()
         const defaultModel = defaultTelegramProviderModel(provider)
-        const profile = await hydrateShortcutProviderProfile(
+        const resolved = await resolveShortcutProviderProfile(
+          await hydrateShortcutProviderProfile(
           buildTelegramProviderProfileUpdate(previous, {
             provider,
             model: defaultModel,
           }),
+          ),
         )
-        await saveProviderProfile(profile)
-        const menu = await buildTelegramModelMenu(profile, 0)
+        await saveProviderProfile(resolved.profile)
+        const menu = await buildTelegramModelMenu(resolved.profile, 0)
+        if (resolved.warning) {
+          menu.text = `${menu.text}\n\n${resolved.warning}`
+        }
         await this.editCallbackMessage(query, menu.text, menu.keyboard)
         return
       }
@@ -3346,12 +3360,14 @@ export class TelegramAgentBridge {
         const current = await loadProviderProfile()
         const profile = current.provider === provider
           ? current
-          : await hydrateShortcutProviderProfile(
+          : (await resolveShortcutProviderProfile(
+              await hydrateShortcutProviderProfile(
               buildTelegramProviderProfileUpdate(current, {
                 provider,
                 model: defaultTelegramProviderModel(provider),
               }),
-            )
+              ),
+            )).profile
         if (profile !== current) await saveProviderProfile(profile)
         const menu = await buildTelegramModelMenu(profile, page)
         await this.editCallbackMessage(query, menu.text, menu.keyboard)
@@ -4006,7 +4022,9 @@ export function getTelegramAgentFailureKindLimit(
 }
 
 export function shouldRetryTelegramAgentFailure(result: AgentRunResult): boolean {
-  return result.failureKind !== 'auth' && result.failureKind !== 'model_not_found'
+  return result.failureKind !== 'auth'
+    && result.failureKind !== 'model_not_found'
+    && result.failureKind !== 'content_policy'
 }
 
 export function getAgentRecoveryFailureSignature(result: AgentRunResult): string {
@@ -4060,7 +4078,7 @@ function withNonRetryableFailureDiagnostic(
   return {
     ...result,
     diagnostic: [
-      `Recovery was not restarted for non-retryable failure class ${result.failureKind || 'unknown'}. Change the provider, model, or authentication state first.`,
+      `Recovery was not restarted for non-retryable failure class ${result.failureKind || 'unknown'}. Change the provider/model/auth state or narrow the request before retrying.`,
       result.diagnostic || '',
     ].filter(Boolean).join('\n\n'),
   }
@@ -5040,6 +5058,70 @@ async function hydrateShortcutProviderProfile(profile: AgentProviderProfile): Pr
   return apiKey ? { ...profile, apiKey } : profile
 }
 
+async function resolveShortcutProviderProfile(
+  profile: AgentProviderProfile,
+): Promise<{ profile: AgentProviderProfile; warning?: string }> {
+  if (!profile.model) return { profile }
+
+  let catalog: ProviderModelCatalog
+  try {
+    catalog = await loadProviderModelCatalog(profile)
+  } catch {
+    return { profile }
+  }
+
+  if (catalog.source !== 'live' || catalog.models.length === 0) {
+    return { profile }
+  }
+
+  const requestedBase = getModelBaseId(profile.model)
+  if (catalog.models.some(model => model.id === requestedBase)) {
+    return { profile }
+  }
+
+  const fallback = chooseLiveFallbackModel(profile.provider, requestedBase, catalog.models)
+  if (!fallback) return { profile }
+
+  const model = profile.provider === 'codex' && fallback.defaultReasoning
+    ? withModelReasoning(fallback.id, fallback.defaultReasoning)
+    : fallback.id
+  return {
+    profile: normalizeProviderProfile({ ...profile, model }),
+    warning: [
+      `Requested model "${requestedBase}" is not listed by the live ${profile.provider} endpoint.`,
+      `Using "${fallback.id}" instead to avoid a model_not_found task failure.`,
+    ].join('\n'),
+  }
+}
+
+function chooseLiveFallbackModel(
+  provider: string,
+  requestedBase: string,
+  models: ProviderModelOption[],
+): ProviderModelOption | undefined {
+  const requested = requestedBase.toLowerCase()
+  const normalizedModels = models.map(model => ({
+    model,
+    id: model.id.toLowerCase(),
+  }))
+
+  const preferredNeedles =
+    provider === 'deepseek' && requested.includes('pro')
+      ? ['pro', 'reasoner', 'chat']
+      : provider === 'deepseek' && requested.includes('flash')
+        ? ['flash', 'chat']
+        : requested.includes('coder')
+          ? ['coder', 'code']
+          : []
+
+  for (const needle of preferredNeedles) {
+    const match = normalizedModels.find(item => item.id.includes(needle))
+    if (match) return match.model
+  }
+
+  return models[0]
+}
+
 function providerSpecificApiKey(provider: string, env: Record<string, string | undefined>): string {
   if (provider === 'codex') {
     if (env.CODEX_AUTH_JSON_PATH || env.CODEX_HOME) return ''
@@ -5717,6 +5799,7 @@ export async function buildTelegramAgentPromptWithMemory(input: {
   text: string
   attachments: TelegramAttachment[]
   config?: AgentGatewayConfig
+  model?: string
   conversationTranscript?: string
   replyContext?: TelegramReplyContext
 }): Promise<string> {
@@ -5728,7 +5811,10 @@ export async function buildTelegramAgentPromptWithMemory(input: {
       }
     : undefined
   const [memoryContext, reflectionContext, cronContext] = await Promise.all([
-    buildMemoryContextSection(memoryOptions).catch(() => ''),
+    buildMemoryContextSection({
+      ...memoryOptions,
+      maxChars: getMemoryContextMaxChars(input.model),
+    }).catch(() => ''),
     buildReflectionContextSection().catch(() => ''),
     buildTelegramCronContext(input.chatId).catch(() => ''),
   ])
@@ -5790,14 +5876,14 @@ async function buildTelegramConversationTranscript(
   chatId: string,
   options: { excludeMessageId?: number | string; model?: string } = {},
 ): Promise<string> {
+  const maxChars = getTelegramConversationMaxChars(options.model)
   const entries = await loadChatLogTranscript({
     chatId,
     limit: getTelegramConversationTurnLimit(),
+    maxChars,
     excludeMessageId: options.excludeMessageId,
   })
-  return formatTelegramConversationTranscript(entries, {
-    maxChars: getTelegramConversationMaxChars(options.model),
-  })
+  return formatTelegramConversationTranscript(entries, { maxChars })
 }
 
 export function formatTelegramConversationTranscript(

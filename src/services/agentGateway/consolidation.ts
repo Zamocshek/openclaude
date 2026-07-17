@@ -8,8 +8,6 @@
  * - Extracts durable knowledge insights from working memory
  */
 
-import { readFile, writeFile, mkdir } from 'fs/promises'
-import { join } from 'path'
 import { getAgentGatewayStateDir } from './config.js'
 import type { AgentGatewayConfig } from './config.js'
 import {
@@ -21,7 +19,7 @@ import {
   countChatLogLines,
   appendDialogueBlock,
   loadScratchpadBlocks,
-  appendScratchpadBlock,
+  saveScratchpadBlocks,
   loadIdentity,
   loadPatterns,
   savePatterns,
@@ -37,6 +35,8 @@ const BLOCK_SIZE = 100               // Messages per consolidation block
 const MAX_SUMMARY_BLOCKS = 10        // Compress into era when exceeded
 const ERA_COMPRESS_COUNT = 4         // Oldest blocks to compress per era
 const SCRATCHPAD_CONSOLIDATION_THRESHOLD = 30000  // chars
+
+type ConsolidationAgentRunner = typeof runOpenClaudeAgent
 
 // ---------------------------------------------------------------------------
 // Dialogue Consolidation
@@ -55,32 +55,41 @@ export async function shouldConsolidateDialogue(): Promise<boolean> {
 
 export async function consolidateDialogue(
   config: AgentGatewayConfig,
+  options: { runAgent?: ConsolidationAgentRunner } = {},
 ): Promise<{ blocksCreated: number; usage?: Record<string, unknown> }> {
+  const runAgent = options.runAgent ?? runOpenClaudeAgent
   const meta = await loadDialogueMeta()
+  const total = await countChatLogLines()
   let lastOffset = meta.lastConsolidatedOffset || 0
+  if (lastOffset > total) lastOffset = 0
 
-  const allEntries = await readChatLogFromOffset(0, 10000)
-  if (lastOffset > allEntries.length) {
-    lastOffset = 0
-  }
+  const completeChunks = Math.floor((total - lastOffset) / BLOCK_SIZE)
+  if (completeChunks < 1) return { blocksCreated: 0 }
 
-  const newEntries = allEntries.slice(lastOffset)
-  if (newEntries.length < BLOCK_SIZE) {
-    return { blocksCreated: 0 }
-  }
-
-  const chunksToProcess = Math.floor(newEntries.length / BLOCK_SIZE)
   let blocksCreated = 0
+  let processedEntries = 0
   const identity = await loadIdentity()
 
-  for (let i = 0; i < chunksToProcess; i++) {
-    const chunk = newEntries.slice(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE)
+  for (let i = 0; i < completeChunks; i++) {
+    const chunk = await readChatLogFromOffset(
+      lastOffset + processedEntries,
+      BLOCK_SIZE,
+    )
+    if (chunk.length < BLOCK_SIZE) break
+
     const formatted = formatChatEntries(chunk)
     const firstTs = String(chunk[0]?.ts || '').slice(0, 16)
     const lastTs = String(chunk[chunk.length - 1]?.ts || '').slice(0, 16)
-
-    const summary = await createBlockSummary(formatted, firstTs, lastTs, identity, chunk.length, config)
-    if (!summary) continue
+    const summary = await createBlockSummary(
+      formatted,
+      firstTs,
+      lastTs,
+      identity,
+      chunk.length,
+      config,
+      runAgent,
+    )
+    if (!summary) break
 
     const range = firstTs.slice(0, 10) === lastTs.slice(0, 10)
       ? `${firstTs.slice(0, 10)} ${firstTs.slice(11, 16)} - ${lastTs.slice(11, 16)}`
@@ -93,23 +102,25 @@ export async function consolidateDialogue(
       messageCount: chunk.length,
       content: summary.trim(),
     })
-
-    blocksCreated++
+    blocksCreated += 1
+    processedEntries += chunk.length
   }
 
-  // Era compression if too many blocks
-  await compressDialogueEras(config)
-
-  // Update meta
-  await saveDialogueMeta({
-    lastConsolidatedOffset: lastOffset + blocksCreated * BLOCK_SIZE,
-    lastConsolidatedAt: new Date().toISOString(),
-  })
+  if (blocksCreated > 0) {
+    await compressDialogueEras(config, runAgent)
+    await saveDialogueMeta({
+      lastConsolidatedOffset: lastOffset + processedEntries,
+      lastConsolidatedAt: new Date().toISOString(),
+    })
+  }
 
   return { blocksCreated }
 }
 
-async function compressDialogueEras(config: AgentGatewayConfig): Promise<void> {
+async function compressDialogueEras(
+  config: AgentGatewayConfig,
+  runAgent: ConsolidationAgentRunner,
+): Promise<void> {
   const blocks = await loadDialogueBlocks()
   if (blocks.length <= MAX_SUMMARY_BLOCKS) return
 
@@ -118,7 +129,7 @@ async function compressDialogueEras(config: AgentGatewayConfig): Promise<void> {
   const remaining = blocks.slice(compressCount)
 
   const identity = await loadIdentity()
-  const eraSummary = await compressBlocksToEra(oldBlocks, identity, config)
+  const eraSummary = await compressBlocksToEra(oldBlocks, identity, config, runAgent)
   if (!eraSummary) return
 
   const eraBlock: DialogueBlock = {
@@ -145,7 +156,9 @@ export async function shouldConsolidateScratchpad(): Promise<boolean> {
 
 export async function consolidateScratchpad(
   config: AgentGatewayConfig,
+  options: { runAgent?: ConsolidationAgentRunner } = {},
 ): Promise<{ entriesExtracted: number }> {
+  const runAgent = options.runAgent ?? runOpenClaudeAgent
   const blocks = await loadScratchpadBlocks()
   if (blocks.length < 3) return { entriesExtracted: 0 }
 
@@ -157,11 +170,9 @@ export async function consolidateScratchpad(
   const compressCount = Math.max(2, Math.floor(blocks.length / 2))
   const oldBlocks = blocks.slice(0, compressCount)
   const recentBlocks = blocks.slice(compressCount)
-
   const oldContent = oldBlocks
-    .map(b => `[${b.ts.slice(0, 16)} — ${b.source}]\n${b.content}`)
+    .map(b => `[${b.ts.slice(0, 16)} - ${b.source}]\n${b.content}`)
     .join('\n\n---\n\n')
-
   const identity = await loadIdentity()
 
   const prompt = [
@@ -176,7 +187,7 @@ export async function consolidateScratchpad(
     '2. Compress the old blocks into a SINGLE shorter summary block. Keep active',
     '   tasks, unresolved questions, admin instructions still in force. Remove',
     '   stale/completed items and routine status updates.',
-    '3. Write in first person. Don\'t lose signal — keep uncertain items.',
+    '3. Write in first person. Do not lose signal - keep uncertain items.',
     '',
     `Identity context: ${identity || '(not available)'}`,
     '',
@@ -189,48 +200,50 @@ export async function consolidateScratchpad(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({ prompt, config, suppressObservers: true })
+    const result = await runAgent({
+      prompt,
+      config,
+      suppressObservers: true,
+    })
     if (result.exitCode !== 0) return { entriesExtracted: 0 }
 
-    const raw = result.text.trim()
-    const jsonMatch = raw.match(/\{[\s\S]*\}/)
+    const jsonMatch = result.text.trim().match(/\{[\s\S]*\}/)
     if (!jsonMatch) return { entriesExtracted: 0 }
 
     const parsed = JSON.parse(jsonMatch[0])
-    const entries = Array.isArray(parsed.knowledge_entries) ? parsed.knowledge_entries : []
-    const compressedBlock = String(parsed.compressed_block || '')
+    const entries = Array.isArray(parsed.knowledge_entries)
+      ? parsed.knowledge_entries
+      : []
+    const compressedBlock = String(parsed.compressed_block || '').trim()
+    if (!compressedBlock) return { entriesExtracted: 0 }
 
-    if (!compressedBlock.trim()) return { entriesExtracted: 0 }
-
-    // Write knowledge entries as scratchpad blocks
-    for (const entry of entries) {
-      if (entry.topic && entry.content) {
-        await appendScratchpadBlock(
-          `Knowledge: ${entry.topic}\n\n${entry.content}`,
-          'consolidation',
-        )
-      }
-    }
-
-    // Replace old blocks with compressed block
+    const knowledgeBlocks = entries
+      .filter((entry: Record<string, unknown>) => entry?.topic && entry?.content)
+      .map((entry: Record<string, unknown>) => ({
+        ts: new Date().toISOString(),
+        source: 'consolidation-knowledge',
+        content: `Knowledge: ${String(entry.topic)}\n\n${String(entry.content)}`,
+      }))
     const newBlocks = [
       {
         ts: new Date().toISOString(),
         source: 'consolidation',
-        content: compressedBlock.trim(),
+        content: compressedBlock,
       },
+      ...knowledgeBlocks,
       ...recentBlocks,
     ]
 
-    const { writeFile } = await import('fs/promises')
-    const { join } = await import('path')
-    const { getAgentGatewayStateDir } = await import('./config.js')
-    const scratchpadBlocksPath = join(getAgentGatewayStateDir(), 'memory', 'scratchpad_blocks.json')
-    await mkdir(join(getAgentGatewayStateDir(), 'memory'), { recursive: true })
-    await writeFile(scratchpadBlocksPath, JSON.stringify(newBlocks, null, 2))
-
-    return { entriesExtracted: entries.length }
-  } catch {
+    await saveScratchpadBlocks(newBlocks, {
+      archiveBlocks: oldBlocks,
+      reason: 'consolidation',
+    })
+    return { entriesExtracted: knowledgeBlocks.length }
+  } catch (error) {
+    console.warn(
+      '[memory] scratchpad consolidation failed:',
+      error instanceof Error ? error.message : String(error),
+    )
     return { entriesExtracted: 0 }
   }
 }
@@ -310,6 +323,7 @@ async function createBlockSummary(
   identity: string,
   messageCount: number,
   config: AgentGatewayConfig,
+  runAgent: ConsolidationAgentRunner,
 ): Promise<string | null> {
   const prompt = [
     `You are a memory consolidator for the OpenClaude agent.`,
@@ -331,7 +345,7 @@ async function createBlockSummary(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({ prompt, config, suppressObservers: true })
+    const result = await runAgent({ prompt, config, suppressObservers: true })
     if (result.exitCode !== 0) return null
     return result.text.trim() || null
   } catch {
@@ -343,6 +357,7 @@ async function compressBlocksToEra(
   blocks: DialogueBlock[],
   identity: string,
   config: AgentGatewayConfig,
+  runAgent: ConsolidationAgentRunner,
 ): Promise<string | null> {
   const combined = blocks
     .map(b => `### ${b.range}\n${b.content}`)
@@ -361,7 +376,8 @@ async function compressBlocksToEra(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({ prompt, config, suppressObservers: true })
+    const result = await runAgent({ prompt, config, suppressObservers: true })
+    if (result.exitCode !== 0) return null
     const content = result.text.trim()
     if (!content) return null
     return content

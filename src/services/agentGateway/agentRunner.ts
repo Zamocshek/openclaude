@@ -44,6 +44,7 @@ export type AgentRunFailureKind =
   | 'rate_limit'
   | 'auth'
   | 'model_not_found'
+  | 'content_policy'
   | 'provider_request'
   | 'max_turns'
   | 'tool_error'
@@ -355,6 +356,10 @@ export function buildAgentChildEnv(
     ...dotEnv,
     ...baseEnv,
     OPENCLAUDE_AGENT_GATEWAY_CHILD: '1',
+    CLAUDE_CODE_MAX_RETRIES:
+      baseEnv.CLAUDE_CODE_MAX_RETRIES ?? dotEnv.CLAUDE_CODE_MAX_RETRIES ?? '3',
+    API_TIMEOUT_MS:
+      baseEnv.API_TIMEOUT_MS ?? dotEnv.API_TIMEOUT_MS ?? '60000',
     NO_COLOR: baseEnv.NO_COLOR ?? '1',
   }
   // MCP/RAG credentials are managed by this project/GUI. Prefer the local
@@ -1055,6 +1060,10 @@ function inferFailedToolCompletion(text: string, activity: string[]): string {
     return 'Agent completed with tool errors but produced no final answer.'
   }
 
+  if (hasRecoveredCompletionSignal(lowerText)) {
+    return ''
+  }
+
   const failurePhrase =
     /\b(cannot|can't|could not|unable|failed|failure|error|missing|required|invalid|not found|permission denied|timed out)\b|не удалось|не могу|не смог|ошибк|не найден|отсутств|требу|нет доступа|тайм-?аут/iu
   if (!failurePhrase.test(lowerText)) {
@@ -1062,6 +1071,10 @@ function inferFailedToolCompletion(text: string, activity: string[]): string {
   }
 
   return 'Agent completed with an unsuccessful final answer after one or more tool errors.'
+}
+
+function hasRecoveredCompletionSignal(lowerText: string): boolean {
+  return /\b(?:done|completed|fixed|implemented|created|updated|verified|tests? passed|successfully|saved|deployed)\b|готово|выполнен|исправлен|создан|обновлен|обновлён|сохранен|сохранён|проверен|тест[ыа]?\s+прошл/iu.test(lowerText)
 }
 
 function formatDuration(ms: number): string {
@@ -1091,6 +1104,8 @@ export function classifyAgentRunFailure(input: {
   let kind: AgentRunFailureKind = 'unknown'
   if (/(429|rate[_ -]?limit|too many requests|quota)/i.test(combined)) {
     kind = 'rate_limit'
+  } else if (/(content[^\n]{0,80}(?:flagged|policy|blocked|rejected)|flagged for possible cybersecurity risk|cybersecurity risk|safety policy|policy violation|trusted access for cyber|request[^\n]{0,80}flagged)/i.test(combined)) {
+    kind = 'content_policy'
   } else if (/(401|unauthori[sz]ed|authentication_failed|invalid api key|bad api key|billing_error|(?:provider|api|request)[^\n]{0,80}forbidden|forbidden[^\n]{0,80}(?:provider|api key|token|authentication))/i.test(combined)) {
     kind = 'auth'
   } else if (/(model(?:\s+id)?[^\n]{0,80}(?:not found|unknown|does not exist|404)|(?:unknown|missing|invalid)[ _-]?model|model_not_found|404[^\n]{0,80}model)/i.test(combined)) {
@@ -1133,6 +1148,8 @@ function buildFailureDiagnostic(
     lines.push('Provider authentication/billing rejection detected. Check API key, account credits, base URL, and model access.')
   } else if (kind === 'model_not_found') {
     lines.push('Provider did not accept the selected model. Load provider models or set a known model id.')
+  } else if (kind === 'content_policy') {
+    lines.push('Provider safety/content policy rejected the request. Do not retry the same payload blindly; switch to an authorized provider or narrow the request to benign diagnostics.')
   } else if (kind === 'provider_request') {
     lines.push('Provider rejected the request shape. Check base URL compatibility and whether the selected model supports the requested tool/message format.')
   } else if (kind === 'max_turns') {

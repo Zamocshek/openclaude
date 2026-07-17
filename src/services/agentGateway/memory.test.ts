@@ -4,6 +4,8 @@ import { tmpdir } from 'os'
 import { describe, expect, test } from 'bun:test'
 import {
   addCuratedMemoryEntry,
+  appendScratchpadBlock,
+  buildMemoryContextSection,
   applyCuratedMemoryDirectives,
   applyOrStageCuratedMemoryAction,
   approvePendingCuratedMemoryAction,
@@ -14,6 +16,7 @@ import {
   getCuratedMemoryStatus,
   loadPendingCuratedMemoryActions,
   listCuratedMemoryEntries,
+  loadScratchpadBlocks,
   removeCuratedMemoryEntry,
   removeCuratedMemoryText,
   replaceCuratedMemoryEntry,
@@ -80,8 +83,8 @@ describe('agent gateway curated memory', () => {
         await withGatewayMemoryState(async () => {
           await ensureMemoryFiles()
           const status = await getCuratedMemoryStatus()
-          expect(status.usage.memory.limit).toBe(1_000_000)
-          expect(status.usage.user.limit).toBe(512_000)
+          expect(status.usage.memory.limit).toBe(Number.MAX_SAFE_INTEGER)
+          expect(status.usage.user.limit).toBe(Number.MAX_SAFE_INTEGER)
         })
       },
     )
@@ -277,4 +280,37 @@ describe('agent gateway curated memory', () => {
       })
     })
   })
+  test('keeps scratchpad blocks without default FIFO deletion', async () => {
+    await withMemoryEnv(
+      Object.fromEntries(MEMORY_LIMIT_ENV_KEYS.map(key => [key, undefined])),
+      async () => {
+        await withGatewayMemoryState(async () => {
+          for (let index = 0; index < 205; index++) {
+            await appendScratchpadBlock(`durable block ${index}`, 'test')
+          }
+          const blocks = await loadScratchpadBlocks()
+          expect(blocks).toHaveLength(205)
+          expect(blocks[0]?.content).toBe('durable block 0')
+          expect(blocks.at(-1)?.content).toBe('durable block 204')
+        })
+      },
+    )
+  })
+
+  test('compacts only the active prompt view and retains durable memory', async () => {
+    await withGatewayMemoryState(async () => {
+      await addCuratedMemoryEntry({
+        kind: 'memory',
+        content: 'durable-large-memory ' + 'x'.repeat(4_000),
+        source: 'test',
+      })
+      const context = await buildMemoryContextSection({ maxChars: 1_500 })
+      expect(context.length).toBeLessThanOrEqual(1_500)
+      expect(context).toContain('Active memory view')
+      expect(context).toContain('Identity')
+      expect((await listCuratedMemoryEntries())[0]?.content.length)
+        .toBeGreaterThan(4_000)
+    })
+  })
+
 })

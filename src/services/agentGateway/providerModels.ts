@@ -156,9 +156,6 @@ export async function loadProviderModelCatalog(
   profile: ProviderModelProfile,
 ): Promise<ProviderModelCatalog> {
   if (profile.provider === 'codex') return loadCodexModelCatalog()
-  if (profile.provider === 'deepseek') {
-    return { models: getBuiltInProviderModels('deepseek'), source: 'built-in' }
-  }
 
   const fallback = getBuiltInProviderModels(profile.provider)
   try {
