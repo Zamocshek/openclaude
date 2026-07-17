@@ -225,6 +225,34 @@ the `hindsight_*` tool succeeded.
 
 See `docs/openrag-integration.md` and `docs/hindsight-integration.md`.
 
+## Personal RPG / Life System
+
+The repository can also contain the creator's personal simulation layer under
+`Vladimir_Kuplevatskyi/`. Treat it as user-owned durable state, not ordinary
+scratch notes.
+
+Operational entry points:
+
+- `Vladimir_Kuplevatskyi/SYSTEM_INDEX.md` — source-of-truth map and write
+  routing for stats, quests, diary, goals, training, records, worldview, and
+  NOVA state.
+- `Vladimir_Kuplevatskyi/AGENT_OPERATIONS.md` — how the agent should read,
+  write, verify, and report life/RPG changes.
+- `Vladimir_Kuplevatskyi/CONTROL_PANEL.md` — one-screen daily/weekly control
+  surface for planning and review.
+
+Rules:
+
+- For requests about Vladimir, NOVA, RPG, simulation, diary, habits, quests,
+  goals, records, training, money, study, worldview, or life planning, read the
+  system index and operations protocol before editing.
+- Do not rewrite or erase existing memories, records, worldview, diary history,
+  personality, or mode definitions. Prefer additive dated entries.
+- Do not claim a life/RPG update was saved unless the relevant file or memory
+  tool write succeeded and the resulting state was verified.
+- Validate the structure with `bun run life:check` after changing the RPG
+  operating layer.
+
 ## Self-Knowledge Rules
 
 When the agent edits itself:

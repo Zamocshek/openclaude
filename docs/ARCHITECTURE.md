@@ -126,6 +126,24 @@ MCP and documented in `docs/REPO_GUIDE.md`:
 - **OpenRAG**: document-grounded retrieval and ingestion (`openrag_*` tools)
 - **Camofox**: live browser automation and screenshots (`camofox_*` tools)
 
+### 2.5.1 Personal RPG / Life System (`Vladimir_Kuplevatskyi/`)
+
+The creator's life-management/RPG simulation is stored in repository markdown
+under `Vladimir_Kuplevatskyi/`. It is user-owned durable state, separate from
+gateway memory files, but the child agent is explicitly routed to it for
+simulation, diary, habits, quests, goals, records, training, money, study,
+worldview, and NOVA self-management tasks.
+
+Operational files:
+
+- `SYSTEM_INDEX.md` — source-of-truth map for which file owns each domain.
+- `AGENT_OPERATIONS.md` — read/write/verify protocol for the agent.
+- `CONTROL_PANEL.md` — daily/weekly operating surface.
+
+The structure is checked by `scripts/life-system-check.ts` via
+`bun run life:check`. This check verifies required RPG files and key headings
+without changing personal memory content.
+
 ### 2.6 Background Consciousness (`consciousness.ts`)
 
 Daemon thinking loop:

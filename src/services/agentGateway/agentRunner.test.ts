@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, writeFile } from 'fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -135,6 +135,35 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('resolve-library-id')
     expect(systemPrompt).toContain('query-docs')
     expect(systemPrompt).toContain('without waiting for an explicit user request')
+  })
+
+  test('routes personal RPG and life-management requests through the system index', () => {
+    const args = buildAgentArgs(getDefaultAgentGatewayConfig())
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(systemPrompt).toContain('Vladimir_Kuplevatskyi/SYSTEM_INDEX.md')
+    expect(systemPrompt).toContain('Vladimir_Kuplevatskyi/AGENT_OPERATIONS.md')
+    expect(systemPrompt).toContain('Do not rewrite or erase existing memories')
+    expect(systemPrompt).toContain('Never claim that a life/RPG update was saved')
+  })
+
+  test('skips personal RPG routing when the runner cwd has no life system', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-no-life-system-'))
+    const config = getDefaultAgentGatewayConfig()
+    config.runner.cwd = cwd
+
+    const missingArgs = buildAgentArgs(config)
+    const missingPrompt = missingArgs[missingArgs.indexOf('--append-system-prompt') + 1]
+    expect(missingPrompt).not.toContain('Vladimir_Kuplevatskyi/SYSTEM_INDEX.md')
+
+    await mkdir(join(cwd, 'Vladimir_Kuplevatskyi'), { recursive: true })
+    await writeFile(
+      join(cwd, 'Vladimir_Kuplevatskyi', 'SYSTEM_INDEX.md'),
+      '# SYSTEM INDEX\n',
+    )
+    const presentArgs = buildAgentArgs(config)
+    const presentPrompt = presentArgs[presentArgs.indexOf('--append-system-prompt') + 1]
+    expect(presentPrompt).toContain('Vladimir_Kuplevatskyi/SYSTEM_INDEX.md')
   })
 
   test('requires a private skill, MCP, and tool routing pass before every task', () => {

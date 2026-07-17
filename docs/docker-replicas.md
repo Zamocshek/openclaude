@@ -14,14 +14,10 @@ Each replica exposes the same OpenAI-compatible API as the main gateway.
 - Optional MCP Router token:
   - `MCPR_TOKEN=...`
 
-The project `.mcp.json` configures `mcp-router` as a direct HTTP MCP server and
-reads `MCPR_TOKEN` from the environment or local `.env`. Do not commit real
-tokens. `scripts/mcp-router-launcher.cjs` remains available as a stdio fallback
-for older MCP clients.
-
-`scripts/mcp-router-headers.cjs` supplies the authorization header. Local runs
-prefer the `.env` token to avoid stale machine-level `MCPR_TOKEN` values; Docker
-runs keep container env precedence when `MCPR_HOST=host.docker.internal`.
+The project `.mcp.json` currently launches `mcp-router` through
+`scripts/mcp-router-launcher.cjs`, a stdio bridge that connects to the MCP
+Router HTTP server. It reads `MCPR_TOKEN` from the environment or local `.env`.
+Do not commit real tokens.
 
 Local source runs use `127.0.0.1:3282` by default. Docker runs default
 `MCPR_HOST` to `host.docker.internal` and add a host-gateway mapping so
@@ -83,6 +79,8 @@ This starts the main gateway plus worker APIs:
 
 Workers keep Telegram, cron, and Ouroboros disabled by default. The main agent
 can coordinate them through HTTP API calls.
+Fixed workers use Docker healthchecks against `/health` and restart unless
+stopped, matching the main gateway's liveness posture.
 
 To intentionally run fixed workers with Telegram, use dedicated worker bot
 tokens so long polling does not conflict with the main bot:
@@ -125,6 +123,9 @@ The `.env.bot` file should contain `TELEGRAM_BOT_TOKEN`,
 `OPENCLAUDE_TELEGRAM_HOME_CHAT_ID`, and the allowed user/chat IDs for that bot.
 Append `--dry-run` as a fifth argument to verify the resolved settings without
 building or starting a container.
+
+One-off replicas are created with `--restart unless-stopped` and a Docker
+healthcheck against `http://127.0.0.1:<port>/health`.
 
 Provider variables from the env file are preserved. Shell variables only
 override them when they are non-empty, so a blank local shell value will not
@@ -183,6 +184,27 @@ curl http://127.0.0.1:8750/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"openclaude-agent","messages":[{"role":"user","content":"Reply with: replica ok"}]}'
 ```
+
+## Live Agent Ops
+
+```bash
+docker compose -f docker-compose.agent-gateway.yml ps
+docker compose -f docker-compose.agent-gateway.yml logs -f openclaude-agent searxng
+curl http://127.0.0.1:8642/health
+curl -H "Authorization: Bearer $OPENCLAUDE_AGENT_API_KEY" \
+  http://127.0.0.1:8642/api/queue/status
+bun run check:base:mcp
+bun run test:research:mcp
+```
+
+Telegram recovery commands:
+
+- `/status`
+- `/errors 10`
+- `/stop`
+- `/retry`
+- `/restart`
+- `/panic`
 
 ## Agent Operating Rule
 

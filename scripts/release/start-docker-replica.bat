@@ -126,6 +126,12 @@ docker rm -f "%NAME%" >nul 2>nul
 
 docker run -d ^
   --name "%NAME%" ^
+  --restart unless-stopped ^
+  --health-cmd "curl -fsS http://127.0.0.1:%PORT%/health >/dev/null || exit 1" ^
+  --health-interval 15s ^
+  --health-timeout 5s ^
+  --health-retries 12 ^
+  --health-start-period 20s ^
   %ENV_FILE_ARGS% ^
   %PROVIDER_ENV_ARGS% ^
   --add-host host.docker.internal:host-gateway ^
