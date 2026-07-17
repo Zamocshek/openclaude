@@ -4,7 +4,8 @@ import { randomUUID } from 'crypto'
 import type { AgentGatewayConfig } from './config.js'
 import { getAgentGatewayStateDir, updateAgentGatewayConfig } from './config.js'
 import { createCronJob, deleteCronJob, getCronJob, getCronJobsPath, listCronJobs, pauseCronJob, resumeCronJob, runCronJobNow, updateCronJob, type CronJob, type CronJobMode } from './cron.js'
-import { runOpenClaudeAgent, redactAgentText, type AgentRunResult } from './agentRunner.js'
+import { runOpenClaudeAgent, type AgentRunResult } from './agentRunner.js'
+import { redactAgentText } from './redaction.js'
 import { detectTranscriptionTool, transcribeAudio } from './transcription.js'
 import {
   applyCuratedMemoryDirectives,
@@ -705,6 +706,7 @@ export class TelegramAgentBridge {
     let recoveryAttempt = 0
     let currentPrompt = input.prompt
     const repeatedFailures = new Map<string, number>()
+    const failureKindCounts = new Map<string, number>()
 
     while (true) {
       const isRecovery = recoveryAttempt > 0
@@ -740,11 +742,25 @@ export class TelegramAgentBridge {
         result,
       )
 
+      if (!shouldRetryTelegramAgentFailure(result)) {
+        return withNonRetryableFailureDiagnostic(result)
+      }
+
       const signature = getAgentRecoveryFailureSignature(result)
       const repeatedCount = (repeatedFailures.get(signature) ?? 0) + 1
       repeatedFailures.set(signature, repeatedCount)
+      const failureKind = result.failureKind || 'unknown'
+      const failureKindCount = (failureKindCounts.get(failureKind) ?? 0) + 1
+      failureKindCounts.set(failureKind, failureKindCount)
       if (repeatedCount >= getTelegramAgentRepeatedFailureLimit()) {
         return withRepeatedFailureDiagnostic(result, repeatedCount)
+      }
+      if (failureKindCount >= getTelegramAgentFailureKindLimit()) {
+        return withFailureKindLimitDiagnostic(
+          result,
+          failureKind,
+          failureKindCount,
+        )
       }
 
       if (
@@ -3926,6 +3942,7 @@ type TelegramAgentRecoveryLimit = {
 
 const DEFAULT_TELEGRAM_AGENT_RECOVERY_ATTEMPTS = 5
 const DEFAULT_TELEGRAM_AGENT_REPEATED_FAILURE_LIMIT = 3
+const DEFAULT_TELEGRAM_AGENT_FAILURE_KIND_LIMIT = 6
 const TELEGRAM_AGENT_RECOVERY_ATTEMPT_ENV_KEYS = [
   'OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_ATTEMPTS',
   'OPENCLAUDE_AGENT_RECOVERY_ATTEMPTS',
@@ -3933,6 +3950,10 @@ const TELEGRAM_AGENT_RECOVERY_ATTEMPT_ENV_KEYS = [
 const TELEGRAM_AGENT_REPEATED_FAILURE_ENV_KEYS = [
   'OPENCLAUDE_TELEGRAM_AGENT_REPEATED_FAILURE_LIMIT',
   'OPENCLAUDE_AGENT_REPEATED_FAILURE_LIMIT',
+]
+const TELEGRAM_AGENT_FAILURE_KIND_ENV_KEYS = [
+  'OPENCLAUDE_TELEGRAM_AGENT_FAILURE_KIND_LIMIT',
+  'OPENCLAUDE_AGENT_FAILURE_KIND_LIMIT',
 ]
 
 export function getTelegramAgentRecoveryAttemptLimit(
@@ -3970,6 +3991,24 @@ export function getTelegramAgentRepeatedFailureLimit(
   return DEFAULT_TELEGRAM_AGENT_REPEATED_FAILURE_LIMIT
 }
 
+export function getTelegramAgentFailureKindLimit(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  for (const key of TELEGRAM_AGENT_FAILURE_KIND_ENV_KEYS) {
+    const raw = env[key]
+    if (raw === undefined || raw.trim() === '') continue
+    const parsed = Number.parseInt(raw.trim(), 10)
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.max(1, parsed)
+    }
+  }
+  return DEFAULT_TELEGRAM_AGENT_FAILURE_KIND_LIMIT
+}
+
+export function shouldRetryTelegramAgentFailure(result: AgentRunResult): boolean {
+  return result.failureKind !== 'auth' && result.failureKind !== 'model_not_found'
+}
+
 export function getAgentRecoveryFailureSignature(result: AgentRunResult): string {
   return [
     result.failureKind || 'unknown',
@@ -4001,6 +4040,32 @@ function withRepeatedFailureDiagnostic(
   }
 }
 
+function withFailureKindLimitDiagnostic(
+  result: AgentRunResult,
+  failureKind: string,
+  failureKindCount: number,
+): AgentRunResult {
+  return {
+    ...result,
+    diagnostic: [
+      `Recovery stopped after ${failureKindCount} failures of class ${failureKind}; changing activity no longer counts as progress.`,
+      result.diagnostic || '',
+    ].filter(Boolean).join('\n\n'),
+  }
+}
+
+function withNonRetryableFailureDiagnostic(
+  result: AgentRunResult,
+): AgentRunResult {
+  return {
+    ...result,
+    diagnostic: [
+      `Recovery was not restarted for non-retryable failure class ${result.failureKind || 'unknown'}. Change the provider, model, or authentication state first.`,
+      result.diagnostic || '',
+    ].filter(Boolean).join('\n\n'),
+  }
+}
+
 function formatTelegramRecoveryPhase(
   attempt: number,
   maxRecoveryAttempts: number | null,
@@ -4027,6 +4092,9 @@ export function buildTelegramAgentRecoveryPrompt(input: {
     'Recovery rules:',
     '- Analyze the exact failure and choose another route.',
     '- Do not repeat the same failing command, path, file edit, MCP call, or provider action.',
+    '- Re-read git status, the current diff, TodoWrite state, and generated outputs before continuing so completed work is not repeated or overwritten.',
+    '- For code changes, invoke the code Skill, Read every existing target before Edit or Write, and use file tools instead of shell redirection or heredocs.',
+    '- After correcting a tool call or using a fallback, rerun the relevant verification and inspect the actual resulting state.',
     '- If the failure was a permission/sensitive-file/tool error, do not ask the user for permission and do not edit that sensitive file directly. Use the gateway API, Telegram bridge directives, repository code, or another available route.',
     '- If a probe command returned non-zero because a path was absent, keep searching through known project/runtime paths instead of treating that probe as fatal.',
     '- Keep working until the original request is handled, the user presses Stop, or every practical route is exhausted.',
@@ -5351,7 +5419,7 @@ class TelegramTaskProgress {
 
   addEvent(label: string): void {
     if (this.disposed) return
-    const normalized = truncateProgressLabel(label)
+    const normalized = truncateProgressLabel(redactAgentText(label))
     if (!normalized) return
     const existing = this.events.find(event => event.label === normalized)
     if (existing) {
@@ -5423,7 +5491,7 @@ export function summarizeAgentProgressChunk(chunk: string): string[] {
     .filter(Boolean)
 
   for (const line of lines) {
-    const normalized = line.replace(/\s+/g, ' ')
+    const normalized = redactAgentText(line.replace(/\s+/g, ' '))
     const tool = normalized.match(
       /\b(mcp_[A-Za-z0-9_.:-]+|PowerShell|FileSystem|Screenshot|App|Wait|Notification|Clipboard|search_files|read_file|write_file|execute_code|skill_view|shell_command|apply_patch|Bash|Read|Write|Edit|Glob|Grep|LS|TodoWrite)\b/,
     )?.[1]
@@ -5474,7 +5542,11 @@ export function formatTelegramProgressText(snapshot: TelegramProgressSnapshot): 
     )
   } else {
     for (const event of snapshot.events.slice(-14)) {
-      lines.push(`- ${event.label}${event.count > 1 ? ` (x${event.count})` : ''}`)
+      const redactedLabel = redactAgentText(event.label)
+      const label = snapshot.status === 'completed'
+        ? redactedLabel.replace(/^tool result error\b/iu, 'recovered tool warning')
+        : redactedLabel
+      lines.push(`- ${label}${event.count > 1 ? ` (x${event.count})` : ''}`)
     }
   }
 

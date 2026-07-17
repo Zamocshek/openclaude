@@ -6,6 +6,7 @@ const originalEnv = {
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
+  OPENAI_MODEL: process.env.OPENAI_MODEL,
   CLAUDE_CODE_USE_GEMINI: process.env.CLAUDE_CODE_USE_GEMINI,
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
@@ -26,6 +27,7 @@ afterEach(() => {
   restoreEnv('CLAUDE_CODE_USE_OPENAI', originalEnv.CLAUDE_CODE_USE_OPENAI)
   restoreEnv('OPENAI_API_KEY', originalEnv.OPENAI_API_KEY)
   restoreEnv('OPENAI_BASE_URL', originalEnv.OPENAI_BASE_URL)
+  restoreEnv('OPENAI_MODEL', originalEnv.OPENAI_MODEL)
   restoreEnv('CLAUDE_CODE_USE_GEMINI', originalEnv.CLAUDE_CODE_USE_GEMINI)
   restoreEnv('GEMINI_API_KEY', originalEnv.GEMINI_API_KEY)
   restoreEnv('GOOGLE_API_KEY', originalEnv.GOOGLE_API_KEY)
@@ -81,6 +83,7 @@ test('still errors when no Gemini credential source is available', async () => {
 test('openai missing key error includes recovery guidance and config locations', async () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+  process.env.OPENAI_MODEL = 'gpt-4o'
   delete process.env.OPENAI_API_KEY
 
   const message = await getProviderValidationError(process.env)

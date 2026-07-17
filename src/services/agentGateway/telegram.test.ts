@@ -32,6 +32,7 @@ import {
   getAgentRecoveryFailureSignature,
   getAudioTranscriptionCandidate,
   getAttachmentCandidates,
+  getTelegramAgentFailureKindLimit,
   getTelegramAgentRepeatedFailureLimit,
   getTelegramAgentRecoveryAttemptLimit,
   getTelegramQueuePosition,
@@ -44,6 +45,7 @@ import {
   summarizeAgentProgressChunk,
   safeTelegramFileName,
   selectLargestPhoto,
+  shouldRetryTelegramAgentFailure,
   type TelegramAttachment,
 } from './telegram.js'
 import { listCronJobs } from './cron.js'
@@ -622,6 +624,31 @@ describe('agent gateway Telegram bridge helpers', () => {
       OPENCLAUDE_TELEGRAM_AGENT_REPEATED_FAILURE_LIMIT: '2',
     } as NodeJS.ProcessEnv)).toBe(2)
     expect(getTelegramAgentRepeatedFailureLimit({} as NodeJS.ProcessEnv)).toBe(3)
+    expect(getTelegramAgentFailureKindLimit({
+      OPENCLAUDE_TELEGRAM_AGENT_FAILURE_KIND_LIMIT: '4',
+    } as NodeJS.ProcessEnv)).toBe(4)
+    expect(getTelegramAgentFailureKindLimit({} as NodeJS.ProcessEnv)).toBe(6)
+  })
+
+  test('does not blindly retry provider state that the child cannot repair', () => {
+    const base = {
+      text: '',
+      stderr: 'failure',
+      exitCode: 1,
+      timedOut: false,
+    }
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'auth',
+    })).toBe(false)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'model_not_found',
+    })).toBe(false)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'tool_error',
+    })).toBe(true)
   })
 
   test('builds stable recovery failure signatures for repeated infrastructure errors', () => {
@@ -812,6 +839,15 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(events).not.toContain('regular final answer line')
   })
 
+  test('redacts inline credentials from Telegram progress activity', () => {
+    const events = summarizeAgentProgressChunk(
+      "Bash: \"sshpass -p 'progress-secret-value' ssh root@example.test\"",
+    )
+
+    expect(events.join('\n')).not.toContain('progress-secret-value')
+    expect(events.join('\n')).toContain('[REDACTED_PASSWORD]')
+  })
+
   test('formats Telegram progress with repeated activity counts', () => {
     const text = formatTelegramProgressText({
       status: 'running',
@@ -841,6 +877,29 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(text).toContain('OpenClaude task: completed')
     expect(text).toContain('no streamed model/tool activity captured')
     expect(text).not.toContain('waiting for model/tool output')
+  })
+
+  test('marks tool errors as recovered only after a successful run', () => {
+    const event = {
+      label: 'tool result error (Write): Read the file first',
+      count: 1,
+    }
+    const completed = formatTelegramProgressText({
+      status: 'completed',
+      phase: 'Done. Sending response.',
+      startedAt: Date.now() - 2_000,
+      events: [event],
+    })
+    const failed = formatTelegramProgressText({
+      status: 'failed',
+      phase: 'Agent run failed.',
+      startedAt: Date.now() - 2_000,
+      events: [event],
+    })
+
+    expect(completed).toContain('recovered tool warning (Write)')
+    expect(completed).not.toContain('tool result error')
+    expect(failed).toContain('tool result error (Write)')
   })
 
   test('switches provider profile without carrying old endpoint into codex', () => {

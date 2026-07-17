@@ -311,6 +311,16 @@ servers, and built-in tools, invokes the most specific matching skill first,
 and selects no specialized capability only when none adds value. This rule is
 shared by Telegram, the Agent API, cron runs, and OpenWebUI inference.
 
+Code implementation, debugging, review, deployment, and refactoring requests
+route through the bundled `code` skill. It enforces repository discovery,
+Read-before-Edit/Write, native file editing, TodoWrite checkpoints, targeted
+verification, final diff review, and recovery from corrected tool calls. Docker
+defaults allow up to 720 turns and 12 hours for the main gateway run; replica
+workers allow 240 turns and 4 hours. Telegram Stop still aborts the active child
+process immediately. Override these limits with
+`OPENCLAUDE_AGENT_RUNNER_MAX_TURNS`, `OPENCLAUDE_AGENT_RUNNER_TIMEOUT_MS`,
+`OPENCLAUDE_AGENT_WORKER_MAX_TURNS`, and `OPENCLAUDE_AGENT_WORKER_TIMEOUT_MS`.
+
 Start or refresh the stack with:
 
 ```bash

@@ -8,12 +8,14 @@ import {
   buildPromptFromChatMessages,
   classifyAgentRunFailure,
   extractStreamJsonResult,
+  hasCodingTaskIntent,
   isIgnorablePostSuccessStderr,
   normalizeMessageContent,
   summarizeStreamJsonProgress,
   type StreamProgressContext,
 } from './agentRunner.js'
 import { getDefaultAgentGatewayConfig } from './config.js'
+import { redactAgentText } from './redaction.js'
 
 describe('agent gateway prompt builder', () => {
   test('folds OpenAI chat messages into a headless OpenClaude prompt', () => {
@@ -146,6 +148,25 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('Do not reveal chain-of-thought')
   })
 
+  test('requires the production coding workflow before repository edits', () => {
+    const args = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+      prompt: 'Fix the bug in calculator.py and run its test.',
+    })
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(systemPrompt).toContain('invoke the code Skill before editing')
+    expect(systemPrompt).toContain('each existing target file before Edit or Write')
+    expect(systemPrompt).toContain('use Write only when listed')
+    expect(systemPrompt).toContain('avoid shell redirection')
+    expect(systemPrompt).toContain('Keep a TodoWrite checklist')
+    expect(systemPrompt).toContain('relevant tests or runtime checks pass')
+    expect(systemPrompt).toContain('Never put credentials in command arguments')
+    expect(systemPrompt).toContain('# Production Coding Workflow')
+    expect(systemPrompt).toContain('## 4. Definition of done')
+    expect(hasCodingTaskIntent('Исправь баг в TypeScript проекте')).toBe(true)
+    expect(hasCodingTaskIntent('Какая сегодня погода?')).toBe(false)
+  })
+
   test('turns Codex Ultra into xhigh reasoning with automatic delegation guidance', () => {
     const previousOpenClaudeModel = process.env.OPENCLAUDE_MODEL
     process.env.OPENCLAUDE_MODEL = 'gpt-5.6-sol?reasoning=ultra'
@@ -237,6 +258,27 @@ describe('agent gateway prompt builder', () => {
     expect(resultEvents).toContain('tool result error (mcp_mcp_router_PowerShell: "Get-Process RustDesk"): window not found')
   })
 
+  test('bounds remembered tool calls for multi-hour stream sessions', () => {
+    const context: StreamProgressContext = { toolUseById: new Map() }
+    for (let index = 0; index < 700; index += 1) {
+      summarizeStreamJsonProgress({
+        type: 'assistant',
+        message: {
+          content: [{
+            type: 'tool_use',
+            id: `toolu_${index}`,
+            name: 'Read',
+            input: { file_path: `/workspace/file-${index}.ts` },
+          }],
+        },
+      }, context)
+    }
+
+    expect(context.toolUseById.size).toBeLessThanOrEqual(512)
+    expect(context.toolUseById.has('toolu_0')).toBe(false)
+    expect(context.toolUseById.has('toolu_699')).toBe(true)
+  })
+
   test('classifies provider rate limits from activity and redacts Abacus-style keys', () => {
     const failure = classifyAgentRunFailure({
       text: '',
@@ -265,6 +307,67 @@ describe('agent gateway prompt builder', () => {
         },
       }).join('\n'),
     ).toContain('[REDACTED_API_KEY]')
+  })
+
+  test('redacts command-line, environment, URL, and private-key credentials', () => {
+    const secrets = [
+      'ssh-password-value',
+      'basic-auth-password',
+      'environment-secret-value',
+      'url-password-value',
+      'private-key-material',
+      'bearer-token-value',
+      'sshpass-environment-value',
+    ]
+    const redacted = redactAgentText([
+      `sshpass -p '${secrets[0]}' ssh root@example.test`,
+      `curl -u 'root:${secrets[1]}' https://example.test`,
+      `DEPLOY_PASSWORD='${secrets[2]}' deploy`,
+      `https://root:${secrets[3]}@example.test/path`,
+      `-----BEGIN PRIVATE KEY-----\n${secrets[4]}\n-----END PRIVATE KEY-----`,
+      `AUTHORIZATION=Bearer ${secrets[5]}`,
+      `SSHPASS='${secrets[6]}' sshpass -e ssh root@example.test`,
+    ].join('\n'))
+
+    for (const secret of secrets) expect(redacted).not.toContain(secret)
+    expect(redacted).toContain('[REDACTED_PASSWORD]')
+    expect(redacted).toContain('[REDACTED_CREDENTIALS]')
+    expect(redacted).toContain('DEPLOY_PASSWORD=[REDACTED]')
+    expect(redacted).toContain('https://[REDACTED]@example.test/path')
+    expect(redacted).toContain('[REDACTED_PRIVATE_KEY]')
+  })
+
+  test('does not misclassify tool 404 or forbidden errors as provider state', () => {
+    const missingFile = classifyAgentRunFailure({
+      text: '',
+      stderr: '',
+      exitCode: 1,
+      timedOut: false,
+      activity: [
+        'Read: "/workspace/missing.ts"',
+        'tool result error (Read): 404 not_found',
+      ],
+    })
+    const forbiddenFile = classifyAgentRunFailure({
+      text: '',
+      stderr: '',
+      exitCode: 1,
+      timedOut: false,
+      activity: [
+        'Edit: "/workspace/config.json"',
+        'tool result error (Edit): forbidden by file permissions',
+      ],
+    })
+    const missingModel = classifyAgentRunFailure({
+      text: '',
+      stderr: 'Provider returned 404: model deepseek-missing was not found',
+      exitCode: 1,
+      timedOut: false,
+    })
+
+    expect(missingFile.kind).toBe('tool_error')
+    expect(forbiddenFile.kind).toBe('tool_error')
+    expect(missingModel.kind).toBe('model_not_found')
   })
 
   test('classifies zero-exit failed tool completions as tool errors', () => {

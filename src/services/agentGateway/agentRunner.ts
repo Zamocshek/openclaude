@@ -9,8 +9,12 @@ import {
   type AgentGatewayConfig,
 } from './config.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
+import { CODE_SKILL_PROMPT } from '../../skills/codingWorkflow.js'
 import { getReasoningEffortForModel } from '../api/providerConfig.js'
 import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
+import { redactAgentText } from './redaction.js'
+
+export { redactAgentText } from './redaction.js'
 
 export type AgentRunOptions = {
   prompt: string
@@ -88,6 +92,15 @@ const CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT = [
   'For a simple conversational request where no specialized capability helps, privately select none and answer directly.',
   'Do not reveal chain-of-thought or the private routing analysis; expose only concise plans, tool activity, results, and relevant failures.',
 ].join(' ')
+const CODING_EXECUTION_APPEND_SYSTEM_PROMPT = [
+  'For every request that creates, changes, reviews, debugs, deploys, or verifies code, invoke the code Skill before editing.',
+  'Read repository instructions, git status, and each existing target file before Edit or Write; the file tools enforce this precondition.',
+  'Use only native file tools currently exposed by the runtime for source and configuration changes; prefer Edit or apply_patch, use Write only when listed, and avoid shell redirection, cat, echo, heredocs, or generated patch scripts.',
+  'Keep a TodoWrite checklist for multi-step work, preserve unrelated dirty changes, and continue from the existing diff after recovery instead of starting over.',
+  'Correct tool schemas and preconditions after an error, never repeat an identical failing call, and verify the resulting state after any fallback.',
+  'Do not report completion until relevant tests or runtime checks pass and the final diff has been inspected.',
+  'Never put credentials in command arguments, source, logs, or progress output; use environment variables, protected configuration, or stdin.',
+].join(' ')
 const OPENRAG_APPEND_SYSTEM_PROMPT = [
   'OpenRAG RAG may be available through MCP tools.',
   'When the user asks about ingested documents, a knowledge base, project knowledge, long-term knowledge, RAG, OpenRAG, or document-grounded answers, prefer OpenRAG tools before answering from memory.',
@@ -151,6 +164,11 @@ const IGNORABLE_POST_SUCCESS_STDERR_PATTERNS = [
   /^TypeError:\s*fetch failed\.?$/i,
 ]
 const DEFAULT_FIRST_OUTPUT_PROGRESS_MS = 60_000
+const MAX_AGENT_TEXT_BUFFER_CHARS = 4 * 1024 * 1024
+const MAX_AGENT_STDERR_BUFFER_CHARS = 1024 * 1024
+const MAX_TRACKED_TOOL_USES = 512
+const CODING_TASK_INTENT_RE =
+  /(?:\b(?:code|coding|bug|debug|implement|implementation|refactor|repository|script|unit test|integration test|typecheck|lint|build|deploy|function|class|endpoint)\b|\.(?:c|cc|cpp|cs|css|go|html|java|js|jsx|json|kt|php|py|rb|rs|sh|sql|swift|ts|tsx|vue|yaml|yml)\b|(?:код|баг|дебаг|рефактор|программ|скрипт|репозитор|тест|сборк|депло|функц|класс|эндпоинт|апи))/iu
 
 export function addAgentRunObserver(observer: AgentRunObserver): () => void {
   agentRunObservers.add(observer)
@@ -213,7 +231,7 @@ function splitCommandLine(value: string): string[] {
 
 export function buildAgentArgs(
   config: AgentGatewayConfig,
-  options: { streamEvents?: boolean } = {},
+  options: { streamEvents?: boolean; prompt?: string } = {},
 ): string[] {
   const args = [
     '--print',
@@ -221,7 +239,7 @@ export function buildAgentArgs(
     '--output-format',
     options.streamEvents ? 'stream-json' : 'text',
     '--append-system-prompt',
-    getApiGatewayAppendSystemPrompt(config),
+    getApiGatewayAppendSystemPrompt(config, options.prompt),
     '--max-turns',
     String(config.runner.maxTurns),
   ]
@@ -265,7 +283,10 @@ function getAgentGatewayAllowedDirs(config: AgentGatewayConfig): string[] {
   return [...new Set(dirs.filter((dir): dir is string => Boolean(dir)))]
 }
 
-function getApiGatewayAppendSystemPrompt(config: AgentGatewayConfig): string {
+function getApiGatewayAppendSystemPrompt(
+  config: AgentGatewayConfig,
+  prompt = '',
+): string {
   const hasOpenRAG =
     config.openRAG.enabled ||
     config.openRAG.mcpEnabled ||
@@ -273,7 +294,9 @@ function getApiGatewayAppendSystemPrompt(config: AgentGatewayConfig): string {
   const parts = [
     API_GATEWAY_APPEND_SYSTEM_PROMPT,
     CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT,
+    CODING_EXECUTION_APPEND_SYSTEM_PROMPT,
   ]
+  if (hasCodingTaskIntent(prompt)) parts.push(CODE_SKILL_PROMPT)
   const configuredModel =
     process.env.OPENCLAUDE_MODEL || process.env.OPENAI_MODEL || ''
   if (getReasoningEffortForModel(configuredModel) === 'ultra') {
@@ -287,6 +310,12 @@ function getApiGatewayAppendSystemPrompt(config: AgentGatewayConfig): string {
   parts.push(HINDSIGHT_APPEND_SYSTEM_PROMPT)
   parts.push(DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT)
   return parts.join('\n\n')
+}
+
+export function hasCodingTaskIntent(prompt: string): boolean {
+  const currentRequest = prompt.match(/User request:\s*([\s\S]*)$/iu)?.[1]
+    || prompt.slice(-12_000)
+  return CODING_TASK_INTENT_RE.test(currentRequest)
 }
 
 function parseDotEnvFile(cwd: string): NodeJS.ProcessEnv {
@@ -446,10 +475,40 @@ function killProcessTree(proc: ChildProcessWithoutNullStreams): void {
       return
     }
 
+    if (proc.pid) {
+      try {
+        process.kill(-proc.pid, 'SIGTERM')
+        const forceKillTimer = setTimeout(() => {
+          if (proc.exitCode !== null || proc.signalCode !== null) return
+          try {
+            process.kill(-proc.pid!, 'SIGKILL')
+          } catch {
+            // The process group already exited.
+          }
+        }, 1_000)
+        forceKillTimer.unref()
+        return
+      } catch {
+        // Fall back when the child was not promoted to a process group.
+      }
+    }
+
     proc.kill('SIGTERM')
   } catch {
     // Best effort; the process may already be gone.
   }
+}
+
+function appendCappedText(current: string, chunk: string, maxChars: number): string {
+  if (current.length >= maxChars) return current
+  return current + chunk.slice(0, maxChars - current.length)
+}
+
+function appendTailText(current: string, chunk: string, maxChars: number): string {
+  const combined = current + chunk
+  return combined.length <= maxChars
+    ? combined
+    : combined.slice(combined.length - maxChars)
 }
 
 export function runOpenClaudeAgent(
@@ -457,9 +516,13 @@ export function runOpenClaudeAgent(
 ): Promise<AgentRunResult> {
   return new Promise(resolve => {
     const invocation = getCliInvocation()
+    const autoCodeWorkflow = hasCodingTaskIntent(options.prompt)
     const args = [
       ...invocation.args,
-      ...buildAgentArgs(options.config, { streamEvents: options.streamEvents }),
+      ...buildAgentArgs(options.config, {
+        streamEvents: options.streamEvents,
+        prompt: options.prompt,
+      }),
     ]
     const cwd = options.cwd || options.config.runner.cwd || process.cwd()
     const observerContext: AgentRunObserverContext = {
@@ -468,7 +531,6 @@ export function runOpenClaudeAgent(
       startedAt: Date.now(),
     }
     let textStdout = ''
-    let rawStdout = ''
     let streamLineBuffer = ''
     let streamResultText = ''
     let streamResultError = ''
@@ -494,19 +556,27 @@ export function runOpenClaudeAgent(
       if (seenProgress.has(truncated)) return
       seenProgress.add(truncated)
       activity.push(truncated)
-      while (activity.length > 60) activity.shift()
+      while (activity.length > 60) {
+        const removed = activity.shift()
+        if (removed && !activity.includes(removed)) seenProgress.delete(removed)
+      }
       options.onProgress?.(truncated)
     }
     const firstOutputProgressMs = getFirstOutputProgressMs(options.config.runner.timeoutMs)
     const killOnFirstOutputTimeout = shouldKillOnFirstOutputTimeout()
     recordProgress('runtime starting')
+    if (autoCodeWorkflow) recordProgress('skill auto-route: code')
 
     const handleStreamLine = (line: string) => {
       const trimmed = line.trim()
       if (!trimmed) return
       const message = parseStreamJsonLine(trimmed)
       if (!message) {
-        textStdout += `${line}\n`
+        textStdout = appendCappedText(
+          textStdout,
+          `${line}\n`,
+          MAX_AGENT_TEXT_BUFFER_CHARS,
+        )
         options.onStdout?.(stripAnsi(line) + '\n')
         return
       }
@@ -525,9 +595,12 @@ export function runOpenClaudeAgent(
 
     const handleStdoutChunk = (chunk: string) => {
       const cleanChunk = stripAnsi(chunk)
-      rawStdout += cleanChunk
       if (!options.streamEvents) {
-        textStdout += cleanChunk
+        textStdout = appendCappedText(
+          textStdout,
+          cleanChunk,
+          MAX_AGENT_TEXT_BUFFER_CHARS,
+        )
         options.onStdout?.(cleanChunk)
         return
       }
@@ -549,6 +622,7 @@ export function runOpenClaudeAgent(
     const proc = spawn(invocation.command, args, {
       cwd,
       env: buildAgentChildEnv(process.env, cwd),
+      detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
@@ -653,11 +727,19 @@ export function runOpenClaudeAgent(
     })
 
     proc.stderr.on('data', data => {
-      stderr += data.toString()
+      stderr = appendTailText(
+        stderr,
+        data.toString(),
+        MAX_AGENT_STDERR_BUFFER_CHARS,
+      )
     })
 
     proc.on('error', error => {
-      stderr += error.message
+      stderr = appendTailText(
+        stderr,
+        error.message,
+        MAX_AGENT_STDERR_BUFFER_CHARS,
+      )
       finish(1)
     })
 
@@ -674,7 +756,11 @@ export function runOpenClaudeAgent(
           recordProgress(`no model/tool output for ${formatDuration(elapsedMs)}`)
           if (killOnFirstOutputTimeout) {
             timedOut = true
-            stderr += `\nAgent produced no streamed model/tool output for ${formatDuration(elapsedMs)}. MCP startup or provider first-token latency is stuck.`
+            stderr = appendTailText(
+              stderr,
+              `\nAgent produced no streamed model/tool output for ${formatDuration(elapsedMs)}. MCP startup or provider first-token latency is stuck.`,
+              MAX_AGENT_STDERR_BUFFER_CHARS,
+            )
             killProcessTree(proc)
             forceResolveTimer = setTimeout(() => finish(1), 1000)
             return
@@ -778,7 +864,14 @@ export function summarizeStreamJsonProgress(
       } else if (blockType === 'tool_use' || blockType === 'server_tool_use') {
         const event = formatToolUseEvent(record)
         const id = typeof record.id === 'string' ? record.id : ''
-        if (id) context?.toolUseById.set(id, event)
+        if (id && context) {
+          context.toolUseById.set(id, event)
+          while (context.toolUseById.size > MAX_TRACKED_TOOL_USES) {
+            const oldest = context.toolUseById.keys().next().value
+            if (oldest === undefined) break
+            context.toolUseById.delete(oldest)
+          }
+        }
         events.push(event)
       } else if (blockType === 'text') {
         events.push('assistant response')
@@ -981,15 +1074,6 @@ function formatDuration(ms: number): string {
   return `${seconds}s`
 }
 
-export function redactAgentText(text: string): string {
-  return text
-    .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, '[REDACTED_API_KEY]')
-    .replace(/\bs2_[A-Za-z0-9]{16,}\b/g, '[REDACTED_API_KEY]')
-    .replace(/\b\d{6,14}:AA[A-Za-z0-9_-]{20,}\b/g, '[REDACTED_TELEGRAM_TOKEN]')
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}\b/gi, '$1[REDACTED]')
-    .replace(/\b(api[_-]?key|token|authorization)\s*[:=]\s*["']?[^"',\s]{8,}/gi, '$1=[REDACTED]')
-}
-
 export function classifyAgentRunFailure(input: {
   text: string
   stderr: string
@@ -1007,9 +1091,9 @@ export function classifyAgentRunFailure(input: {
   let kind: AgentRunFailureKind = 'unknown'
   if (/(429|rate[_ -]?limit|too many requests|quota)/i.test(combined)) {
     kind = 'rate_limit'
-  } else if (/(401|unauthori[sz]ed|authentication_failed|invalid api key|bad api key|forbidden|billing_error)/i.test(combined)) {
+  } else if (/(401|unauthori[sz]ed|authentication_failed|invalid api key|bad api key|billing_error|(?:provider|api|request)[^\n]{0,80}forbidden|forbidden[^\n]{0,80}(?:provider|api key|token|authentication))/i.test(combined)) {
     kind = 'auth'
-  } else if (/(404|model not found|unknown model|does not exist|not_found)/i.test(combined)) {
+  } else if (/(model(?:\s+id)?[^\n]{0,80}(?:not found|unknown|does not exist|404)|(?:unknown|missing|invalid)[ _-]?model|model_not_found|404[^\n]{0,80}model)/i.test(combined)) {
     kind = 'model_not_found'
   } else if (/(error_max_turns|maximum number of turns|reached max turns)/i.test(combined)) {
     kind = 'max_turns'
