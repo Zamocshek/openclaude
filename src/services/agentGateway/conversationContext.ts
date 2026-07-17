@@ -72,28 +72,37 @@ export function getConversationContextMaxChars(input: {
   model?: string
   envNames: string[]
 }): number {
-  let configuredLimit: number | undefined
-  for (const envName of input.envNames) {
+  const configuredLimit = getConfiguredContextChars(input.envNames)
+
+  const modelLimit = getConversationContextBudgets(input.model)?.conversationChars
+  return configuredLimit ?? modelLimit ?? UNLIMITED_SAFE_LIMIT
+}
+
+export function getMemoryContextMaxChars(
+  model?: string,
+  envNames = [
+    'OPENCLAUDE_MEMORY_CONTEXT_CHARS',
+    'OPENCLAUDE_MEMORY_CONTEXT_MAX_CHARS',
+  ],
+): number {
+  const configuredLimit = getConfiguredContextChars(envNames)
+  if (configuredLimit !== undefined) return configuredLimit
+
+  return getConversationContextBudgets(model)?.memoryChars
+    ?? UNLIMITED_SAFE_LIMIT
+}
+
+function getConfiguredContextChars(envNames: string[]): number | undefined {
+  for (const envName of envNames) {
     const parsed = parseHumanLimit(process.env[envName], {
       unlimitedValue: UNLIMITED_SAFE_LIMIT,
       zeroValue: UNLIMITED_SAFE_LIMIT,
     })
     if (parsed !== undefined) {
-      configuredLimit = Math.max(1_000, parsed)
-      break
+      return Math.max(1_000, parsed)
     }
   }
-
-  const modelLimit = getConversationContextBudgets(input.model)?.conversationChars
-  if (configuredLimit !== undefined && modelLimit !== undefined) {
-    return Math.min(configuredLimit, modelLimit)
-  }
-  return configuredLimit ?? modelLimit ?? UNLIMITED_SAFE_LIMIT
-}
-
-export function getMemoryContextMaxChars(model?: string): number {
-  return getConversationContextBudgets(model)?.memoryChars
-    ?? UNLIMITED_SAFE_LIMIT
+  return undefined
 }
 
 export function selectTextBlocksWithinCharBudget(

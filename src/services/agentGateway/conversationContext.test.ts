@@ -42,23 +42,33 @@ describe('agent gateway conversation context budgets', () => {
   })
 
   test('treats unlimited and zero env values as no artificial cap', async () => {
-    const modelLimit = getConversationContextBudgets('deepseek-v4-flash')!
-      .conversationChars
-
     await withEnv('OPENCLAUDE_TEST_CONTEXT_CHARS', 'unlimited', () => {
       expect(getConversationContextMaxChars({
         model: 'deepseek-v4-flash',
         envNames: ['OPENCLAUDE_TEST_CONTEXT_CHARS'],
-      })).toBe(modelLimit)
+      })).toBe(Number.MAX_SAFE_INTEGER)
     })
     await withEnv('OPENCLAUDE_TEST_CONTEXT_CHARS', '0', () => {
       expect(getConversationContextMaxChars({
         model: 'deepseek-v4-flash',
         envNames: ['OPENCLAUDE_TEST_CONTEXT_CHARS'],
-      })).toBe(modelLimit)
+      })).toBe(Number.MAX_SAFE_INTEGER)
       expect(getConversationContextTurnLimit([
         'OPENCLAUDE_TEST_CONTEXT_CHARS',
       ])).toBe(Number.MAX_SAFE_INTEGER)
+    })
+  })
+
+  test('lets explicit context and memory prompt overrides exceed auto model budgets', async () => {
+    await withEnv('OPENCLAUDE_TEST_CONTEXT_CHARS', '1m', () => {
+      expect(getConversationContextMaxChars({
+        model: 'gemma-4-12b-obliterated',
+        envNames: ['OPENCLAUDE_TEST_CONTEXT_CHARS'],
+      })).toBe(1_000_000)
+    })
+
+    await withEnv('OPENCLAUDE_MEMORY_CONTEXT_CHARS', '1m', () => {
+      expect(getMemoryContextMaxChars('gemma-4-12b-obliterated')).toBe(1_000_000)
     })
   })
 
