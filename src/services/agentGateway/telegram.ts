@@ -471,6 +471,7 @@ export class TelegramAgentBridge {
   /** FIFO agent task queue per chatId. Commands still run immediately. */
   private taskQueues = new Map<string, Promise<void>>()
   private queuedTaskCounts = new Map<string, number>()
+  private chatQueueEpochs = new Map<string, number>()
   private queueEpoch = 0
   private chatModes = new Map<string, TelegramResearchMode>()
   /** Last prompt per chatId — for /retry */
@@ -506,6 +507,7 @@ export class TelegramAgentBridge {
     this.activeTasks.clear()
     this.taskQueues.clear()
     this.queuedTaskCounts.clear()
+    this.chatQueueEpochs.clear()
   }
 
   async sendHomeMessage(text: string): Promise<void> {
@@ -787,7 +789,7 @@ export class TelegramAgentBridge {
     run: () => Promise<void>,
   ): Promise<void> {
     const waitingBefore = this.queuedTaskCounts.get(chatId) ?? 0
-    const epoch = this.queueEpoch
+    const epoch = this.getChatQueueEpoch(chatId)
     const position = getTelegramQueuePosition({
       active: this.activeTasks.has(chatId),
       waiting: waitingBefore,
@@ -804,7 +806,7 @@ export class TelegramAgentBridge {
         // The previous task already reported its own error. Keep the FIFO alive.
       })
       .then(async () => {
-        if (epoch !== this.queueEpoch || this.stopped) return
+        if (epoch !== this.getChatQueueEpoch(chatId) || this.stopped) return
         const remaining = Math.max(
           0,
           (this.queuedTaskCounts.get(chatId) ?? 1) - 1,
@@ -829,6 +831,15 @@ export class TelegramAgentBridge {
     })
     this.taskQueues.set(chatId, tracked)
     await tracked
+  }
+
+  private getChatQueueEpoch(chatId: string): string {
+    return `${this.queueEpoch}:${this.chatQueueEpochs.get(chatId) ?? 0}`
+  }
+
+  private invalidateChatQueue(chatId: string): void {
+    this.chatQueueEpochs.set(chatId, (this.chatQueueEpochs.get(chatId) ?? 0) + 1)
+    this.queuedTaskCounts.delete(chatId)
   }
 
   async sendFile(
@@ -2439,6 +2450,7 @@ export class TelegramAgentBridge {
     this.activeTasks.clear()
     this.taskQueues.clear()
     this.queuedTaskCounts.clear()
+    this.chatQueueEpochs.clear()
     this.queueEpoch++
     await this.sendMessage(chatId, 'PANIC: active tasks aborted. Stopping gateway runtime.')
     await this.acknowledgeTelegramUpdates()
@@ -2453,6 +2465,7 @@ export class TelegramAgentBridge {
     this.activeTasks.clear()
     this.taskQueues.clear()
     this.queuedTaskCounts.clear()
+    this.chatQueueEpochs.clear()
     this.queueEpoch++
     await this.sendMessage(chatId, 'Restarting gateway runtime.')
     await this.acknowledgeTelegramUpdates()
@@ -3464,8 +3477,9 @@ export class TelegramAgentBridge {
 
   private async stopTask(chatId: string): Promise<void> {
     const task = this.activeTasks.get(chatId)
+    this.invalidateChatQueue(chatId)
     if (!task) {
-      await this.sendMessage(chatId, 'No active task to stop.')
+      await this.sendMessage(chatId, 'No active task to stop. Queued tasks for this chat were cleared.')
       return
     }
 
@@ -3484,7 +3498,7 @@ export class TelegramAgentBridge {
       // Message may have already been replaced
     }
 
-    await this.sendMessage(chatId, 'Task stopped. Send a new message to start fresh.')
+    await this.sendMessage(chatId, 'Task stopped. Queued tasks for this chat were cleared. Send a new message to start fresh.')
   }
 
   private async handleRetryCommand(chatId: string): Promise<void> {
@@ -3956,9 +3970,9 @@ type TelegramAgentRecoveryLimit = {
   source: string
 }
 
-const DEFAULT_TELEGRAM_AGENT_RECOVERY_ATTEMPTS = 5
+const DEFAULT_TELEGRAM_AGENT_RECOVERY_ATTEMPTS = 2
 const DEFAULT_TELEGRAM_AGENT_REPEATED_FAILURE_LIMIT = 3
-const DEFAULT_TELEGRAM_AGENT_FAILURE_KIND_LIMIT = 6
+const DEFAULT_TELEGRAM_AGENT_FAILURE_KIND_LIMIT = 2
 const TELEGRAM_AGENT_RECOVERY_ATTEMPT_ENV_KEYS = [
   'OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_ATTEMPTS',
   'OPENCLAUDE_AGENT_RECOVERY_ATTEMPTS',
@@ -3979,7 +3993,10 @@ export function getTelegramAgentRecoveryAttemptLimit(
     const raw = env[key]
     if (raw === undefined || raw.trim() === '') continue
     const normalized = raw.trim().toLowerCase()
-    if (['0', 'unlimited', 'infinite', 'forever'].includes(normalized)) {
+    if (normalized === '0') {
+      return { maxRecoveryAttempts: 0, source: key }
+    }
+    if (['unlimited', 'infinite', 'forever'].includes(normalized)) {
       return { maxRecoveryAttempts: null, source: key }
     }
     const parsed = Number.parseInt(normalized, 10)
@@ -4022,9 +4039,9 @@ export function getTelegramAgentFailureKindLimit(
 }
 
 export function shouldRetryTelegramAgentFailure(result: AgentRunResult): boolean {
-  return result.failureKind !== 'auth'
-    && result.failureKind !== 'model_not_found'
-    && result.failureKind !== 'content_policy'
+  return result.failureKind === 'tool_error'
+    || result.failureKind === 'max_turns'
+    || result.failureKind === 'timeout'
 }
 
 export function getAgentRecoveryFailureSignature(result: AgentRunResult): string {

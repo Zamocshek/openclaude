@@ -46,9 +46,11 @@ import {
   safeTelegramFileName,
   selectLargestPhoto,
   shouldRetryTelegramAgentFailure,
+  TelegramAgentBridge,
   type TelegramAttachment,
 } from './telegram.js'
 import { listCronJobs } from './cron.js'
+import { getDefaultAgentGatewayConfig } from './config.js'
 
 async function withTempGatewayState<T>(fn: (stateDir: string) => Promise<T>): Promise<T> {
   const previousStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
@@ -609,14 +611,14 @@ describe('agent gateway Telegram bridge helpers', () => {
   test('parses Telegram agent recovery retry limits', () => {
     expect(getTelegramAgentRecoveryAttemptLimit({
       OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_ATTEMPTS: '0',
-    } as NodeJS.ProcessEnv).maxRecoveryAttempts).toBeNull()
+    } as NodeJS.ProcessEnv).maxRecoveryAttempts).toBe(0)
     expect(getTelegramAgentRecoveryAttemptLimit({
       OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_ATTEMPTS: 'unlimited',
     } as NodeJS.ProcessEnv).maxRecoveryAttempts).toBeNull()
     expect(getTelegramAgentRecoveryAttemptLimit({
       OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_ATTEMPTS: '3',
     } as NodeJS.ProcessEnv).maxRecoveryAttempts).toBe(3)
-    expect(getTelegramAgentRecoveryAttemptLimit({} as NodeJS.ProcessEnv).maxRecoveryAttempts).toBe(5)
+    expect(getTelegramAgentRecoveryAttemptLimit({} as NodeJS.ProcessEnv).maxRecoveryAttempts).toBe(2)
   })
 
   test('parses Telegram repeated failure loop-break limits', () => {
@@ -627,7 +629,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(getTelegramAgentFailureKindLimit({
       OPENCLAUDE_TELEGRAM_AGENT_FAILURE_KIND_LIMIT: '4',
     } as NodeJS.ProcessEnv)).toBe(4)
-    expect(getTelegramAgentFailureKindLimit({} as NodeJS.ProcessEnv)).toBe(6)
+    expect(getTelegramAgentFailureKindLimit({} as NodeJS.ProcessEnv)).toBe(2)
   })
 
   test('does not blindly retry provider state that the child cannot repair', () => {
@@ -651,7 +653,35 @@ describe('agent gateway Telegram bridge helpers', () => {
     })).toBe(false)
     expect(shouldRetryTelegramAgentFailure({
       ...base,
+      failureKind: 'runtime_configuration',
+    })).toBe(false)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'rate_limit',
+    })).toBe(false)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'provider_request',
+    })).toBe(false)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'execution',
+    })).toBe(false)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'unknown',
+    })).toBe(false)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
       failureKind: 'tool_error',
+    })).toBe(true)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'timeout',
+    })).toBe(true)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'max_turns',
     })).toBe(true)
   })
 
@@ -729,6 +759,45 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(getTelegramQueuePosition({ active: true, waiting: 0 })).toBe(1)
     expect(getTelegramQueuePosition({ active: true, waiting: 2 })).toBe(3)
     expect(formatTelegramQueueNotice(2, 'second task')).toContain('Queued #2')
+  })
+
+  test('stop clears queued Telegram tasks for the same chat', async () => {
+    const bridge = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+    const sent: string[] = []
+    ;(bridge as any).sendMessage = async (_chatId: string, text: string) => {
+      sent.push(text)
+    }
+    ;(bridge as any).callTelegram = async () => ({ ok: true })
+
+    let resolveFirstStarted!: () => void
+    const firstStarted = new Promise<void>(resolve => {
+      resolveFirstStarted = resolve
+    })
+    let secondRan = false
+
+    const first = (bridge as any).enqueueChatTask('42', 'first task', async () => {
+      const controller = new AbortController()
+      ;(bridge as any).activeTasks.set('42', {
+        controller,
+        messageId: 1,
+        progress: { dispose: () => {} },
+      })
+      resolveFirstStarted()
+      await new Promise<void>(resolve => {
+        controller.signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+      ;(bridge as any).activeTasks.delete('42')
+    })
+    await firstStarted
+
+    const second = (bridge as any).enqueueChatTask('42', 'second task', async () => {
+      secondRan = true
+    })
+    await (bridge as any).stopTask('42')
+    await Promise.all([first, second])
+
+    expect(secondRan).toBe(false)
+    expect(sent.join('\n')).toContain('Queued tasks for this chat were cleared')
   })
 
   test('applies safe Telegram research mode prompts', () => {

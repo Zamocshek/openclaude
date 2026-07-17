@@ -605,9 +605,19 @@ export class AgentApiServer {
       return
     }
 
+    const requestAbort = this.trackRequestAbort(request, response)
     const queued = this.enqueueAgentExecution(
       `chat.completions:${sessionId}`,
       async () => {
+        if (requestAbort.signal.aborted) {
+          return {
+            result: buildClientDisconnectedAgentResult(
+              'Client disconnected before queued API run started.',
+            ),
+            responseText: '',
+            history: [],
+          }
+        }
         const { runnerPrompt, history } = await this.buildChatCompletionRun({
           sessionId,
           requestedSessionId,
@@ -624,6 +634,7 @@ export class AgentApiServer {
         const result = await runOpenClaudeAgent({
           prompt: runnerPrompt,
           config: this.config,
+          signal: requestAbort.signal,
         })
         if (result.exitCode !== 0) {
           return { result, responseText: '', history }
@@ -648,7 +659,12 @@ export class AgentApiServer {
       },
     )
     const { result, responseText } = await queued.promise
+    if (requestAbort.signal.aborted && response.destroyed) {
+      requestAbort.complete()
+      return
+    }
     if (result.exitCode !== 0) {
+      requestAbort.complete()
       this.writeJson(
         response,
         500,
@@ -658,6 +674,7 @@ export class AgentApiServer {
       return
     }
 
+    requestAbort.complete()
     this.writeJson(
       response,
       200,
@@ -899,9 +916,18 @@ export class AgentApiServer {
     const explicitHistory = normalizeConversationHistory(body.conversation_history)
     const model = String(body.model || this.config.api.modelName)
     const contextModel = resolveApiContextModel(model, this.config)
+    const requestAbort = this.trackRequestAbort(request, response)
     const queued = this.enqueueAgentExecution(
       `responses:${conversation || 'default'}`,
       async () => {
+        if (requestAbort.signal.aborted) {
+          return {
+            result: buildClientDisconnectedAgentResult(
+              'Client disconnected before queued API run started.',
+            ),
+            data: undefined,
+          }
+        }
         const previousResponseId = await this.resolvePreviousResponseId(body)
         const previous = previousResponseId
           ? await this.getStoredResponse(previousResponseId)
@@ -944,6 +970,7 @@ export class AgentApiServer {
         const result = await runOpenClaudeAgent({
           prompt: runnerPrompt,
           config: this.config,
+          signal: requestAbort.signal,
         })
         if (result.exitCode !== 0) {
           return { result, data: undefined }
@@ -997,7 +1024,12 @@ export class AgentApiServer {
       },
     )
     const { result, data } = await queued.promise
+    if (requestAbort.signal.aborted && response.destroyed) {
+      requestAbort.complete()
+      return
+    }
     if (result.exitCode !== 0 || !data) {
+      requestAbort.complete()
       this.writeJson(
         response,
         500,
@@ -1007,6 +1039,7 @@ export class AgentApiServer {
       return
     }
 
+    requestAbort.complete()
     this.writeJson(response, 200, data, this.apiQueueHeaders(queued))
   }
 
@@ -1579,6 +1612,27 @@ export class AgentApiServer {
     return false
   }
 
+  private trackRequestAbort(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): { signal: AbortSignal; complete: () => void } {
+    const controller = new AbortController()
+    let completed = false
+    const abort = () => {
+      if (!completed) controller.abort()
+    }
+    request.on('aborted', abort)
+    response.on('close', abort)
+    return {
+      signal: controller.signal,
+      complete: () => {
+        completed = true
+        request.off('aborted', abort)
+        response.off('close', abort)
+      },
+    }
+  }
+
   private async readJson(request: IncomingMessage): Promise<Record<string, any>> {
     const chunks: Buffer[] = []
     const maxBodyBytes = getApiRequestBodyMaxBytes()
@@ -1671,6 +1725,18 @@ function formatAgentFailureForApi(result: AgentRunResult): string {
     }
   }
   return lines.join('\n').slice(0, 4000)
+}
+
+function buildClientDisconnectedAgentResult(stderr: string): AgentRunResult {
+  return {
+    text: '',
+    stderr,
+    exitCode: 1,
+    timedOut: false,
+    durationMs: 0,
+    failureKind: 'execution',
+    diagnostic: 'The API client disconnected before the queued agent run could complete.',
+  }
 }
 
 function formatDuration(ms: number): string {

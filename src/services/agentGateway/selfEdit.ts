@@ -13,7 +13,7 @@
  */
 
 import { readFile, writeFile, readdir, mkdir, rename } from 'fs/promises'
-import { dirname, join, relative, resolve } from 'path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import { execFile } from 'child_process'
 import { getAgentGatewayProjectRoot } from './config.js'
 
@@ -65,7 +65,7 @@ function resolvePath(requestedPath: string): string {
   const projectRoot = resolveProjectRoot()
   const resolved = resolve(projectRoot, requestedPath)
   const rel = relative(projectRoot, resolved)
-  if (rel.startsWith('..')) {
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     throw new Error(`Self-edit path must stay inside project root: ${requestedPath}`)
   }
   return resolved

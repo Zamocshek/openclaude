@@ -7,6 +7,7 @@ import { getDefaultAgentGatewayConfig, type AgentGatewayConfig } from './config.
 type MockAgentRunOptions = {
   prompt: string
   onStdout?: (chunk: string) => void
+  signal?: AbortSignal
 }
 
 function successfulAgentResult(text: string) {
@@ -857,7 +858,41 @@ describe('AgentApiServer', () => {
       .toBeGreaterThan(1_000_000)
   })
 
-  test('restores previous_response_id chains after an API restart', async () => {
+  test('passes abort signals to non-streaming API agent runs', async () => {
+    runOpenClaudeAgent.mockImplementationOnce(async options => {
+      expect(options.signal).toBeInstanceOf(AbortSignal)
+      return successfulAgentResult('chat signal ok')
+    }).mockImplementationOnce(async options => {
+      expect(options.signal).toBeInstanceOf(AbortSignal)
+      return successfulAgentResult('responses signal ok')
+    })
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const chat = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'signal chat' }],
+      }),
+    })
+    expect(chat.status).toBe(200)
+
+    const responses = await fetch(`${server.url}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        input: 'signal responses',
+      }),
+    })
+    expect(responses.status).toBe(200)
+  })
+
+  test('restores response chains by conversation after restart when the index is missing', async () => {
     const { AgentApiServer } = await import('./apiServer.js')
     server = new AgentApiServer({ config: testConfig() })
     await server.start()
@@ -873,6 +908,10 @@ describe('AgentApiServer', () => {
     expect(first.status).toBe(200)
     const firstBody = await first.json() as { id: string }
 
+    await rm(join(tempGatewayStateDir!, 'api-responses', 'conversations.json'), {
+      force: true,
+    })
+
     await server.stop()
     server = new AgentApiServer({ config: testConfig() })
     await server.start()
@@ -887,7 +926,7 @@ describe('AgentApiServer', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         input: 'continue after restart',
-        previous_response_id: firstBody.id,
+        conversation: 'durable-response-chat',
       }),
     })
     expect(second.status).toBe(200)

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { randomUUID } from 'crypto'
 import { getAgentGatewayStateDir } from './config.js'
@@ -67,7 +67,34 @@ export async function loadLatestConversationResponseId(
   conversation: string,
 ): Promise<string> {
   const index = await loadConversationIndex()
-  return index[conversation] || ''
+  return index[conversation] || await scanLatestConversationResponseId(conversation)
+}
+
+async function scanLatestConversationResponseId(
+  conversation: string,
+): Promise<string> {
+  let latest: { id: string; createdAt: number } | undefined
+  let files: string[]
+  try {
+    files = await readdir(responseDir())
+  } catch {
+    return ''
+  }
+
+  for (const file of files) {
+    const match = file.match(/^(resp_[A-Za-z0-9]+)\.json$/u)
+    if (!match) continue
+    const stored = await loadStoredApiResponse(match[1]!)
+    if (String(stored?.conversation || '').trim() !== conversation) continue
+    const response = stored?.response && typeof stored.response === 'object'
+      ? stored.response as Record<string, unknown>
+      : {}
+    const createdAt = Number(response.created_at || 0)
+    if (!latest || createdAt >= latest.createdAt) {
+      latest = { id: match[1]!, createdAt }
+    }
+  }
+  return latest?.id || ''
 }
 
 async function loadConversationIndex(): Promise<ConversationIndex> {

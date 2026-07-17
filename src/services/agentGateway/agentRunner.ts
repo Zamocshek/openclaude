@@ -45,6 +45,7 @@ export type AgentRunFailureKind =
   | 'auth'
   | 'model_not_found'
   | 'content_policy'
+  | 'runtime_configuration'
   | 'provider_request'
   | 'max_turns'
   | 'tool_error'
@@ -96,7 +97,9 @@ const CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT = [
 const CODING_EXECUTION_APPEND_SYSTEM_PROMPT = [
   'For every request that creates, changes, reviews, debugs, deploys, or verifies code, invoke the code Skill before editing.',
   'Read repository instructions, git status, and each existing target file before Edit or Write; the file tools enforce this precondition.',
-  'Use only native file tools currently exposed by the runtime for source and configuration changes; prefer Edit or apply_patch, use Write only when listed, and avoid shell redirection, cat, echo, heredocs, or generated patch scripts.',
+  'Use only native file tools currently exposed by the runtime for source and configuration changes; prefer Edit or apply_patch, and treat Write as absent unless it is visibly listed in the current tool set.',
+  'If Write is absent, never call it; create new files with apply_patch when available, or with one verified fallback route after reading the target state.',
+  'avoid shell redirection, cat, echo, heredocs, or generated patch scripts for source/config edits unless no native file editing tool is exposed; when a shell fallback is the only route, verify the exact file contents immediately afterward.',
   'Keep a TodoWrite checklist for multi-step work, preserve unrelated dirty changes, and continue from the existing diff after recovery instead of starting over.',
   'Correct tool schemas and preconditions after an error, never repeat an identical failing call, and verify the resulting state after any fallback.',
   'Do not report completion until relevant tests or runtime checks pass and the final diff has been inspected.',
@@ -1060,21 +1063,7 @@ function inferFailedToolCompletion(text: string, activity: string[]): string {
     return 'Agent completed with tool errors but produced no final answer.'
   }
 
-  if (hasRecoveredCompletionSignal(lowerText)) {
-    return ''
-  }
-
-  const failurePhrase =
-    /\b(cannot|can't|could not|unable|failed|failure|error|missing|required|invalid|not found|permission denied|timed out)\b|не удалось|не могу|не смог|ошибк|не найден|отсутств|требу|нет доступа|тайм-?аут/iu
-  if (!failurePhrase.test(lowerText)) {
-    return ''
-  }
-
-  return 'Agent completed with an unsuccessful final answer after one or more tool errors.'
-}
-
-function hasRecoveredCompletionSignal(lowerText: string): boolean {
-  return /\b(?:done|completed|fixed|implemented|created|updated|verified|tests? passed|successfully|saved|deployed)\b|готово|выполнен|исправлен|создан|обновлен|обновлён|сохранен|сохранён|проверен|тест[ыа]?\s+прошл/iu.test(lowerText)
+  return ''
 }
 
 function formatDuration(ms: number): string {
@@ -1094,27 +1083,33 @@ export function classifyAgentRunFailure(input: {
   timedOut: boolean
   activity?: string[]
 }): { kind: AgentRunFailureKind; diagnostic: string } {
-  const combined = [
+  const providerCombined = [
     input.stderr,
     input.text,
-    ...(input.activity || []),
   ].join('\n')
+  const activityCombined = (input.activity || []).join('\n')
+  const combined = [providerCombined, activityCombined].join('\n')
   const lower = combined.toLowerCase()
+  const hasToolActivity = /(tool result error|tool .*timed out|mcp server .*timed out|mcp.*error|no such tool available|tool_use_error)/i.test(activityCombined)
 
   let kind: AgentRunFailureKind = 'unknown'
-  if (/(429|rate[_ -]?limit|too many requests|quota)/i.test(combined)) {
+  if (/(429|rate[_ -]?limit|too many requests|quota)/i.test(providerCombined)
+    || /api retry:[^\n]*\b(?:429|rate[_ -]?limit|too many requests|quota)\b/i.test(activityCombined)
+  ) {
     kind = 'rate_limit'
-  } else if (/(content[^\n]{0,80}(?:flagged|policy|blocked|rejected)|flagged for possible cybersecurity risk|cybersecurity risk|safety policy|policy violation|trusted access for cyber|request[^\n]{0,80}flagged)/i.test(combined)) {
+  } else if (/(content[^\n]{0,80}(?:flagged|policy|blocked|rejected)|flagged for possible cybersecurity risk|cybersecurity risk|safety policy|policy violation|trusted access for cyber|request[^\n]{0,80}flagged)/i.test(providerCombined)) {
     kind = 'content_policy'
-  } else if (/(401|unauthori[sz]ed|authentication_failed|invalid api key|bad api key|billing_error|(?:provider|api|request)[^\n]{0,80}forbidden|forbidden[^\n]{0,80}(?:provider|api key|token|authentication))/i.test(combined)) {
+  } else if (/(cannot be used with root\/sudo privileges|bypasspermissions|dangerously-skip-permissions|invalid (?:cli )?(?:flag|option|argument)|unknown (?:cli )?(?:flag|option)|gateway child configuration|permission mode .*disabled)/i.test(providerCombined)) {
+    kind = 'runtime_configuration'
+  } else if (/(401|unauthori[sz]ed|authentication_failed|invalid api key|bad api key|billing_error|(?:provider|api|request)[^\n]{0,80}forbidden|forbidden[^\n]{0,80}(?:provider|api key|token|authentication))/i.test(providerCombined)) {
     kind = 'auth'
-  } else if (/(model(?:\s+id)?[^\n]{0,80}(?:not found|unknown|does not exist|404)|(?:unknown|missing|invalid)[ _-]?model|model_not_found|404[^\n]{0,80}model)/i.test(combined)) {
+  } else if (/(model(?:\s+id)?[^\n]{0,80}(?:not found|unknown|does not exist|404)|(?:unknown|missing|invalid)[ _-]?model|model_not_found|404[^\n]{0,80}model)/i.test(providerCombined)) {
     kind = 'model_not_found'
   } else if (/(error_max_turns|maximum number of turns|reached max turns)/i.test(combined)) {
     kind = 'max_turns'
-  } else if (/(tool result error|tool .*timed out|mcp server .*timed out|mcp.*error)/i.test(combined)) {
+  } else if (hasToolActivity || /(no such tool available|tool_use_error)/i.test(providerCombined)) {
     kind = 'tool_error'
-  } else if (/(400|invalid_request|bad request|invalid request)/i.test(combined)) {
+  } else if (/(400|invalid_request|bad request|invalid request)/i.test(providerCombined)) {
     kind = 'provider_request'
   } else if (input.timedOut) {
     kind = 'timeout'
@@ -1150,6 +1145,8 @@ function buildFailureDiagnostic(
     lines.push('Provider did not accept the selected model. Load provider models or set a known model id.')
   } else if (kind === 'content_policy') {
     lines.push('Provider safety/content policy rejected the request. Do not retry the same payload blindly; switch to an authorized provider or narrow the request to benign diagnostics.')
+  } else if (kind === 'runtime_configuration') {
+    lines.push('The child agent runtime rejected its own configuration before it could work. Fix runner flags/env first; recovery retries cannot repair this inside the failed child run.')
   } else if (kind === 'provider_request') {
     lines.push('Provider rejected the request shape. Check base URL compatibility and whether the selected model supports the requested tool/message format.')
   } else if (kind === 'max_turns') {

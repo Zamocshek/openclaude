@@ -88,6 +88,9 @@ export type AgentGatewayConfig = {
 }
 
 export const AGENT_GATEWAY_CONFIG_FILE = 'agent-gateway.json'
+const MIN_RUNNER_TIMEOUT_MS = 1_000
+const MAX_RUNNER_TIMEOUT_MS = 4 * 60 * 60 * 1000
+const MAX_RUNNER_TURNS = 2_000
 
 export function generateAgentGatewayApiKey(): string {
   return `ocag_${randomBytes(24).toString('base64url')}`
@@ -200,6 +203,21 @@ function normalizePermissionMode(value: unknown): AgentGatewayPermissionMode {
     return value
   }
   return 'default'
+}
+
+function normalizeFiniteNumber(
+  value: unknown,
+  fallback: number,
+  options: { min: number; max: number; integer?: boolean },
+): number {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim()
+      ? Number(value)
+      : Number.NaN
+  if (!Number.isFinite(parsed)) return fallback
+  const normalized = options.integer ? Math.floor(parsed) : parsed
+  return Math.min(options.max, Math.max(options.min, normalized))
 }
 
 export function normalizeAgentGatewayConfig(
@@ -361,10 +379,15 @@ export function normalizeAgentGatewayConfig(
     },
     runner: {
       cwd: String(runner.cwd || '').trim() || undefined,
-      maxTurns: Math.max(1, Number(runner.maxTurns || defaults.runner.maxTurns)),
-      timeoutMs: Math.max(
-        1_000,
-        Number(runner.timeoutMs || defaults.runner.timeoutMs),
+      maxTurns: normalizeFiniteNumber(
+        runner.maxTurns,
+        defaults.runner.maxTurns,
+        { min: 1, max: MAX_RUNNER_TURNS, integer: true },
+      ),
+      timeoutMs: normalizeFiniteNumber(
+        runner.timeoutMs,
+        defaults.runner.timeoutMs,
+        { min: MIN_RUNNER_TIMEOUT_MS, max: MAX_RUNNER_TIMEOUT_MS },
       ),
       permissionMode: normalizePermissionMode(runner.permissionMode),
       disableTools: Boolean(runner.disableTools),

@@ -1,5 +1,5 @@
 import type { Tools } from '../../Tool.js'
-import { resolveAgentTools } from '../../tools/AgentTool/agentToolUtils.js'
+import { permissionRuleValueFromString } from '../../utils/permissions/permissionRuleParser.js'
 import type {
   AgentDefinition,
   CustomAgentDefinition,
@@ -83,11 +83,10 @@ export function validateAgent(
       )
     }
 
-    // Check for invalid tools
-    const resolvedTools = resolveAgentTools(agent, availableTools, false)
+    const invalidTools = getInvalidAgentToolSpecs(agent.tools, availableTools)
 
-    if (resolvedTools.invalidTools.length > 0) {
-      errors.push(`Invalid tools: ${resolvedTools.invalidTools.join(', ')}`)
+    if (invalidTools.length > 0) {
+      errors.push(`Invalid tools: ${invalidTools.join(', ')}`)
     }
   }
 
@@ -106,4 +105,19 @@ export function validateAgent(
     errors,
     warnings,
   }
+}
+
+function getInvalidAgentToolSpecs(
+  toolSpecs: string[] | undefined,
+  availableTools: Tools,
+): string[] {
+  if (toolSpecs === undefined) return []
+  const available = new Set(availableTools.map(tool => tool.name))
+  const invalid: string[] = []
+  for (const spec of toolSpecs) {
+    const { toolName } = permissionRuleValueFromString(String(spec).trim())
+    if (!toolName || toolName === '*') continue
+    if (!available.has(toolName)) invalid.push(spec)
+  }
+  return invalid
 }

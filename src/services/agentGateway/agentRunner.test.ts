@@ -11,6 +11,7 @@ import {
   hasCodingTaskIntent,
   isIgnorablePostSuccessStderr,
   normalizeMessageContent,
+  runOpenClaudeAgent,
   summarizeStreamJsonProgress,
   type StreamProgressContext,
 } from './agentRunner.js'
@@ -156,7 +157,8 @@ describe('agent gateway prompt builder', () => {
 
     expect(systemPrompt).toContain('invoke the code Skill before editing')
     expect(systemPrompt).toContain('each existing target file before Edit or Write')
-    expect(systemPrompt).toContain('use Write only when listed')
+    expect(systemPrompt).toContain('treat Write as absent unless it is visibly listed')
+    expect(systemPrompt).toContain('If Write is absent, never call it')
     expect(systemPrompt).toContain('avoid shell redirection')
     expect(systemPrompt).toContain('Keep a TodoWrite checklist')
     expect(systemPrompt).toContain('relevant tests or runtime checks pass')
@@ -385,6 +387,31 @@ describe('agent gateway prompt builder', () => {
     expect(failure.diagnostic).toContain('safety/content policy')
   })
 
+  test('classifies child runtime configuration errors as non-retryable setup state', () => {
+    const failure = classifyAgentRunFailure({
+      text: '',
+      stderr: '--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons',
+      exitCode: 1,
+      timedOut: false,
+      activity: ['runtime starting'],
+    })
+
+    expect(failure.kind).toBe('runtime_configuration')
+    expect(failure.diagnostic).toContain('rejected its own configuration')
+  })
+
+  test('classifies missing tool calls as tool errors instead of generic execution', () => {
+    const failure = classifyAgentRunFailure({
+      text: '',
+      stderr: '<tool_use_error>Error: No such tool available: Write</tool_use_error>',
+      exitCode: 1,
+      timedOut: false,
+      activity: ['Write: "/workspace/file.ts"'],
+    })
+
+    expect(failure.kind).toBe('tool_error')
+  })
+
   test('classifies zero-exit failed tool completions as tool errors', () => {
     const failure = classifyAgentRunFailure({
       text: 'Не удалось создать файл: missing required parameter content.',
@@ -399,6 +426,70 @@ describe('agent gateway prompt builder', () => {
 
     expect(failure.kind).toBe('tool_error')
     expect(failure.diagnostic).toContain('Recent activity')
+  })
+
+  test('keeps zero-exit diagnostic answers deliverable after tool errors', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-fake-cli-'))
+    const fakeCli = join(cwd, 'fake-cli.cjs')
+    await writeFile(fakeCli, [
+      'const events = [',
+      '  { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_1", name: "Write", input: { file_path: "/workspace/file.ts" } }] } },',
+      '  { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: true, content: [{ type: "text", text: "No such tool available: Write" }] }] } },',
+      '  { type: "result", subtype: "success", is_error: false, result: "Fixed part of the task, but tests failed." }',
+      ']',
+      'for (const event of events) console.log(JSON.stringify(event))',
+    ].join('\n'))
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = `"${process.execPath}" "${fakeCli}"`
+    try {
+      const result = await runOpenClaudeAgent({
+        prompt: 'Fix code and run tests.',
+        config: getDefaultAgentGatewayConfig(),
+        cwd,
+        streamEvents: true,
+        suppressObservers: true,
+      })
+
+      expect(result.exitCode).toBe(0)
+      expect(result.text).toContain('tests failed')
+      expect(result.failureKind).toBeUndefined()
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+    }
+  })
+
+  test('does not misclassify tool auth and rate-limit failures as provider state', () => {
+    const toolUnauthorized = classifyAgentRunFailure({
+      text: '',
+      stderr: '',
+      exitCode: 1,
+      timedOut: false,
+      activity: [
+        'mcp_github_get_issue: "{}"',
+        'tool result error (mcp_github_get_issue): 401 unauthorized',
+      ],
+    })
+    const toolRateLimit = classifyAgentRunFailure({
+      text: '',
+      stderr: '',
+      exitCode: 1,
+      timedOut: false,
+      activity: [
+        'web_url_read: "https://example.test"',
+        'tool result error (web_url_read): 429 rate limited',
+      ],
+    })
+    const providerUnauthorized = classifyAgentRunFailure({
+      text: '',
+      stderr: 'API Error: 401 unauthorized: invalid api key',
+      exitCode: 1,
+      timedOut: false,
+    })
+
+    expect(toolUnauthorized.kind).toBe('tool_error')
+    expect(toolRateLimit.kind).toBe('tool_error')
+    expect(providerUnauthorized.kind).toBe('auth')
   })
 
   test('ignores late transient fetch stderr after stream-json success', () => {
