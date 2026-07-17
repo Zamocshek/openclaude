@@ -456,6 +456,10 @@ export function applyAgentGatewayEnvOverrides(
   const telegramReplyWithTranscript = parseEnvBoolean(
     env.OPENCLAUDE_TELEGRAM_REPLY_WITH_TRANSCRIPT,
   )
+  const telegramMirrorApiResponses = parseEnvBoolean(
+    env.OPENCLAUDE_TELEGRAM_MIRROR_API_RESPONSES ??
+      env.OPENCLAUDE_TELEGRAM_MIRROR_AGENT_API_RESPONSES,
+  )
   const ouroborosEnabled = parseEnvBoolean(env.OPENCLAUDE_OUROBOROS_ENABLED)
   const consciousnessEnabled = parseEnvBoolean(
     env.OPENCLAUDE_CONSCIOUSNESS_ENABLED,
@@ -508,6 +512,8 @@ export function applyAgentGatewayEnvOverrides(
         env.OPENCLAUDE_TELEGRAM_ALLOWED_USER_IDS !== undefined
           ? splitEnvList(env.OPENCLAUDE_TELEGRAM_ALLOWED_USER_IDS)
           : config.telegram.allowedUserIds,
+      mirrorAgentApiResponses:
+        telegramMirrorApiResponses ?? config.telegram.mirrorAgentApiResponses,
       downloadFiles:
         telegramDownloadFiles ?? config.telegram.downloadFiles,
       maxDownloadBytes:

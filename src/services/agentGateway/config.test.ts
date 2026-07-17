@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  applyAgentGatewayEnvOverrides,
   getDefaultAgentGatewayConfig,
   normalizeAgentGatewayConfig,
 } from './config.js'
@@ -28,5 +29,19 @@ describe('agent gateway config normalization', () => {
 
     expect(config.runner.maxTurns).toBe(2000)
     expect(config.runner.timeoutMs).toBe(4 * 60 * 60 * 1000)
+  })
+
+  test('allows env to disable Telegram mirroring for API responses', () => {
+    const config = normalizeAgentGatewayConfig({
+      telegram: {
+        mirrorAgentApiResponses: true,
+      },
+    })
+
+    const next = applyAgentGatewayEnvOverrides(config, {
+      OPENCLAUDE_TELEGRAM_MIRROR_API_RESPONSES: '0',
+    } as NodeJS.ProcessEnv)
+
+    expect(next.telegram.mirrorAgentApiResponses).toBe(false)
   })
 })
