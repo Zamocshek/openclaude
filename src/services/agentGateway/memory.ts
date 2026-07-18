@@ -1679,7 +1679,9 @@ export async function buildMemoryContextSection(options: {
   userProfileEnabled?: boolean
   writeApproval?: boolean
   maxChars?: number
+  referenceDocs?: boolean
 } = {}): Promise<string> {
+  const includeReferenceDocs = options.referenceDocs !== false
   const [
     curatedMemory,
     scratchpad,
@@ -1695,9 +1697,9 @@ export async function buildMemoryContextSection(options: {
     loadIdentity(),
     loadDialogueBlocks(),
     loadPatterns(),
-    loadBible(),
-    loadArchitecture(),
-    loadRepoGuide(),
+    includeReferenceDocs ? loadBible() : Promise.resolve(''),
+    includeReferenceDocs ? loadArchitecture() : Promise.resolve(''),
+    includeReferenceDocs ? loadRepoGuide() : Promise.resolve(''),
   ])
 
   const sections: Array<{

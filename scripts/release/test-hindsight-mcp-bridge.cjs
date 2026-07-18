@@ -58,6 +58,23 @@ function startMockHindsight() {
         })
         return
       }
+      if (request.method === 'GET' && url.pathname.endsWith('/memories/list')) {
+        const query = (url.searchParams.get('q') || '').toLowerCase()
+        const items = memories
+          .map((item, index) => ({
+            id: `memory-${index + 1}`,
+            text: item.content,
+            fact_type: 'experience',
+            state: 'valid',
+          }))
+          .filter(item => !query || item.text.toLowerCase().includes(query))
+        writeJson(response, 200, { items, total: items.length })
+        return
+      }
+      if (request.method === 'PATCH' && /\/memories\/[^/]+$/.test(url.pathname)) {
+        writeJson(response, 200, { state: 'invalidated' })
+        return
+      }
       if (request.method === 'POST' && url.pathname.endsWith('/reflect')) {
         const body = await readJson(request)
         writeJson(response, 200, {
@@ -112,7 +129,7 @@ async function main() {
     await client.connect(transport)
     const tools = await client.listTools()
     const toolNames = tools.tools.map(tool => tool.name)
-    for (const expected of ['hindsight_health', 'hindsight_retain', 'hindsight_recall', 'hindsight_reflect', 'hindsight_consolidate']) {
+    for (const expected of ['hindsight_health', 'hindsight_retain', 'hindsight_recall', 'hindsight_reflect', 'hindsight_consolidate', 'hindsight_forget']) {
       if (!toolNames.includes(expected)) throw new Error(`Missing tool: ${expected}`)
     }
 
@@ -143,6 +160,12 @@ async function main() {
 
     const consolidate = textContent(await client.callTool({ name: 'hindsight_consolidate', arguments: {} }))
     if (!consolidate.includes('mock-consolidate')) throw new Error(`Unexpected consolidate result: ${consolidate}`)
+
+    const forget = textContent(await client.callTool({
+      name: 'hindsight_forget',
+      arguments: { query: 'Camofox' },
+    }))
+    if (!forget.includes('1 memory fact(s) invalidated')) throw new Error(`Unexpected forget result: ${forget}`)
 
     console.log('HINDSIGHT_MCP_BRIDGE_SMOKE_OK')
   } finally {

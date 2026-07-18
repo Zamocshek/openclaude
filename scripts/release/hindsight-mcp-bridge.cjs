@@ -3,13 +3,15 @@
 const { existsSync, readFileSync } = require('node:fs')
 const { createRequire } = require('node:module')
 const { resolve } = require('node:path')
+const { pathToFileURL } = require('node:url')
 
 function runtimeRequire() {
   return existsSync('/app/package.json') ? createRequire('/app/package.json') : require
 }
 
 async function importRuntimeModule(specifier) {
-  return import(runtimeRequire().resolve(specifier))
+  const resolved = runtimeRequire().resolve(specifier)
+  return import(pathToFileURL(resolved).href)
 }
 
 function hydrateEnvFromDotEnv() {
@@ -236,6 +238,68 @@ async function consolidate(args) {
   return compactJson(data)
 }
 
+async function listMemories(args = {}) {
+  const params = new URLSearchParams()
+  if (args.type) params.set('type', String(args.type))
+  if (args.q) params.set('q', String(args.q))
+  params.set('limit', String(Math.min(1_000, Math.max(1, Number(args.limit || 100)))))
+  params.set('offset', String(Math.max(0, Number(args.offset || 0))))
+  const suffix = params.toString() ? `?${params}` : ''
+  return hindsightRequest(`/v1/default/banks/${bankId(args)}/memories/list${suffix}`)
+}
+
+async function invalidateMemory(args = {}) {
+  const id = String(args.memory_id || args.memoryId || '').trim()
+  if (!id) throw new Error('memory_id is required')
+  const data = await hindsightRequest(
+    `/v1/default/banks/${bankId(args)}/memories/${encodeURIComponent(id)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        state: 'invalidated',
+        reason: String(args.reason || 'User requested removal from active memory.'),
+      }),
+    },
+  )
+  return `Invalidated Hindsight memory ${id}; it is excluded from recall, consolidation, and graph links.\n${compactJson(data)}`
+}
+
+async function forget(args = {}) {
+  const query = String(args.query || '').trim()
+  const ids = Array.isArray(args.memory_ids || args.memoryIds)
+    ? (args.memory_ids || args.memoryIds).map(value => String(value).trim()).filter(Boolean)
+    : []
+  if (!query && ids.length === 0) {
+    throw new Error('query or memory_ids is required')
+  }
+
+  const candidates = ids.length > 0
+    ? ids.map(id => ({ id, fact_type: 'unknown' }))
+    : ((await listMemories({ ...args, q: query, limit: args.limit || 1_000 })).items || [])
+  const mutable = candidates.filter(item =>
+    item && item.id && (!item.fact_type || ['world', 'experience'].includes(String(item.fact_type))),
+  )
+  const skipped = candidates.length - mutable.length
+  const results = []
+  for (const item of mutable) {
+    try {
+      results.push(await invalidateMemory({
+        ...args,
+        memory_id: item.id,
+        reason: args.reason || `User requested removal matching: ${query || item.id}`,
+      }))
+    } catch (error) {
+      results.push(`Failed to invalidate ${item.id}: ${compactError(error)}`)
+    }
+  }
+  return [
+    `Hindsight forget completed: ${mutable.length} memory fact(s) invalidated${skipped ? `, ${skipped} derived observation(s) skipped` : ''}.`,
+    'Invalidated facts are removed from active recall and graph links; Hindsight keeps them in its reversible archive.',
+    ...results,
+  ].join('\n')
+}
+
 const tools = [
   {
     name: 'hindsight_health',
@@ -308,6 +372,20 @@ const tools = [
       },
     },
   },
+  {
+    name: 'hindsight_forget',
+    description: 'Remove matching durable facts from active Hindsight recall and graph links. Uses reversible invalidation; never deletes unrelated memory.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Exact distinctive text to match.' },
+        memory_ids: { type: 'array', items: { type: 'string' } },
+        bank_id: { type: 'string' },
+        limit: { type: 'number', default: 1000 },
+        reason: { type: 'string' },
+      },
+    },
+  },
 ]
 
 async function main() {
@@ -340,6 +418,7 @@ async function main() {
       else if (name === 'hindsight_recall') text = await recall(args)
       else if (name === 'hindsight_reflect') text = await reflect(args)
       else if (name === 'hindsight_consolidate') text = await consolidate(args)
+      else if (name === 'hindsight_forget') text = await forget(args)
       else throw new Error(`Unknown tool: ${name}`)
       return { content: [{ type: 'text', text }] }
     } catch (error) {

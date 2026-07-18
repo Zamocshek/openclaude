@@ -6,6 +6,7 @@ const { resolve } = require('node:path')
 
 const REQUIRED_SERVERS = ['codegraph', 'searxng', 'context7']
 const NETWORK_TIMEOUT_MS = 10_000
+const SEARXNG_PREFLIGHT_ATTEMPTS = 5
 
 function readConfig(path) {
   try {
@@ -29,16 +30,24 @@ async function checkSearxng() {
   if (process.argv.includes('--offline')) return
   const base = process.env.SEARXNG_URL || 'http://127.0.0.1:18088'
   const healthUrl = new URL('/healthz', base.endsWith('/') ? base : `${base}/`)
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS)
-  try {
-    const response = await fetch(healthUrl, { signal: controller.signal })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  } catch (error) {
-    throw new Error(`SearXNG health check failed at ${healthUrl.origin}: ${error instanceof Error ? error.message : String(error)}`)
-  } finally {
-    clearTimeout(timer)
+  let lastError = new Error('unknown error')
+  for (let attempt = 1; attempt <= SEARXNG_PREFLIGHT_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS)
+    try {
+      const response = await fetch(healthUrl, { signal: controller.signal })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      return
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (attempt < SEARXNG_PREFLIGHT_ATTEMPTS) {
+        await new Promise(resolve => setTimeout(resolve, attempt * 1_000))
+      }
+    } finally {
+      clearTimeout(timer)
+    }
   }
+  throw new Error(`SearXNG health check failed at ${healthUrl.origin} after ${SEARXNG_PREFLIGHT_ATTEMPTS} attempts: ${lastError.message}`)
 }
 
 async function main() {

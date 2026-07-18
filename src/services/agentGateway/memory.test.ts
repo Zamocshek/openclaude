@@ -313,4 +313,13 @@ describe('agent gateway curated memory', () => {
     })
   })
 
+  test('can omit static reference documents from the active Telegram memory view', async () => {
+    await withGatewayMemoryState(async () => {
+      const context = await buildMemoryContextSection({ referenceDocs: false })
+      expect(context).not.toContain('Constitution (BIBLE.md)')
+      expect(context).not.toContain('Architecture (ARCHITECTURE.md)')
+      expect(context).not.toContain('Repository Guide (REPO_GUIDE.md)')
+    })
+  })
+
 })

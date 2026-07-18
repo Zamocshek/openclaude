@@ -129,6 +129,7 @@ const HINDSIGHT_APPEND_SYSTEM_PROMPT = [
   'After completing meaningful work, learning a stable preference, fixing a recurring bug, or changing how this agent should operate, call hindsight_retain with compact content and useful tags.',
   `When the user explicitly asks to remember/save memory, including words such as "remember", "save to memory", "\u0437\u0430\u043f\u043e\u043c\u043d\u0438", "\u043f\u0430\u043c\u044f\u0442\u044c", or "\u0441\u043e\u0445\u0440\u0430\u043d\u0438", call hindsight_retain when it is available and do not rely on a text claim alone.`,
   'Use hindsight_reflect for synthesis, background consciousness summaries, evolution reviews, and deeper analysis over retained memories.',
+  'When the user asks to forget or delete a durable memory, use hindsight_forget with a distinctive query or exact memory_ids. Never create a new retain entry claiming that deletion happened.',
   'Do not claim that memory was read or saved unless the Hindsight tool call succeeded.',
 ].join(' ')
 const LIFE_RPG_APPEND_SYSTEM_PROMPT = [

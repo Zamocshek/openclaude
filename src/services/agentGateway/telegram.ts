@@ -5896,6 +5896,10 @@ export async function buildTelegramAgentPromptWithMemory(input: {
     buildMemoryContextSection({
       ...memoryOptions,
       maxChars: getMemoryContextMaxChars(input.model),
+      // Static repository references are available through the agent's file
+      // tools. Injecting them into every Telegram turn duplicates the CLI
+      // system context and causes premature compaction on short requests.
+      referenceDocs: false,
     }).catch(() => ''),
     buildReflectionContextSection().catch(() => ''),
     buildTelegramCronContext(input.chatId).catch(() => ''),
