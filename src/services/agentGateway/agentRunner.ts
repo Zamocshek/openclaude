@@ -98,6 +98,8 @@ const CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT = [
 const CODING_EXECUTION_APPEND_SYSTEM_PROMPT = [
   'For every request that creates, changes, reviews, debugs, deploys, or verifies code, invoke the code Skill before editing.',
   'Read repository instructions, git status, and each existing target file before Edit or Write; the file tools enforce this precondition.',
+  'Before every individual Edit, re-read that exact target file immediately beforehand and copy a unique old_string from the current output. Never edit from a summary, a stale read, or an assumed date/value.',
+  'For repeated fields in logs, diaries, and trackers, include the nearest unique heading or adjacent lines in old_string. Do not use replace_all unless every matching occurrence must change; after a rejected Edit, re-read before one corrected retry.',
   'Use only native file tools currently exposed by the runtime for source and configuration changes; prefer Edit or apply_patch, and treat Write as absent unless it is visibly listed in the current tool set.',
   'If Write is absent, never call it; create new files with apply_patch when available, or with one verified fallback route after reading the target state.',
   'avoid shell redirection, cat, echo, heredocs, or generated patch scripts for source/config edits unless no native file editing tool is exposed; when a shell fallback is the only route, verify the exact file contents immediately afterward.',

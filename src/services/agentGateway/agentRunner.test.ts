@@ -186,6 +186,8 @@ describe('agent gateway prompt builder', () => {
 
     expect(systemPrompt).toContain('invoke the code Skill before editing')
     expect(systemPrompt).toContain('each existing target file before Edit or Write')
+    expect(systemPrompt).toContain('Before every individual Edit, re-read that exact target file immediately beforehand')
+    expect(systemPrompt).toContain('nearest unique heading or adjacent lines')
     expect(systemPrompt).toContain('treat Write as absent unless it is visibly listed')
     expect(systemPrompt).toContain('If Write is absent, never call it')
     expect(systemPrompt).toContain('avoid shell redirection')

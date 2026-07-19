@@ -952,7 +952,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(text).not.toContain('waiting for model/tool output')
   })
 
-  test('marks tool errors as recovered only after a successful run', () => {
+  test('hides recovered edit validation errors after a successful run', () => {
     const event = {
       label: 'tool result error (Write): Read the file first',
       count: 1,
@@ -970,9 +970,20 @@ describe('agent gateway Telegram bridge helpers', () => {
       events: [event],
     })
 
-    expect(completed).toContain('recovered tool warning (Write)')
+    expect(completed).not.toContain('recovered tool warning (Write)')
     expect(completed).not.toContain('tool result error')
     expect(failed).toContain('tool result error (Write)')
+  })
+
+  test('keeps meaningful recovered tool warnings visible after a successful run', () => {
+    const completed = formatTelegramProgressText({
+      status: 'completed',
+      phase: 'Done. Sending response.',
+      startedAt: Date.now() - 2_000,
+      events: [{ label: 'tool result error (Bash): Exit code 1', count: 1 }],
+    })
+
+    expect(completed).toContain('recovered tool warning (Bash): Exit code 1')
   })
 
   test('switches provider profile without carrying old endpoint into codex', () => {

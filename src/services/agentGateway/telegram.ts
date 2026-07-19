@@ -5682,6 +5682,11 @@ export function summarizeAgentProgressChunk(chunk: string): string[] {
   return events.slice(0, 8)
 }
 
+function isRecoveredEditValidationError(label: string): boolean {
+  if (!/^tool result error \((?:Edit|Write)(?::[^)]*)?\):/iu.test(label)) return false
+  return /(string to replace not found|found \d+ matches of the string to replace|read the file first)/iu.test(label)
+}
+
 export function formatTelegramProgressText(snapshot: TelegramProgressSnapshot): string {
   const model = snapshot.providerProfile?.model || ''
   const reasoning = snapshot.providerProfile?.provider === 'codex'
@@ -5698,14 +5703,18 @@ export function formatTelegramProgressText(snapshot: TelegramProgressSnapshot): 
     'Activity:',
   ]
 
-  if (snapshot.events.length === 0) {
+  const displayEvents = snapshot.status === 'completed'
+    ? snapshot.events.filter(event => !isRecoveredEditValidationError(event.label))
+    : snapshot.events
+
+  if (displayEvents.length === 0) {
     lines.push(
       snapshot.status === 'running'
         ? '- waiting for model/tool output'
         : '- no streamed model/tool activity captured',
     )
   } else {
-    for (const event of snapshot.events.slice(-14)) {
+    for (const event of displayEvents.slice(-14)) {
       const redactedLabel = redactAgentText(event.label)
       const label = snapshot.status === 'completed'
         ? redactedLabel.replace(/^tool result error\b/iu, 'recovered tool warning')
