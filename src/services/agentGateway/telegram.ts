@@ -240,6 +240,12 @@ type TelegramBotCommand = {
   description: string
 }
 
+type TelegramConversationSessions = Record<string, string>
+
+function telegramConversationSessionsPath(): string {
+  return join(getAgentGatewayStateDir(), 'telegram-conversation-sessions.json')
+}
+
 type RecentChatLogEntry = Record<string, unknown>
 
 export type TelegramProviderShortcut = {
@@ -314,6 +320,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/commands', description: 'show the same Telegram command reference' },
       { syntax: '/panel', description: 'open the button control panel', botDescription: 'Open agent control panel' },
       { syntax: '/control', description: 'open the same button control panel' },
+      { syntax: '/newchat', description: 'start a fresh chat context without deleting durable memory', botDescription: 'Start a new chat context' },
       { syntax: '/chatid', description: 'show the current chat ID' },
       { syntax: '/status', description: 'show gateway, workers, cron, budget, and Ouroboros status' },
       { syntax: '/transcribe', description: 'check voice/audio transcription availability' },
@@ -500,6 +507,9 @@ export class TelegramAgentBridge {
   private chatModes = new Map<string, TelegramResearchMode>()
   /** Last prompt per chatId — for /retry */
   private lastPrompts = new Map<string, { prompt: string; messageId: number }>()
+  private chatSessions = new Map<string, string>()
+  private chatSessionsLoaded: Promise<void> | undefined
+  private chatSessionsWrite = Promise.resolve()
 
   constructor(config: AgentGatewayConfig) {
     this.config = config
@@ -557,6 +567,71 @@ export class TelegramAgentBridge {
     this.taskQueues.clear()
     this.queuedTaskCounts.clear()
     this.chatQueueEpochs.clear()
+  }
+
+  private async ensureChatSessionsLoaded(): Promise<void> {
+    if (!this.chatSessionsLoaded) {
+      this.chatSessionsLoaded = (async () => {
+        try {
+          const raw = await readFile(telegramConversationSessionsPath(), 'utf8')
+          const parsed = JSON.parse(raw) as TelegramConversationSessions
+          for (const [chatId, sessionId] of Object.entries(parsed)) {
+            if (typeof sessionId === 'string' && sessionId) {
+              this.chatSessions.set(chatId, sessionId)
+            }
+          }
+        } catch {
+          // No stored session means this chat keeps its existing transcript.
+        }
+      })()
+    }
+    await this.chatSessionsLoaded
+  }
+
+  private async getChatSessionId(chatId: string): Promise<string | undefined> {
+    await this.ensureChatSessionsLoaded()
+    return this.chatSessions.get(chatId)
+  }
+
+  private async persistChatSessions(): Promise<void> {
+    const snapshot = JSON.stringify(Object.fromEntries(this.chatSessions), null, 2)
+    this.chatSessionsWrite = this.chatSessionsWrite
+      .catch(() => {})
+      .then(async () => {
+        await mkdir(getAgentGatewayStateDir(), { recursive: true })
+        await writeFile(telegramConversationSessionsPath(), `${snapshot}\n`, 'utf8')
+      })
+    await this.chatSessionsWrite
+  }
+
+  private async handleNewChatCommand(chatId: string): Promise<void> {
+    const task = this.activeTasks.get(chatId)
+    this.invalidateChatQueue(chatId)
+    this.chatModes.delete(chatId)
+    this.lastPrompts.delete(chatId)
+
+    if (task) {
+      task.controller.abort()
+      task.progress?.dispose()
+      this.activeTasks.delete(chatId)
+      try {
+        await this.callTelegram('editMessageText', {
+          chat_id: chatId,
+          message_id: task.messageId,
+          text: 'Task stopped: new chat context started.',
+        })
+      } catch {
+        // The progress message may already be complete or deleted.
+      }
+    }
+
+    await this.ensureChatSessionsLoaded()
+    this.chatSessions.set(chatId, randomUUID())
+    await this.persistChatSessions()
+    await this.sendMessage(
+      chatId,
+      'New chat context started. Previous dialogue history and queued tasks are cleared for future requests; durable memory, files, cron jobs, provider settings, and RPG records are unchanged.',
+    )
   }
 
   async sendHomeMessage(text: string): Promise<void> {
@@ -1021,6 +1096,11 @@ export class TelegramAgentBridge {
       return
     }
 
+    if (commandText === '/newchat') {
+      await this.handleNewChatCommand(chatId)
+      return
+    }
+
     if (text === '/chatid') {
       await this.sendMessage(chatId, `Chat ID: ${chatId}`)
       return
@@ -1333,9 +1413,11 @@ export class TelegramAgentBridge {
 
     const providerProfile = await loadProviderProfile()
     const replyContext = buildTelegramReplyContext(message)
+    const sessionId = await this.getChatSessionId(chatId)
     const conversationTranscript = await buildTelegramConversationTranscript(chatId, {
       excludeMessageId: message.message_id,
       model: providerProfile.model,
+      sessionId,
     })
 
     // Log the incoming message to chat log (for dialogue consolidation)
@@ -1343,6 +1425,7 @@ export class TelegramAgentBridge {
       direction: 'in',
       text: effectiveText || '(attachments only)',
       chatId,
+      ...(sessionId ? { sessionId } : {}),
       messageId: message.message_id,
       username: message.from?.username,
       ...(replyContext
@@ -1366,6 +1449,7 @@ export class TelegramAgentBridge {
         direction: 'out',
         text: bridgeHandled,
         chatId,
+        ...(sessionId ? { sessionId } : {}),
         exitCode: 0,
       })
       await this.sendMessage(chatId, bridgeHandled)
@@ -1460,7 +1544,7 @@ export class TelegramAgentBridge {
     }
 
     // Log the agent response to chat log
-    await appendChatLog(buildAgentChatLogOutput(result, chatId))
+    await appendChatLog(buildAgentChatLogOutput(result, chatId, sessionId))
 
     if (result.exitCode !== 0) {
       await recordTelegramError(chatId, 'agent-run', result)
@@ -1531,9 +1615,11 @@ export class TelegramAgentBridge {
       )
       const providerProfile = await loadProviderProfile()
       const replyContext = buildTelegramReplyContext(message)
+      const sessionId = await this.getChatSessionId(chatId)
       const conversationTranscript = await buildTelegramConversationTranscript(chatId, {
         excludeMessageId: message.message_id,
         model: providerProfile.model,
+        sessionId,
       })
 
       // Log the transcribed voice message to chat log
@@ -1541,6 +1627,7 @@ export class TelegramAgentBridge {
         direction: 'in',
         text: `[${candidate.type} transcribed] ${effectiveAgentText.slice(0, 500)}`,
         chatId,
+        ...(sessionId ? { sessionId } : {}),
         messageId: message.message_id,
         username: message.from?.username,
         ...(replyContext
@@ -1572,7 +1659,7 @@ export class TelegramAgentBridge {
       )
 
       // Log the agent response
-      await appendChatLog(buildAgentChatLogOutput(result, chatId))
+      await appendChatLog(buildAgentChatLogOutput(result, chatId, sessionId))
 
       if (result.exitCode !== 0) {
         await recordTelegramError(chatId, 'agent-run-audio', result)
@@ -3040,6 +3127,11 @@ export class TelegramAgentBridge {
         return
       }
 
+      if (data === 'conversation:new') {
+        await this.handleNewChatCommand(chatId)
+        return
+      }
+
       if (data === 'menu:mcp') {
         await this.editMcpMenu(query)
         return
@@ -4305,6 +4397,7 @@ function formatAgentFailureForTelegram(result: AgentRunResult): string {
 function buildAgentChatLogOutput(
   result: AgentRunResult,
   chatId: string,
+  sessionId?: string,
 ): Record<string, unknown> {
   const activity = result.activity?.slice(-20) || []
   const failureSummary = result.exitCode === 0
@@ -4323,6 +4416,7 @@ function buildAgentChatLogOutput(
       result.exitCode === 0 ? result.text : result.text || failureSummary,
     ).slice(0, 2000),
     chatId,
+    ...(sessionId ? { sessionId } : {}),
     exitCode: result.exitCode,
     timedOut: result.timedOut,
     durationMs: result.durationMs,
@@ -4383,6 +4477,7 @@ export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
       { text: 'Status', callback_data: 'control:status' },
       { text: 'Help', callback_data: 'control:help' },
     ],
+    [{ text: 'New chat', callback_data: 'conversation:new' }],
   ]
 }
 
@@ -4712,6 +4807,7 @@ function buildTelegramMemoryKeyboard(): TelegramInlineKeyboard {
       { text: 'Constitution', callback_data: 'memory:bible' },
       { text: 'Architecture', callback_data: 'memory:architecture' },
     ],
+    [{ text: 'New chat context', callback_data: 'conversation:new' }],
     [{ text: 'Control panel', callback_data: 'menu:control' }],
   ]
 }
@@ -5969,7 +6065,7 @@ export function formatTelegramReplyContext(context: TelegramReplyContext): strin
 
 async function buildTelegramConversationTranscript(
   chatId: string,
-  options: { excludeMessageId?: number | string; model?: string } = {},
+  options: { excludeMessageId?: number | string; model?: string; sessionId?: string } = {},
 ): Promise<string> {
   const maxChars = getTelegramConversationMaxChars(options.model)
   const entries = await loadChatLogTranscript({
@@ -5977,6 +6073,7 @@ async function buildTelegramConversationTranscript(
     limit: getTelegramConversationTurnLimit(),
     maxChars,
     excludeMessageId: options.excludeMessageId,
+    sessionId: options.sessionId,
   })
   return formatTelegramConversationTranscript(entries, { maxChars })
 }

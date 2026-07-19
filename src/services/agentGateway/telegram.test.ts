@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import {
@@ -88,6 +88,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('OpenClaude Telegram inference is online.')
     expect(help).toContain('/provider set <provider> <model> [base_url] [api_key]')
     expect(help).toContain('/panel - open the button control panel')
+    expect(help).toContain('/newchat - start a fresh chat context without deleting durable memory')
     expect(help).toContain('/mcp add <json> - import one or more mcpServers definitions')
     expect(help).toContain('/skills - browse the Skill Store with inline buttons')
     expect(help).toContain('/skill create <json> - create a persistent native SKILL.md')
@@ -113,6 +114,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands).toContainEqual({
       command: 'panel',
       description: 'Open agent control panel',
+    })
+    expect(commands).toContainEqual({
+      command: 'newchat',
+      description: 'Start a new chat context',
     })
     expect(commands).toContainEqual({
       command: 'mcp',
@@ -175,6 +180,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(controlActions).toContain('menu:runtime')
     expect(controlActions).toContain('menu:schedule')
     expect(controlActions).toContain('menu:memory')
+    expect(controlActions).toContain('conversation:new')
 
     const mcpActions = buildTelegramMcpKeyboard(servers).flat().map(button => button.callback_data)
     expect(mcpActions).toContain('mcp:view:searxng')
@@ -798,6 +804,27 @@ describe('agent gateway Telegram bridge helpers', () => {
 
     expect(secondRan).toBe(false)
     expect(sent.join('\n')).toContain('Queued tasks for this chat were cleared')
+  })
+
+  test('new chat creates a persistent transcript boundary without touching durable memory', async () => {
+    await withTempGatewayState(async stateDir => {
+      const bridge = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+      const sent: string[] = []
+      ;(bridge as any).sendMessage = async (_chatId: string, text: string) => {
+        sent.push(text)
+      }
+
+      await (bridge as any).handleNewChatCommand('42')
+
+      const sessionId = await (bridge as any).getChatSessionId('42')
+      expect(sessionId).toBeTruthy()
+      const persisted = JSON.parse(await readFile(
+        join(stateDir, 'telegram-conversation-sessions.json'),
+        'utf8',
+      ))
+      expect(persisted['42']).toBe(sessionId)
+      expect(sent.join('\n')).toContain('durable memory, files, cron jobs')
+    })
   })
 
   test('applies safe Telegram research mode prompts', () => {
