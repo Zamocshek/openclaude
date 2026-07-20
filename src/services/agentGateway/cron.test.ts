@@ -61,6 +61,8 @@ describe('agent gateway cron schedules', () => {
       kind: 'once',
       display: 'once in 30m',
     })
+    await expect(parseSchedule('61 24 * * *')).rejects.toThrow('Invalid duration')
+    await expect(parseSchedule('*/0 * * * *')).rejects.toThrow('Invalid duration')
   })
 
   test('computes future runs for interval and cron schedules', async () => {

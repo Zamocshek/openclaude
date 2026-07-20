@@ -505,6 +505,20 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(prompt).toContain('Never claim a Telegram reminder was created')
   })
 
+  test('forbids inferred personal history from being written as fact', () => {
+    const prompt = buildTelegramAgentPrompt({
+      chatId: '42',
+      messageId: 7,
+      text: 'Update the RPG system.',
+      attachments: [],
+    })
+
+    expect(prompt).toContain('## Personal record integrity')
+    expect(prompt).toContain('Personal history is factual data, not a place for inference')
+    expect(prompt).toContain('ask a concise clarifying question instead')
+    expect(prompt).toContain('user request to correct or delete a record is authoritative')
+  })
+
   test('extracts Telegram cron create directives and strips them from visible text', () => {
     const parsed = extractTelegramCronDirectives([
       'Готово.',

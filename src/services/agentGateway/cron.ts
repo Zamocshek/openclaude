@@ -73,7 +73,7 @@ export async function parseSchedule(schedule: string): Promise<CronSchedule> {
   }
 
   const parts = value.split(/\s+/)
-  if ((parts.length === 5 || parts.length === 6) && parts.every(isCronField)) {
+  if (isValidCronExpression(parts)) {
     return { kind: 'cron', expr: value, display: value }
   }
 
@@ -109,8 +109,35 @@ function parseDurationMinutes(value: string): number {
   return amount * 1440
 }
 
-function isCronField(field: string): boolean {
-  return /^[\d*,-/]+$/.test(field)
+function isValidCronExpression(parts: string[]): boolean {
+  if (parts.length !== 5 && parts.length !== 6) return false
+  const fields = parts.length === 6 ? parts : ['0', ...parts]
+  const ranges: Array<readonly [number, number]> = [
+    [0, 59],
+    [0, 59],
+    [0, 23],
+    [1, 31],
+    [1, 12],
+    [0, 6],
+  ]
+  return fields.every((field, index) => isValidCronField(field, ...ranges[index]!))
+}
+
+function isValidCronField(field: string, min: number, max: number): boolean {
+  return field.split(',').every(part => {
+    if (part === '*') return true
+    const step = part.match(/^\*\/(\d+)$/)
+    if (step) return Number(step[1]) > 0
+    const range = part.match(/^(\d+)-(\d+)$/)
+    if (range) {
+      const start = Number(range[1])
+      const end = Number(range[2])
+      return start >= min && end <= max && start <= end
+    }
+    if (!/^\d+$/.test(part)) return false
+    const value = Number(part)
+    return value >= min && value <= max
+  })
 }
 
 export async function loadCronJobs(): Promise<CronJob[]> {

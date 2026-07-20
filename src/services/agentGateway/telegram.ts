@@ -5881,6 +5881,14 @@ export function buildTelegramAgentPrompt(input: {
     )
   }
 
+  lines.push(
+    '',
+    '## Personal record integrity',
+    'Personal history is factual data, not a place for inference. Never create, update, or summarize a personal event, date, streak, counter, cause, trigger, achievement, score, diagnosis, or emotional state unless the user stated that exact fact in the current message, its explicit Telegram reply context, or the injected conversation transcript.',
+    'Do not turn a plan, reminder, concern, missing detail, or earlier assistant statement into a past event. If the source is absent or ambiguous, ask a concise clarifying question instead of writing to personal markdown files, persistent memory, or derived RPG statistics.',
+    'Keep proposals and templates clearly separate from historical records. A user request to correct or delete a record is authoritative; do not preserve an inferred claim merely because it appears in another agent-generated file.',
+  )
+
   // Inject memory context (scratchpad, identity, patterns) if available
   if (input.memoryContext) {
     lines.push('', '## Your persistent memory (Ouroboros consciousness system)', input.memoryContext)
