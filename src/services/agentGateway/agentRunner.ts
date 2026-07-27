@@ -12,7 +12,7 @@ import {
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { CODE_SKILL_PROMPT } from '../../skills/codingWorkflow.js'
 import { getReasoningEffortForModel } from '../api/providerConfig.js'
-import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
+import { prepareGatewayControlMcpConfig } from './gatewayControlMcp.js'
 import { redactAgentText } from './redaction.js'
 import {
   buildGatewaySubagentAppendPrompt,
@@ -268,7 +268,7 @@ export function buildAgentArgs(
     String(config.runner.maxTurns),
   ]
   const mcpConfigPath = config.runner.cwd
-    ? resolveEffectiveMcpConfigPath(config.runner.cwd)
+    ? prepareGatewayControlMcpConfig(config.runner.cwd)
     : undefined
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath)

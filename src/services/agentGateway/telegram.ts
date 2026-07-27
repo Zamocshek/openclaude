@@ -1411,18 +1411,6 @@ export class TelegramAgentBridge {
       return
     }
 
-    const delegatedTask = parseTelegramDelegatedTask(text)
-    if (delegatedTask) {
-      await this.handleDelegateCommand(chatId, message, delegatedTask)
-      return
-    }
-
-    const routingRequest = parseTelegramSubagentRoutingRequest(text)
-    if (routingRequest) {
-      await this.handleNaturalSubagentRoutingRequest(chatId, routingRequest)
-      return
-    }
-
     const audioCandidate = getAudioTranscriptionCandidate(message)
     if (audioCandidate && this.config.telegram.transcribeAudio) {
       await this.enqueueChatTask(
@@ -2181,42 +2169,6 @@ export class TelegramAgentBridge {
       chatId,
       'Usage:\n/subagents [status|on|off|list]\n/subagents parallel <1-8>\n/subagents set <role> <provider> <model> [base_url] [api_key]\n/subagents remove <role>\n/delegate <plan|code|review|explore> <task>',
     )
-  }
-
-  private async handleNaturalSubagentRoutingRequest(
-    chatId: string,
-    assignments: TelegramSubagentRouteAssignment[],
-  ): Promise<void> {
-    try {
-      const next = await updateAgentGatewayConfig(current => {
-        const routes = { ...current.subagents.routes }
-        for (const assignment of assignments) {
-          const previous = routes[assignment.role]
-          routes[assignment.role] = buildSubagentRoute(
-            assignment.provider,
-            assignment.model,
-            previous,
-          )
-        }
-        return {
-          ...current,
-          subagents: { ...current.subagents, enabled: true, routes },
-        }
-      })
-      this.config.subagents = next.subagents
-      const applied = assignments
-        .map(assignment => `${assignment.role}: ${assignment.provider}/${assignment.model}`)
-        .join('\n')
-      await this.sendMessage(
-        chatId,
-        `Subagent routing updated:\n${applied}\n\nUse /delegate <plan|code|review|explore> <task> to force a role for one task.`,
-      )
-    } catch (error) {
-      await this.sendMessage(
-        chatId,
-        `Could not update subagent routing: ${summarizeTelegramError(error)}`,
-      )
-    }
   }
 
   private async handleDelegateCommand(
@@ -5713,7 +5665,6 @@ function formatTelegramSubagentStatus(config: AgentGatewayConfig): string {
     '',
     'Roles: gateway-explore, gateway-plan, gateway-implement, gateway-review.',
     'Use /subagents set <role> <provider> <model> [base_url] [api_key] to change a route.',
-    'Natural language: "Для планирования DeepSeek Pro; для кода Codex GPT-5.6 Sol xhigh".',
     'Direct task: /delegate <plan|code|review|explore> <task>.',
   )
   return lines.join('\n').slice(0, 3900)
@@ -5734,114 +5685,6 @@ function normalizeSubagentRole(value: string): string | undefined {
   }
   if (aliases[name]) return aliases[name]
   return /^gateway-[a-z][a-z0-9-]{2,44}$/u.test(name) ? name : undefined
-}
-
-type TelegramSubagentRouteAssignment = {
-  role: string
-  provider: string
-  model: string
-}
-
-/**
- * Recognizes a concise natural-language routing request without sending it to
- * a model first. Requiring provider/model pairs keeps normal task messages
- * from accidentally changing persistent agent routing.
- */
-export function parseTelegramSubagentRoutingRequest(
-  text: string,
-): TelegramSubagentRouteAssignment[] | undefined {
-  const assignments: TelegramSubagentRouteAssignment[] = []
-  const sections = text.split(/[;\n]+/u)
-  for (const section of sections) {
-    const role = getNaturalSubagentRole(section)
-    const route = role ? parseNaturalSubagentRoute(section) : undefined
-    if (!role || !route) continue
-    if (!assignments.some(item => item.role === role)) {
-      assignments.push({ role, ...route })
-    }
-  }
-  return assignments.length > 0 ? assignments : undefined
-}
-
-export function parseTelegramDelegatedTask(text: string): string | undefined {
-  const match = text.trim().match(
-    /^(?:вызови|запусти|делегируй)\s+(?:саб[- ]?агент(?:а)?\s+)?([\p{L}-]+)\s*[:—-]\s*(.+)$/iu,
-  )
-  if (!match) return undefined
-  const role = getNaturalSubagentRole(match[1] || '')
-  const task = String(match[2] || '').trim()
-  return role && task ? `${role} ${task}` : undefined
-}
-
-function getNaturalSubagentRole(value: string): string | undefined {
-  const normalized = value.toLowerCase()
-  if (/планир|plan/u.test(normalized)) return 'gateway-plan'
-  if (/код|разработ|реализац|implement|coding|code/u.test(normalized)) return 'gateway-implement'
-  if (/ревью|проверк|аудит|review/u.test(normalized)) return 'gateway-review'
-  if (/исслед|поиск|изуч|explor|research/u.test(normalized)) return 'gateway-explore'
-  return undefined
-}
-
-function parseNaturalSubagentRoute(
-  section: string,
-): Pick<TelegramSubagentRouteAssignment, 'provider' | 'model'> | undefined {
-  const explicit = section.match(/\b([a-z][a-z0-9-]*)\s*\/\s*([a-z0-9._?=&:-]+)\b/iu)
-  if (explicit) {
-    return { provider: explicit[1]!.toLowerCase(), model: explicit[2]! }
-  }
-
-  const normalized = section.toLowerCase()
-  if (/(?:deepseek|дипсик)/u.test(normalized)) {
-    if (/(?:flash|флеш)/u.test(normalized)) {
-      return { provider: 'deepseek', model: 'deepseek-v4-flash' }
-    }
-    if (/(?:pro|про)/u.test(normalized)) {
-      return { provider: 'deepseek', model: 'deepseek-v4-pro' }
-    }
-  }
-
-  if (/(?:codex|chatgpt|gpt)/u.test(normalized)) {
-    const family = normalized.match(/(?:gpt[- ]?)?5[. -]?6\s*(sol|terra|luna)/iu)?.[1]?.toLowerCase()
-      || (/(?:gpt[- ]?)?5[. -]?5/u.test(normalized) ? '5.5' : undefined)
-    if (!family) return undefined
-    const base = family === '5.5' ? 'gpt-5.5' : `gpt-5.6-${family}`
-    const reasoning = normalized.match(/(?:reasoning\s*)?(low|medium|high|xhigh|max|ultra)/iu)?.[1]?.toLowerCase()
-    return { provider: 'codex', model: reasoning ? `${base}?reasoning=${reasoning}` : base }
-  }
-
-  if (/(?:lm\s*studio|gemma)/u.test(normalized)) {
-    return {
-      provider: 'lmstudio-lan',
-      model: /coder/u.test(normalized)
-        ? 'huihui-gemma-4-12b-coder-fable5-composer2.5-v1-abliterated'
-        : 'gemma-4-12b-obliterated',
-    }
-  }
-  return undefined
-}
-
-function buildSubagentRoute(
-  provider: string,
-  model: string,
-  previous?: AgentGatewaySubagentRoute,
-): AgentGatewaySubagentRoute {
-  const info = getTelegramProviderInfo(provider)
-  const baseUrl = String(
-    previous?.provider === provider ? previous.baseUrl : info.baseUrl ||
-      (provider === 'codex' ? 'https://chatgpt.com/backend-api/codex' : ''),
-  ).trim().replace(/\/+$/, '')
-  if (!baseUrl) throw new Error(`Provider ${provider} needs an explicit base_url.`)
-  return {
-    provider,
-    model,
-    baseUrl,
-    ...(previous?.provider === provider && previous.apiKey ? { apiKey: previous.apiKey } : {}),
-    ...(previous?.provider === provider && previous.apiKeyEnv
-      ? { apiKeyEnv: previous.apiKeyEnv }
-      : defaultSubagentApiKeyEnv(provider)
-        ? { apiKeyEnv: defaultSubagentApiKeyEnv(provider) }
-        : {}),
-  }
 }
 
 function defaultSubagentApiKeyEnv(provider: string): string | undefined {

@@ -221,11 +221,13 @@ Gateway subagents:
 - `/delegate <plan|code|review|explore> <task>` - force one named role for the
   current task. The parent agent invokes that role through its configured
   provider/model and integrates the result.
-- Natural-language assignments are also accepted in Telegram when a complete
-  provider/model is present. For example: `Для планирования DeepSeek Pro; для
-  кода Codex GPT-5.6 Sol xhigh`. This persists the two role routes and enables
-  subagents. For an arbitrary provider or endpoint, use the explicit
-  `/subagents set` command with its base URL.
+
+Every normal Gateway agent run also receives the built-in `gateway-control` MCP
+server. Its tools are `get_subagent_routing`, `configure_subagent_route`,
+`set_subagent_parallelism`, and `set_subagents_enabled`. The model uses those
+tools when a user describes a routing change in ordinary dialogue, then calls
+the native `Agent` tool for the relevant role. This is the authoritative path;
+Telegram commands are optional operator shortcuts, not phrase-based routing.
 
 The protected Gateway API also provides `GET` and `PATCH /api/subagents` for
 automation. It never returns API keys; routes can use an existing environment

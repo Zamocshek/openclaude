@@ -99,10 +99,12 @@ export function buildGatewaySubagentAppendPrompt(
   return [
     'Gateway multi-agent orchestration is enabled.',
     'For substantial work, first decide whether independent research, planning, implementation, or review can improve the result.',
+    'The gateway-control MCP tools are authoritative for inspecting or changing subagent routing, enablement, and parallelism. When the user asks to assign or mix providers/models by role, call configure_subagent_route instead of asking them to use a Telegram command or relying on phrase parsing. Never send literal API keys to those tools.',
     'Use the Agent tool with the configured gateway subagent_type roles below. Their provider and model are selected by the gateway, not by the parent model.',
     roleList,
     `Launch at most ${maxParallel} independent read-only delegates in parallel in one tool message. Never run multiple writer/implementation agents against the same files concurrently.`,
     'Use gateway-explore for codebase or evidence discovery, gateway-plan for an implementation plan, gateway-implement for a bounded implementation, and gateway-review for independent verification. Integrate and verify their reports yourself before answering.',
+    'A routing change is persisted for the next top-level Gateway run; do not claim it retroactively changes delegates already initialized in this run. Confirm the applied route, then use it on the user\'s next task or ask them to resend the task when they want the new model to execute it.',
     'Do not delegate trivial requests and do not claim a delegated action occurred unless the Agent tool result confirms it.',
   ].join('\n')
 }

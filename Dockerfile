@@ -70,6 +70,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
+# Keep runtime script edits after the expensive system-package layer so MCP
+# changes do not trigger a fresh apt install during every Docker rebuild.
+COPY scripts/gateway-control-mcp.mjs scripts/gateway-control-mcp.mjs
+
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
     && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx

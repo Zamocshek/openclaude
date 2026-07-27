@@ -42,8 +42,6 @@ import {
   applyTelegramResearchMode,
   repairLikelyMojibakeText,
   parseTelegramSkillCreateInput,
-  parseTelegramDelegatedTask,
-  parseTelegramSubagentRoutingRequest,
   summarizeAgentProgressChunk,
   safeTelegramFileName,
   selectLargestPhoto,
@@ -169,27 +167,6 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands.every(item => !item.command.startsWith('/'))).toBe(true)
     expect(commands.every(item => item.command.length <= 32)).toBe(true)
     expect(commands.every(item => item.description.length <= 256)).toBe(true)
-  })
-
-  test('accepts natural-language subagent model assignments and explicit delegation', () => {
-    expect(parseTelegramSubagentRoutingRequest(
-      'Для планирования DeepSeek Pro; для кода Codex GPT-5.6 Sol xhigh',
-    )).toEqual([
-      { role: 'gateway-plan', provider: 'deepseek', model: 'deepseek-v4-pro' },
-      { role: 'gateway-implement', provider: 'codex', model: 'gpt-5.6-sol?reasoning=xhigh' },
-    ])
-    expect(parseTelegramSubagentRoutingRequest(
-      'Для ревью deepseek/deepseek-v4-flash',
-    )).toEqual([
-      { role: 'gateway-review', provider: 'deepseek', model: 'deepseek-v4-flash' },
-    ])
-    expect(parseTelegramSubagentRoutingRequest('Почини ошибку в API.')).toBeUndefined()
-    expect(parseTelegramDelegatedTask('Вызови саб-агента планирования: составь план миграции')).toBe(
-      'gateway-plan составь план миграции',
-    )
-    expect(parseTelegramDelegatedTask('Запусти code: исправь тесты')).toBe(
-      'gateway-implement исправь тесты',
-    )
   })
 
   test('builds button panels for MCP and runtime controls without exposing secrets', () => {

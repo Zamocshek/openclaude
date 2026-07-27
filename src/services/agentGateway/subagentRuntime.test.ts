@@ -81,4 +81,31 @@ describe('gateway subagent runtime', () => {
 
     expect(prepareGatewaySubagentRuntime(config, {})).toBeUndefined()
   })
+
+  test('directs model-driven routing changes through the gateway-control MCP tools', () => {
+    const defaults = getDefaultAgentGatewayConfig()
+    const config = normalizeAgentGatewayConfig({
+      ...defaults,
+      subagents: {
+        enabled: true,
+        maxParallel: 3,
+        routes: {
+          'gateway-explore': {
+            provider: 'deepseek',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.com/v1',
+            apiKeyEnv: 'DEEPSEEK_API_KEY',
+          },
+        },
+      },
+    })
+    const runtime = prepareGatewaySubagentRuntime(config, {
+      DEEPSEEK_API_KEY: 'deepseek-test-key',
+    })
+    const prompt = buildGatewaySubagentAppendPrompt(runtime, config.subagents.maxParallel)
+
+    expect(prompt).toContain('gateway-control MCP tools are authoritative')
+    expect(prompt).toContain('configure_subagent_route')
+    expect(prompt).toContain('persisted for the next top-level Gateway run')
+  })
 })

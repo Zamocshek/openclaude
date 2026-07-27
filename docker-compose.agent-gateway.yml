@@ -191,6 +191,10 @@ services:
         source: "${OPENCLAUDE_HOST_CODEX_DIR:-${USERPROFILE}/.codex}"
         target: /run/codex
       - ./:/workspace
+      # Keep the running Gateway aligned with the checked-out, compiled build.
+      # This avoids rebuilding the base OS layer for ordinary Gateway updates.
+      - ./dist/cli.mjs:/app/dist/cli.mjs:ro
+      - ./scripts/gateway-control-mcp.mjs:/app/scripts/gateway-control-mcp.mjs:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     working_dir: /workspace
