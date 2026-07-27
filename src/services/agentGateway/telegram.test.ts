@@ -113,7 +113,12 @@ describe('agent gateway Telegram bridge helpers', () => {
     )
     expect(help).toContain('Hindsight: http://localhost:8888')
     expect(help).toContain('OpenRAG: http://localhost:3000')
-    expect(help).toEndWith('OpenRAG: http://localhost:3000')
+    expect(help).toContain(
+      `File Manager: http://127.0.0.1:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'}/files`,
+    )
+    expect(help).toEndWith(
+      `File Manager: http://127.0.0.1:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'}/files`,
+    )
     expect(commands).toContainEqual({
       command: 'help',
       description: 'Show Telegram control help',

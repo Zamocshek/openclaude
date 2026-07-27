@@ -64,6 +64,16 @@ import {
   saveStoredApiResponse,
 } from './responseStore.js'
 import { listToolRouterAudit, recordToolRouterAudit } from './routerAudit.js'
+import {
+  createFileManagerDirectory,
+  FileManagerError,
+  listFileManagerDirectory,
+  removeFileManagerEntry,
+  renameFileManagerEntry,
+  streamFileManagerDownload,
+  streamFileManagerUpload,
+} from './fileManager.js'
+import { buildFileManagerHtml } from './fileManagerUi.js'
 import { buildToolRouterHtml } from './routerUi.js'
 import { getAgentGatewayWebLinks } from './webLinks.js'
 
@@ -308,6 +318,15 @@ export class AgentApiServer {
       return
     }
 
+    if ((url.pathname === '/files' || url.pathname === '/files/') && method === 'GET') {
+      this.writeHtml(
+        response,
+        200,
+        buildFileManagerHtml({ embeddedApiKey: getRouterAutoAuthKey(this.config) }),
+      )
+      return
+    }
+
     if (isProtectedApiPath(url.pathname)) {
       if (!this.checkAuth(request, response)) return
     }
@@ -380,6 +399,86 @@ export class AgentApiServer {
     if (url.pathname === '/api/queue/status' && method === 'GET') {
       this.writeJson(response, 200, this.getApiQueueStatusPayload())
       return
+    }
+
+    if (url.pathname === '/api/files/download' && method === 'GET') {
+      try {
+        await streamFileManagerDownload(
+          this.config.runner.cwd || process.cwd(),
+          url.searchParams.get('path') || '',
+          response,
+        )
+      } catch (error) {
+        this.writeFileManagerError(response, error)
+      }
+      return
+    }
+
+    if (url.pathname === '/api/files/upload' && method === 'POST') {
+      try {
+        const result = await streamFileManagerUpload(
+          this.config.runner.cwd || process.cwd(),
+          url.searchParams.get('path') || '',
+          url.searchParams.get('name') || '',
+          request,
+        )
+        await recordToolRouterAudit({ action: 'files.uploaded', target: result.path })
+        this.writeJson(response, 201, { data: result })
+      } catch (error) {
+        this.writeFileManagerError(response, error)
+      }
+      return
+    }
+
+    if (url.pathname === '/api/files/folder' && method === 'POST') {
+      try {
+        const body = await this.readJson(request)
+        const path = String(body.path || '')
+        await createFileManagerDirectory(this.config.runner.cwd || process.cwd(), path)
+        await recordToolRouterAudit({ action: 'files.folder_created', target: path })
+        this.writeJson(response, 201, { created: path })
+      } catch (error) {
+        this.writeFileManagerError(response, error)
+      }
+      return
+    }
+
+    if (url.pathname === '/api/files/rename' && method === 'POST') {
+      try {
+        const body = await this.readJson(request)
+        const from = String(body.from || '')
+        const to = String(body.to || '')
+        await renameFileManagerEntry(this.config.runner.cwd || process.cwd(), from, to)
+        await recordToolRouterAudit({ action: 'files.renamed', target: `${from} -> ${to}` })
+        this.writeJson(response, 200, { renamed: true })
+      } catch (error) {
+        this.writeFileManagerError(response, error)
+      }
+      return
+    }
+
+    if (url.pathname === '/api/files') {
+      const path = url.searchParams.get('path') || ''
+      try {
+        if (method === 'GET') {
+          this.writeJson(response, 200, {
+            data: await listFileManagerDirectory(
+              this.config.runner.cwd || process.cwd(),
+              path,
+            ),
+          })
+          return
+        }
+        if (method === 'DELETE') {
+          await removeFileManagerEntry(this.config.runner.cwd || process.cwd(), path)
+          await recordToolRouterAudit({ action: 'files.deleted', target: path })
+          this.writeJson(response, 200, { deleted: path })
+          return
+        }
+      } catch (error) {
+        this.writeFileManagerError(response, error)
+        return
+      }
     }
 
     if (url.pathname === '/api/router/overview' && method === 'GET') {
@@ -1525,6 +1624,25 @@ export class AgentApiServer {
           ? 403
           : 400
     this.writeJson(response, statusCode, openAiError(error.message))
+  }
+
+  private writeFileManagerError(response: ServerResponse, error: unknown): void {
+    if (error instanceof FileManagerError) {
+      const statusCode = error.code === 'not_found'
+        ? 404
+        : error.code === 'conflict'
+          ? 409
+          : error.code === 'forbidden'
+            ? 403
+            : 400
+      this.writeJson(response, statusCode, openAiError(error.message))
+      return
+    }
+    this.writeJson(
+      response,
+      500,
+      openAiError(error instanceof Error ? error.message : String(error), 'server_error'),
+    )
   }
 
   private writeApiError(response: ServerResponse, error: unknown): void {

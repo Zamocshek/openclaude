@@ -447,11 +447,6 @@ export function buildTelegramHelpText(
     }
   }
 
-  lines.push(
-    '',
-    'Generated files: [[image:path]] or [[document:path]].',
-  )
-
   const links = getAgentGatewayWebLinks(config)
   lines.push(
     '',
@@ -460,6 +455,7 @@ export function buildTelegramHelpText(
     `Open WebUI: ${links.openWebUI}`,
     `Hindsight: ${links.hindsight}`,
     `OpenRAG: ${links.openRAG}`,
+    `File Manager: ${links.fileManager}`,
   )
 
   return lines.join('\n')

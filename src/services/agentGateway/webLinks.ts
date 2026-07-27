@@ -2,6 +2,7 @@ import type { AgentGatewayConfig } from './config.js'
 
 export type AgentGatewayWebLinks = {
   toolRouter: string
+  fileManager: string
   openWebUI: string
   hindsight: string
   openRAG: string
@@ -14,6 +15,10 @@ export function getAgentGatewayWebLinks(
     toolRouter: publicUrl(
       process.env.OPENCLAUDE_ROUTER_PUBLIC_URL,
       `http://${publicHost(config.api.host)}:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || config.api.port}/router`,
+    ),
+    fileManager: publicUrl(
+      process.env.OPENCLAUDE_FILE_MANAGER_PUBLIC_URL,
+      `http://${publicHost(config.api.host)}:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || config.api.port}/files`,
     ),
     openWebUI: publicUrl(
       process.env.OPENCLAUDE_OPEN_WEBUI_PUBLIC_URL,

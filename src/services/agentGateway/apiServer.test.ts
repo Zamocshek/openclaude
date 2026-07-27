@@ -429,6 +429,74 @@ describe('AgentApiServer', () => {
     })
   })
 
+  test('serves a protected streaming workspace file manager', async () => {
+    const projectRoot = join(tempGatewayStateDir!, 'project')
+    await mkdir(join(projectRoot, 'existing'), { recursive: true })
+    await writeFile(join(projectRoot, 'existing', 'note.txt'), 'initial', 'utf8')
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({
+        api: { apiKey: 'secret' } as never,
+        runner: { cwd: projectRoot } as never,
+      }),
+    })
+    await server.start()
+
+    const page = await fetch(`${server.url}/files`)
+    expect(page.status).toBe(200)
+    expect(await page.text()).toContain('OpenClaude Files')
+
+    const headers = { Authorization: 'Bearer secret' }
+    expect((await fetch(`${server.url}/api/files`)).status).toBe(401)
+    const listed = await fetch(`${server.url}/api/files?path=existing`, { headers })
+    expect(listed.status).toBe(200)
+    expect((await listed.json() as {
+      data: { path: string; entries: Array<{ name: string; kind: string }> }
+    }).data).toMatchObject({
+      path: 'existing',
+      entries: [expect.objectContaining({ name: 'note.txt', kind: 'file' })],
+    })
+
+    const outside = await fetch(`${server.url}/api/files?path=..`, { headers })
+    expect(outside.status).toBe(403)
+
+    const created = await fetch(`${server.url}/api/files/folder`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: 'uploads' }),
+    })
+    expect(created.status).toBe(201)
+
+    const content = new Uint8Array(1024 * 1024 + 3).fill(65)
+    const uploaded = await fetch(
+      `${server.url}/api/files/upload?path=uploads&name=payload.bin`,
+      { method: 'POST', headers, body: content },
+    )
+    expect(uploaded.status).toBe(201)
+    expect(await readFile(join(projectRoot, 'uploads', 'payload.bin'))).toEqual(Buffer.from(content))
+
+    const downloaded = await fetch(
+      `${server.url}/api/files/download?path=uploads%2Fpayload.bin`,
+      { headers },
+    )
+    expect(downloaded.status).toBe(200)
+    expect(Number(downloaded.headers.get('content-length'))).toBe(content.length)
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(content)
+
+    const renamed = await fetch(`${server.url}/api/files/rename`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: 'uploads/payload.bin', to: 'uploads/renamed.bin' }),
+    })
+    expect(renamed.status).toBe(200)
+
+    const deleted = await fetch(`${server.url}/api/files?path=uploads%2Frenamed.bin`, {
+      method: 'DELETE',
+      headers,
+    })
+    expect(deleted.status).toBe(200)
+  })
+
   test('browses and creates native skills through the protected Skill Store API', async () => {
     const projectRoot = join(tempGatewayStateDir!, 'project')
     await mkdir(projectRoot, { recursive: true })
