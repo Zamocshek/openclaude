@@ -216,6 +216,16 @@ Gateway subagents:
 - `/subagents set gateway-review deepseek deepseek-v4-pro` - route a role to a
   separate API/model. The coordinator parallelizes only independent read-only
   delegates and serializes conflicting edits.
+- `/subagents parallel 1` through `/subagents parallel 8` - set the maximum
+  number of independent read-only delegates.
+- `/delegate <plan|code|review|explore> <task>` - force one named role for the
+  current task. The parent agent invokes that role through its configured
+  provider/model and integrates the result.
+- Natural-language assignments are also accepted in Telegram when a complete
+  provider/model is present. For example: `Для планирования DeepSeek Pro; для
+  кода Codex GPT-5.6 Sol xhigh`. This persists the two role routes and enables
+  subagents. For an arbitrary provider or endpoint, use the explicit
+  `/subagents set` command with its base URL.
 
 The protected Gateway API also provides `GET` and `PATCH /api/subagents` for
 automation. It never returns API keys; routes can use an existing environment
