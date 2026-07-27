@@ -1,3 +1,16 @@
+# ---- production dependencies ----
+# Keep this stage independent from source files so ordinary TypeScript changes
+# do not reinstall the complete MCP/runtime dependency tree.
+FROM node:22-slim AS production-deps
+
+RUN npm install -g bun@1.3.12
+
+WORKDIR /app
+
+COPY package.json bun.lock ./
+
+RUN bun install --frozen-lockfile --production
+
 # ---- build stage ----
 FROM node:22-slim AS build
 
@@ -21,9 +34,6 @@ COPY tsconfig.json ./
 # Build the CLI bundle
 RUN bun run build
 
-# Prune devDependencies
-RUN rm -rf node_modules && bun install --frozen-lockfile --production
-
 # ---- runtime stage ----
 FROM node:22-slim
 
@@ -32,7 +42,7 @@ WORKDIR /app
 # Copy only what's needed to run
 COPY --from=build /app/dist/cli.mjs dist/cli.mjs
 COPY --from=build /app/bin/ bin/
-COPY --from=build /app/node_modules/ node_modules/
+COPY --from=production-deps /app/node_modules/ node_modules/
 COPY --from=build /app/package.json package.json
 COPY README.md ./
 COPY .mcp.json .mcp.json

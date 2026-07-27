@@ -301,7 +301,9 @@ export class AgentApiServer {
       this.writeHtml(
         response,
         200,
-        buildToolRouterHtml(getAgentGatewayWebLinks(this.config)),
+        buildToolRouterHtml(getAgentGatewayWebLinks(this.config), {
+          embeddedApiKey: getRouterAutoAuthKey(this.config),
+        }),
       )
       return
     }
@@ -1867,7 +1869,7 @@ export class AgentApiServer {
     response.writeHead(status, {
       ...this.corsHeaders(),
       'Content-Type': 'text/html; charset=utf-8',
-      'Content-Security-Policy': "default-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      'Content-Security-Policy': "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
     })
@@ -1977,6 +1979,14 @@ function quoteProjectEnv(value: string | undefined): string {
     return JSON.stringify(text)
   }
   return text
+}
+
+function getRouterAutoAuthKey(config: AgentGatewayConfig): string | undefined {
+  const enabled = process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
+    ?.trim()
+    .toLowerCase()
+  if (!['1', 'true', 'yes', 'on'].includes(enabled || '')) return undefined
+  return config.api.apiKey || undefined
 }
 
 function formatAgentFailureForApi(result: AgentRunResult): string {

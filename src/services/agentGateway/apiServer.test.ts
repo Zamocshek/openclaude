@@ -121,6 +121,7 @@ describe('AgentApiServer', () => {
   let previousGatewayStateDir: string | undefined
   let previousClaudeConfigDir: string | undefined
   let previousRunnerDisableTools: string | undefined
+  let previousRouterAutoAuth: string | undefined
   let tempGatewayStateDir: string | undefined
 
   beforeEach(async () => {
@@ -129,6 +130,8 @@ describe('AgentApiServer', () => {
     previousGatewayStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
     previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
     previousRunnerDisableTools = process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS
+    previousRouterAutoAuth = process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
+    delete process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
     tempGatewayStateDir = await mkdtemp(join(tmpdir(), 'openclaude-api-server-'))
     process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = tempGatewayStateDir
     process.env.CLAUDE_CONFIG_DIR = join(tempGatewayStateDir, 'config')
@@ -151,6 +154,11 @@ describe('AgentApiServer', () => {
       delete process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS
     } else {
       process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS = previousRunnerDisableTools
+    }
+    if (previousRouterAutoAuth === undefined) {
+      delete process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
+    } else {
+      process.env.OPENCLAUDE_ROUTER_AUTO_AUTH = previousRouterAutoAuth
     }
     if (tempGatewayStateDir) {
       await rm(tempGatewayStateDir, { recursive: true, force: true })
@@ -371,7 +379,15 @@ describe('AgentApiServer', () => {
     const page = await fetch(`${server.url}/router`)
     expect(page.status).toBe(200)
     expect(page.headers.get('content-security-policy')).toContain("connect-src 'self'")
-    expect(await page.text()).toContain('OpenClaude Tool Router')
+    const pageText = await page.text()
+    expect(pageText).toContain('OpenClaude Tool Router')
+    expect(pageText).not.toContain('const embeddedApiKey = "secret"')
+
+    process.env.OPENCLAUDE_ROUTER_AUTO_AUTH = '1'
+    const locallyAuthenticatedPage = await fetch(`${server.url}/router`)
+    expect(await locallyAuthenticatedPage.text()).toContain(
+      'const embeddedApiKey = "secret"',
+    )
 
     expect((await fetch(`${server.url}/api/router/overview`)).status).toBe(401)
     const headers = {

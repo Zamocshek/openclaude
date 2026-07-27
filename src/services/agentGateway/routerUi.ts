@@ -1,7 +1,11 @@
 import type { AgentGatewayWebLinks } from './webLinks.js'
 
-export function buildToolRouterHtml(links: AgentGatewayWebLinks): string {
+export function buildToolRouterHtml(
+  links: AgentGatewayWebLinks,
+  options: { embeddedApiKey?: string } = {},
+): string {
   const serializedLinks = JSON.stringify(links).replace(/</gu, '\\u003c')
+  const embeddedApiKey = JSON.stringify(options.embeddedApiKey || '').replace(/</gu, '\\u003c')
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -51,7 +55,7 @@ export function buildToolRouterHtml(links: AgentGatewayWebLinks): string {
       </nav>
     </aside>
     <main>
-      <header><h1>OpenClaude Agent</h1><div class="head-actions"><input id="api-key" class="key-input" type="password" autocomplete="off" placeholder="Gateway API key"><button id="connect" class="button primary">Connect</button><button id="refresh" class="button">Refresh</button></div></header>
+      <header><h1>OpenClaude Agent</h1><form id="auth-form" class="head-actions"><input id="api-key" class="key-input" type="password" autocomplete="off" placeholder="Gateway API key"><button id="connect" class="button primary" type="submit">Connect</button><button id="refresh" class="button" type="button">Refresh</button></form></header>
       <section id="notice" class="notice"></section>
       <section id="servers" class="view active">
         <div class="view-head"><div><h2>MCP Servers</h2><p class="sub">Manage the registry used by new agent runs. Secrets are never shown here.</p></div><button id="open-import" class="button primary">+ Import JSON</button></div>
@@ -69,10 +73,11 @@ export function buildToolRouterHtml(links: AgentGatewayWebLinks): string {
   <div id="skill-modal" class="overlay"><div class="modal"><h3>Create Skill</h3><p>Create a managed native skill. It is available to future agent runs.</p><input id="skill-name" class="field" placeholder="Skill name, for example api-verifier"><input id="skill-description" class="field" placeholder="Short description"><textarea id="skill-instructions" spellcheck="false" placeholder="Instructions for the agent when this skill is selected"></textarea><div class="modal-actions"><button class="button" data-close="skill-modal">Cancel</button><button id="skill-submit" class="button primary">Create skill</button></div></div></div>
   <script>
     const links = ${serializedLinks};
+    const embeddedApiKey = ${embeddedApiKey};
     const state = { servers: [], skills: [], selectedSkill: null, connected: false };
     const $ = (selector) => document.querySelector(selector);
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-    const apiKey = () => $('#api-key').value.trim();
+    const apiKey = () => $('#api-key').value.trim() || embeddedApiKey;
     const headers = (json = false) => ({ Authorization: apiKey() ? 'Bearer ' + apiKey() : '', ...(json ? {'Content-Type':'application/json'} : {}) });
     const request = async (path, options = {}) => { const response = await fetch(path, {...options, headers: {...headers(Boolean(options.body)), ...(options.headers || {})}}); let body = {}; try { body = await response.json(); } catch {} if (!response.ok) throw new Error(body?.error?.message || body?.message || ('Request failed (' + response.status + ')')); return body; };
     const notice = (message, error = false) => { const el = $('#notice'); el.textContent = message; el.className = 'notice show' + (error ? ' error' : ''); window.clearTimeout(notice.timer); notice.timer = window.setTimeout(() => { el.className = 'notice'; }, 4500); };
@@ -87,7 +92,7 @@ export function buildToolRouterHtml(links: AgentGatewayWebLinks): string {
     const loadActivity = async () => { const body = await request('/api/router/activity'); const entries = body.data || []; $('#activity-list').innerHTML = entries.length ? entries.map(entry => '<div class="log-row"><span class="log-time">' + escapeHtml(new Date(entry.timestamp).toLocaleString()) + '</span><b>' + escapeHtml(entry.action) + '</b><span>' + escapeHtml(entry.target + (entry.detail ? ' — ' + entry.detail : '')) + '</span></div>').join('') : '<div class="empty">No Tool Router actions have been recorded yet.</div>'; };
     const refresh = async () => { try { await Promise.all([loadServers(), loadSkills(), loadRuntime(), loadActivity()]); state.connected = true; notice('Connected to the gateway.'); } catch (error) { state.connected = false; notice(error.message || String(error), true); } };
     document.querySelectorAll('.nav button').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.nav button').forEach(item => item.classList.remove('active')); document.querySelectorAll('.view').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('#' + button.dataset.view).classList.add('active'); }));
-    $('#connect').addEventListener('click', refresh); $('#refresh').addEventListener('click', refresh); $('#api-key').addEventListener('keydown', event => { if (event.key === 'Enter') refresh(); }); $('#refresh-servers').addEventListener('click', () => loadServers().catch(error => notice(error.message,true))); $('#refresh-skills').addEventListener('click', () => loadSkills().catch(error => notice(error.message,true))); $('#refresh-activity').addEventListener('click', () => loadActivity().catch(error => notice(error.message,true)));
+    $('#auth-form').addEventListener('submit', event => { event.preventDefault(); void refresh(); }); $('#refresh').addEventListener('click', refresh); $('#refresh-servers').addEventListener('click', () => loadServers().catch(error => notice(error.message,true))); $('#refresh-skills').addEventListener('click', () => loadSkills().catch(error => notice(error.message,true))); $('#refresh-activity').addEventListener('click', () => loadActivity().catch(error => notice(error.message,true)));
     $('#server-search').addEventListener('input', renderServers); $('#skill-search').addEventListener('input', renderSkills); $('#open-import').addEventListener('click', () => $('#import-modal').classList.add('open')); $('#open-skill').addEventListener('click', () => $('#skill-modal').classList.add('open')); document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => $('#' + button.dataset.close).classList.remove('open')));
     $('#import-submit').addEventListener('click', async () => { try { const payload = JSON.parse($('#mcp-json').value); const result = await request('/api/mcp/servers', {method:'POST', body:JSON.stringify(payload)}); $('#import-modal').classList.remove('open'); state.servers = result.data || []; renderServers(); renderSummary(); await loadActivity(); notice('Imported: ' + (result.imported || []).join(', ')); } catch (error) { notice(error.message || 'Invalid MCP JSON',true); } });
     $('#skill-submit').addEventListener('click', async () => { try { const skill = {name:$('#skill-name').value.trim(), description:$('#skill-description').value.trim(), instructions:$('#skill-instructions').value.trim()}; if (!skill.name || !skill.instructions) throw new Error('Skill name and instructions are required.'); const result = await request('/api/skills', {method:'POST', body:JSON.stringify({skill})}); $('#skill-modal').classList.remove('open'); state.selectedSkill = result.data; await loadSkills(); await loadActivity(); notice('Created skill: ' + result.data.name); } catch (error) { notice(error.message || String(error),true); } });
@@ -97,6 +102,11 @@ export function buildToolRouterHtml(links: AgentGatewayWebLinks): string {
     $('#skill-detail').addEventListener('click', async event => { const button = event.target.closest('[data-delete-skill]'); if (!button || !confirm('Delete this managed skill?')) return; try { await request('/api/skills/' + encodeURIComponent(button.dataset.deleteSkill), {method:'DELETE'}); state.selectedSkill = null; await loadSkills(); await loadActivity(); notice('Managed skill deleted.'); } catch (error) { notice(error.message || String(error),true); } });
     $('#tools-toggle').addEventListener('change', async event => { const input = event.target; try { await request('/api/router/tools', {method:'PATCH', body:JSON.stringify({enabled:input.checked})}); await loadActivity(); notice('Model tool calls: ' + (input.checked ? 'ON' : 'OFF')); } catch (error) { notice(error.message || String(error),true); input.checked = !input.checked; } });
     setLinks();
+    if (embeddedApiKey) {
+      $('#api-key').hidden = true;
+      $('#connect').textContent = 'Connected locally';
+      void refresh();
+    }
   </script>
 </body>
 </html>`
