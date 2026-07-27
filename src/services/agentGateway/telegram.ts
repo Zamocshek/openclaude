@@ -321,53 +321,53 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
   {
     title: 'Basics',
     commands: [
-      { syntax: '/help', description: 'show this help and refresh the Telegram command menu', botDescription: 'Show Telegram control help' },
-      { syntax: '/commands', description: 'show the same Telegram command reference' },
+      { syntax: '/help', description: 'show this command reference', botDescription: 'Show Telegram control help' },
+      { syntax: '/commands', description: 'show this command reference' },
       { syntax: '/panel', description: 'open the button control panel', botDescription: 'Open agent control panel' },
-      { syntax: '/control', description: 'open the same button control panel' },
-      { syntax: '/newchat', description: 'start a fresh chat context without deleting durable memory', botDescription: 'Start a new chat context' },
+      { syntax: '/control', description: 'open the button control panel' },
+      { syntax: '/newchat', description: 'reset chat context; keep durable memory', botDescription: 'Start a new chat context' },
       { syntax: '/chatid', description: 'show the current chat ID' },
-      { syntax: '/status', description: 'show gateway, workers, cron, budget, and Ouroboros status' },
-      { syntax: '/transcribe', description: 'check voice/audio transcription availability' },
+      { syntax: '/status', description: 'show gateway, workers, cron, and evolution status' },
+      { syntax: '/transcribe', description: 'show audio transcription status' },
     ],
   },
   {
     title: 'MCP servers',
     commands: [
       { syntax: '/mcp', description: 'open the MCP server control panel', botDescription: 'Manage MCP servers' },
-      { syntax: '/mcp add <json>', description: 'import one or more mcpServers definitions' },
+      { syntax: '/mcp add <json>', description: 'import mcpServers JSON' },
       { syntax: '/mcp enable <name>', description: 'enable an MCP server' },
       { syntax: '/mcp disable <name>', description: 'disable an MCP server' },
-      { syntax: '/mcp remove <name>', description: 'remove a runtime MCP server or override' },
+      { syntax: '/mcp remove <name>', description: 'remove an MCP server' },
     ],
   },
   {
     title: 'Skill Store',
     commands: [
-      { syntax: '/skills', description: 'browse the Skill Store with inline buttons', botDescription: 'Browse and create agent skills' },
+      { syntax: '/skills', description: 'browse the Skill Store', botDescription: 'Browse and create agent skills' },
       { syntax: '/skill [name]', description: 'open a skill card by name' },
-      { syntax: '/skill create <json>', description: 'create a persistent native SKILL.md' },
-      { syntax: '/skill create <name> | <description> | <instructions>', description: 'create a skill with compact syntax' },
+      { syntax: '/skill create <json>', description: 'create a persistent SKILL.md' },
+      { syntax: '/skill create <name> | <description> | <instructions>', description: 'create a skill' },
       { syntax: '/skill delete <name>', description: 'remove a user-created Store skill' },
     ],
   },
   {
     title: 'Inference and providers',
     commands: [
-      { syntax: '/provider', description: 'show active provider, model, and API endpoint', botDescription: 'Show or switch provider/model' },
-      { syntax: '/provider models', description: 'load models from the active OpenAI-compatible endpoint' },
-      { syntax: '/provider set <provider> <model> [base_url] [api_key]', description: 'switch provider/model for next agent runs' },
+      { syntax: '/provider', description: 'show provider, model, and API endpoint', botDescription: 'Show or switch provider/model' },
+      { syntax: '/provider models', description: 'load models from the active endpoint' },
+      { syntax: '/provider set <provider> <model> [base_url] [api_key]', description: 'switch provider and model' },
       ...TELEGRAM_PROVIDER_SHORTCUTS.map(shortcut => ({
         syntax: shortcut.command,
         description: shortcut.description,
       })),
-      { syntax: '/context', description: 'show effective context window for the active model', botDescription: 'Show or set context window' },
-      { syntax: '/context auto|1m|<tokens>', description: 'set manual context window or return to model auto mode' },
+      { syntax: '/context', description: 'show active context window', botDescription: 'Show or set context window' },
+      { syntax: '/context auto|1m|<tokens>', description: 'set context window or auto mode' },
       { syntax: '/models', description: 'open the model picker for the active provider', botDescription: 'Choose provider model' },
-      { syntax: '/model [model]', description: 'open the model picker or set a model manually' },
-      { syntax: '/reasoning [level]', description: 'choose low, medium, high, xhigh, max, or ultra', botDescription: 'Choose reasoning level' },
-      { syntax: '/baseurl <url>', description: 'switch OpenAI-compatible base URL' },
-      { syntax: '/apikey <key>', description: 'store provider API key for next runs' },
+      { syntax: '/model [model]', description: 'pick or set a model' },
+      { syntax: '/reasoning [level]', description: 'set low, medium, high, xhigh, max, or ultra', botDescription: 'Choose reasoning level' },
+      { syntax: '/baseurl <url>', description: 'set OpenAI-compatible base URL' },
+      { syntax: '/apikey <key>', description: 'store a provider API key' },
     ],
   },
   {
@@ -405,10 +405,10 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     commands: [
       { syntax: '/restart', description: 'soft-restart the gateway runtime' },
       { syntax: '/panic', description: 'abort active tasks and stop the gateway runtime' },
-      { syntax: '/bg [start|stop|now|status]', description: 'persist, wake, or inspect background consciousness' },
+      { syntax: '/bg [start|stop|now|status]', description: 'control background consciousness' },
       { syntax: '/consciousness [start|stop|now|status]', description: 'alias for /bg' },
-      { syntax: '/evolution [on|off|status]', description: 'control scheduled self-improvement cycles' },
-      { syntax: '/evolve [on|off|now|status]', description: 'control evolution or run one cycle immediately' },
+      { syntax: '/evolution [on|off|status]', description: 'control scheduled evolution cycles' },
+      { syntax: '/evolve [on|off|now|status]', description: 'control evolution or run one cycle' },
       { syntax: '/tools [on|off]', description: 'show, enable, or disable model tool calls', botDescription: 'Control model tools' },
       { syntax: '/review', description: 'run a deep architecture review cycle' },
       { syntax: '/infinite <goal>', description: 'run an opt-in persistent task loop' },
@@ -435,10 +435,7 @@ export function buildTelegramHelpText(
   config: Pick<AgentGatewayConfig, 'api' | 'openWebUI' | 'openRAG'> = getDefaultAgentGatewayConfig(),
 ): string {
   const lines = [
-    'OpenClaude Telegram inference is online.',
-    '',
-    'Send text, screenshots, images, documents, voice, video, or other Telegram files. Files are saved locally and passed to the agent as paths.',
-    'Voice messages, audio files, and audio documents are transcribed before the agent runs when transcription is available.',
+    'OpenClaude Telegram inference is online. Send text or files; attachments are passed to the agent, and audio is transcribed when available.',
     '',
     'Available commands:',
   ]
@@ -452,7 +449,7 @@ export function buildTelegramHelpText(
 
   lines.push(
     '',
-    'Agent output can include [[image:C:\\path\\out.png]] or [[document:C:\\path\\file.pdf]] to upload generated files.',
+    'Generated files: [[image:path]] or [[document:path]].',
   )
 
   const links = getAgentGatewayWebLinks(config)
