@@ -457,6 +457,20 @@ export function meetsAvailabilityRequirement(cmd: Command): boolean {
   return false
 }
 
+function isRuntimeSkillEnabled(command: Command): boolean {
+  if (command.type !== 'prompt') return true
+  if (!['skills', 'bundled'].includes(command.loadedFrom || '')) {
+    return true
+  }
+  const disabled = new Set(
+    String(process.env.OPENCLAUDE_DISABLED_SKILLS || '')
+      .split(/[\s,]+/u)
+      .map(name => name.trim())
+      .filter(Boolean),
+  )
+  return !disabled.has(command.name)
+}
+
 /**
  * Loads all command sources (skills, plugins, workflows). Memoized by cwd
  * because loading is expensive (disk I/O, dynamic imports).
@@ -496,7 +510,7 @@ export async function getCommands(cwd: string): Promise<Command[]> {
 
   // Build base commands without dynamic skills
   const baseCommands = allCommands.filter(
-    _ => meetsAvailabilityRequirement(_) && isCommandEnabled(_),
+    _ => meetsAvailabilityRequirement(_) && isCommandEnabled(_) && isRuntimeSkillEnabled(_),
   )
 
   if (dynamicSkills.length === 0) {
@@ -509,7 +523,8 @@ export async function getCommands(cwd: string): Promise<Command[]> {
     s =>
       !baseCommandNames.has(s.name) &&
       meetsAvailabilityRequirement(s) &&
-      isCommandEnabled(s),
+      isCommandEnabled(s) &&
+      isRuntimeSkillEnabled(s),
   )
 
   if (uniqueDynamicSkills.length === 0) {

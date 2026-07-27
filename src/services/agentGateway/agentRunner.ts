@@ -385,6 +385,11 @@ export function buildAgentChildEnv(
       baseEnv.API_TIMEOUT_MS ?? dotEnv.API_TIMEOUT_MS ?? '60000',
     NO_COLOR: baseEnv.NO_COLOR ?? '1',
   }
+  // This is managed by the Tool Router in the project .env. Prefer it over
+  // an empty Docker Compose default so skill state survives container restarts.
+  if (dotEnv.OPENCLAUDE_DISABLED_SKILLS !== undefined) {
+    childEnv.OPENCLAUDE_DISABLED_SKILLS = dotEnv.OPENCLAUDE_DISABLED_SKILLS
+  }
   // MCP/RAG credentials are managed by this project/GUI. Prefer the local
   // .env value over stale shell or user-level Windows environment values.
   for (const key of [

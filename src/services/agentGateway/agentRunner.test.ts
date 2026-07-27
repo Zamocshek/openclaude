@@ -589,6 +589,22 @@ describe('agent gateway prompt builder', () => {
     expect(env.OPENAI_API_KEY).toBe('explicit-provider-key')
   })
 
+  test('restores Tool Router skill state from dotenv over an empty Docker default', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-skill-env-'))
+    await writeFile(
+      join(cwd, '.env'),
+      'OPENCLAUDE_DISABLED_SKILLS=batch,debug\n',
+      'utf8',
+    )
+
+    const env = buildAgentChildEnv(
+      { OPENCLAUDE_DISABLED_SKILLS: '' },
+      cwd,
+    )
+
+    expect(env.OPENCLAUDE_DISABLED_SKILLS).toBe('batch,debug')
+  })
+
   test('prefers dotenv MCP Router credentials over stale parent env', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-mcpr-env-'))
     await writeFile(

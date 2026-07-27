@@ -122,6 +122,7 @@ describe('AgentApiServer', () => {
   let previousClaudeConfigDir: string | undefined
   let previousRunnerDisableTools: string | undefined
   let previousRouterAutoAuth: string | undefined
+  let previousDisabledSkills: string | undefined
   let tempGatewayStateDir: string | undefined
 
   beforeEach(async () => {
@@ -131,7 +132,9 @@ describe('AgentApiServer', () => {
     previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
     previousRunnerDisableTools = process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS
     previousRouterAutoAuth = process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
+    previousDisabledSkills = process.env.OPENCLAUDE_DISABLED_SKILLS
     delete process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
+    delete process.env.OPENCLAUDE_DISABLED_SKILLS
     tempGatewayStateDir = await mkdtemp(join(tmpdir(), 'openclaude-api-server-'))
     process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = tempGatewayStateDir
     process.env.CLAUDE_CONFIG_DIR = join(tempGatewayStateDir, 'config')
@@ -159,6 +162,11 @@ describe('AgentApiServer', () => {
       delete process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
     } else {
       process.env.OPENCLAUDE_ROUTER_AUTO_AUTH = previousRouterAutoAuth
+    }
+    if (previousDisabledSkills === undefined) {
+      delete process.env.OPENCLAUDE_DISABLED_SKILLS
+    } else {
+      process.env.OPENCLAUDE_DISABLED_SKILLS = previousDisabledSkills
     }
     if (tempGatewayStateDir) {
       await rm(tempGatewayStateDir, { recursive: true, force: true })
@@ -452,13 +460,20 @@ describe('AgentApiServer', () => {
     })
     expect(created.status).toBe(201)
     const createdBody = await created.json() as {
-      data: { id: string; name: string; managed: boolean; instructions: string }
+      data: {
+        id: string
+        name: string
+        managed: boolean
+        enabled: boolean
+        instructions: string
+      }
     }
     expect(createdBody.data).toMatchObject({
       name: 'api-verifier',
       managed: true,
     })
     expect(createdBody.data.instructions).toContain('focused API check')
+    expect(createdBody.data.enabled).toBe(true)
 
     const listed = await fetch(`${server.url}/api/skills`, { headers })
     expect(listed.status).toBe(200)
@@ -474,6 +489,27 @@ describe('AgentApiServer', () => {
       { headers },
     )
     expect(viewed.status).toBe(200)
+
+    const disabled = await fetch(
+      `${server.url}/api/skills/${createdBody.data.id}`,
+      { method: 'PATCH', headers, body: JSON.stringify({ enabled: false }) },
+    )
+    expect(disabled.status).toBe(200)
+    const disabledBody = await disabled.json() as {
+      data: Array<{ name: string; enabled: boolean }>
+    }
+    expect(disabledBody.data.find(skill => skill.name === 'api-verifier')?.enabled).toBe(false)
+    expect(process.env.OPENCLAUDE_DISABLED_SKILLS).toBe('api-verifier')
+    expect(await readFile(join(projectRoot, '.env'), 'utf8')).toContain(
+      'OPENCLAUDE_DISABLED_SKILLS=api-verifier',
+    )
+
+    const enabled = await fetch(
+      `${server.url}/api/skills/${createdBody.data.id}`,
+      { method: 'PATCH', headers, body: JSON.stringify({ enabled: true }) },
+    )
+    expect(enabled.status).toBe(200)
+    expect(process.env.OPENCLAUDE_DISABLED_SKILLS).toBeUndefined()
 
     const duplicate = await fetch(`${server.url}/api/skills`, {
       method: 'POST',

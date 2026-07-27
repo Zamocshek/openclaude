@@ -6,6 +6,7 @@ import { clearSkillCaches } from '../../skills/loadSkillsDir.js'
 import {
   createManagedSkill,
   deleteManagedSkill,
+  getDisabledSkillNames,
   getManagedSkillsRoot,
   getSkillStoreItemDetails,
   listSkillStore,
@@ -53,6 +54,7 @@ describe('agent gateway Skill Store', () => {
 
       const listed = await listSkillStore(configDir, options)
       expect(listed.some(skill => skill.name === 'verify-output')).toBe(true)
+      expect(listed.find(skill => skill.name === 'verify-output')?.enabled).toBe(true)
       expect(
         (await getSkillStoreItemDetails(configDir, created.id, options))?.name,
       ).toBe('verify-output')
@@ -82,5 +84,35 @@ describe('agent gateway Skill Store', () => {
         command: 'rm -rf /',
       },
     }))).toMatchObject({ ok: false })
+  })
+
+  test('reports skills disabled in the project environment', async () => {
+    const configDir = await mkdtemp(join(tmpdir(), 'openclaude-skill-state-'))
+    const options = { skillsRoot: join(configDir, 'skills') }
+    const previous = process.env.OPENCLAUDE_DISABLED_SKILLS
+    delete process.env.OPENCLAUDE_DISABLED_SKILLS
+
+    try {
+      await createManagedSkill(configDir, {
+        name: 'paused-skill',
+        description: 'A skill kept in the store but disabled at runtime.',
+        instructions: 'Do not use this while it is disabled.',
+      }, options)
+      await Bun.write(
+        join(configDir, '.env'),
+        'OPENCLAUDE_DISABLED_SKILLS=paused-skill, other-skill\n',
+      )
+
+      expect(await getDisabledSkillNames(configDir)).toEqual(
+        new Set(['paused-skill', 'other-skill']),
+      )
+      const listed = await listSkillStore(configDir, options)
+      expect(listed.find(skill => skill.name === 'paused-skill')?.enabled).toBe(false)
+    } finally {
+      if (previous === undefined) delete process.env.OPENCLAUDE_DISABLED_SKILLS
+      else process.env.OPENCLAUDE_DISABLED_SKILLS = previous
+      clearSkillCaches()
+      await rm(configDir, { recursive: true, force: true })
+    }
   })
 })

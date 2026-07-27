@@ -41,6 +41,7 @@ export type SkillStoreItem = {
   description: string
   origin: string
   managed: boolean
+  enabled: boolean
   skillRoot?: string
   contentLength?: number
 }
@@ -192,6 +193,28 @@ function normalizeDescription(value: string | undefined): string {
   return (value || 'No description provided.').replace(/\s+/gu, ' ').trim()
 }
 
+export async function getDisabledSkillNames(
+  projectRoot: string,
+): Promise<Set<string>> {
+  let raw = process.env.OPENCLAUDE_DISABLED_SKILLS || ''
+  if (!raw) {
+    try {
+      const env = await readFile(join(resolve(projectRoot), '.env'), 'utf8')
+      raw = env
+        .split(/\r?\n/u)
+        .find(line => /^\s*OPENCLAUDE_DISABLED_SKILLS\s*=/u.test(line))
+        ?.replace(/^\s*OPENCLAUDE_DISABLED_SKILLS\s*=\s*/u, '')
+        .trim()
+        .replace(/^['"]|['"]$/gu, '') || ''
+    } catch {
+      // The agent can run without a project .env file.
+    }
+  }
+  return new Set(
+    raw.split(/[\s,]+/u).map(name => name.trim()).filter(Boolean),
+  )
+}
+
 async function getBundledSkillsForStore() {
   const bundledSkills = await import('../../skills/bundledSkills.js')
   if (!bundledSkillInitializationAttempted) {
@@ -248,6 +271,7 @@ async function listExplicitStoreSkills(
           description: readStoreDescription(content),
           origin: 'skills',
           managed: true,
+          enabled: true,
           skillRoot,
           contentLength: content.length,
         } satisfies SkillStoreItem
@@ -262,6 +286,7 @@ export async function listSkillStore(
   projectRoot: string,
   options: SkillStoreOptions = {},
 ): Promise<SkillStoreItem[]> {
+  const disabled = await getDisabledSkillNames(projectRoot)
   const commands = options.skillsRoot
     ? []
     : [
@@ -282,6 +307,7 @@ export async function listSkillStore(
       description: normalizeDescription(command.description),
       origin: command.loadedFrom || String(command.source || 'unknown'),
       managed,
+      enabled: !disabled.has(command.name),
       ...(command.skillRoot ? { skillRoot: command.skillRoot } : {}),
       ...(command.contentLength === undefined
         ? {}
@@ -297,7 +323,7 @@ export async function listSkillStore(
     for (const skill of await listExplicitStoreSkills(
       getManagedSkillsRoot(options),
     )) {
-      byName.set(skill.name, skill)
+      byName.set(skill.name, { ...skill, enabled: !disabled.has(skill.name) })
     }
   }
 

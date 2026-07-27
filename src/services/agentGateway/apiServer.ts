@@ -598,6 +598,38 @@ export class AgentApiServer {
           this.writeJson(response, 200, { data: skill })
           return
         }
+        if (method === 'PATCH') {
+          const body = await this.readJson(request)
+          if (typeof body.enabled !== 'boolean') {
+            this.writeJson(response, 400, openAiError("Missing boolean 'enabled'"))
+            return
+          }
+          const skill = await skillStore.getSkillStoreItemDetails(
+            projectRoot,
+            selector,
+            this.skillStoreOptions,
+          )
+          if (!skill) {
+            throw new skillStore.SkillStoreError(
+              'not_found',
+              `Skill not found: ${selector}`,
+            )
+          }
+          const disabled = await skillStore.getDisabledSkillNames(projectRoot)
+          if (body.enabled) disabled.delete(skill.name)
+          else disabled.add(skill.name)
+          await this.setDisabledSkills(projectRoot, disabled)
+          const skills = await skillStore.listSkillStore(
+            projectRoot,
+            this.skillStoreOptions,
+          )
+          await recordToolRouterAudit({
+            action: body.enabled ? 'skill.enabled' : 'skill.disabled',
+            target: skill.name,
+          })
+          this.writeJson(response, 200, { data: skills })
+          return
+        }
         if (method === 'DELETE') {
           const skills = await skillStore.deleteManagedSkill(
             projectRoot,
@@ -1518,6 +1550,17 @@ export class AgentApiServer {
       runner: { ...current.runner, disableTools: !enabled },
     }))
     this.config.runner.disableTools = !enabled
+  }
+
+  private async setDisabledSkills(
+    projectRoot: string,
+    disabled: Set<string>,
+  ): Promise<void> {
+    const updates = {
+      OPENCLAUDE_DISABLED_SKILLS: [...disabled].sort().join(','),
+    }
+    await updateProjectEnvFile(projectRoot, updates)
+    applyRuntimeEnvUpdates(updates)
   }
 
   private async handleJobRoute(
