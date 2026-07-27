@@ -2,7 +2,11 @@ import { appendFile, mkdir, readFile, stat, writeFile } from 'fs/promises'
 import { basename, extname, join } from 'path'
 import { randomUUID } from 'crypto'
 import type { AgentGatewayConfig } from './config.js'
-import { getAgentGatewayStateDir, updateAgentGatewayConfig } from './config.js'
+import {
+  getAgentGatewayStateDir,
+  getDefaultAgentGatewayConfig,
+  updateAgentGatewayConfig,
+} from './config.js'
 import { createCronJob, deleteCronJob, getCronJob, getCronJobsPath, listCronJobs, pauseCronJob, resumeCronJob, runCronJobNow, updateCronJob, type CronJob, type CronJobMode } from './cron.js'
 import { runOpenClaudeAgent, type AgentRunResult } from './agentRunner.js'
 import { redactAgentText } from './redaction.js'
@@ -31,6 +35,7 @@ import {
 } from '../api/providerConfig.js'
 import { getContextWindowForModel } from '../../utils/context.js'
 import { parseHumanLimit } from '../../utils/limitParsing.js'
+import { getAgentGatewayWebLinks } from './webLinks.js'
 import {
   getBuiltInProviderModels,
   getDefaultProviderModel,
@@ -426,7 +431,9 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
   },
 ]
 
-export function buildTelegramHelpText(): string {
+export function buildTelegramHelpText(
+  config: Pick<AgentGatewayConfig, 'api' | 'openWebUI' | 'openRAG'> = getDefaultAgentGatewayConfig(),
+): string {
   const lines = [
     'OpenClaude Telegram inference is online.',
     '',
@@ -446,6 +453,16 @@ export function buildTelegramHelpText(): string {
   lines.push(
     '',
     'Agent output can include [[image:C:\\path\\out.png]] or [[document:C:\\path\\file.pdf]] to upload generated files.',
+  )
+
+  const links = getAgentGatewayWebLinks(config)
+  lines.push(
+    '',
+    'Web consoles:',
+    `Tool Router: ${links.toolRouter}`,
+    `Open WebUI: ${links.openWebUI}`,
+    `Hindsight: ${links.hindsight}`,
+    `OpenRAG: ${links.openRAG}`,
   )
 
   return lines.join('\n')
@@ -1085,7 +1102,7 @@ export class TelegramAgentBridge {
     if (commandText === '/start' || commandText === '/help' || commandText === '/commands') {
       await this.sendMessageWithKeyboard(
         chatId,
-        buildTelegramHelpText(),
+        buildTelegramHelpText(this.config),
         buildTelegramControlKeyboard(),
       )
       return
@@ -3116,7 +3133,7 @@ export class TelegramAgentBridge {
       if (data === 'control:help') {
         await this.sendMessageWithKeyboard(
           chatId,
-          buildTelegramHelpText(),
+          buildTelegramHelpText(this.config),
           buildTelegramControlKeyboard(),
         )
         return

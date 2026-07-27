@@ -1,8 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import type { AddressInfo } from 'net'
 import { randomUUID } from 'crypto'
+import { readFile, writeFile } from 'fs/promises'
+import { join } from 'path'
 import { parseHumanLimit } from '../../utils/limitParsing.js'
-import type { AgentGatewayConfig } from './config.js'
+import { updateAgentGatewayConfig, type AgentGatewayConfig } from './config.js'
 import {
   buildPromptFromChatMessages,
   normalizeMessageContent,
@@ -61,6 +63,9 @@ import {
   loadStoredApiResponse,
   saveStoredApiResponse,
 } from './responseStore.js'
+import { listToolRouterAudit, recordToolRouterAudit } from './routerAudit.js'
+import { buildToolRouterHtml } from './routerUi.js'
+import { getAgentGatewayWebLinks } from './webLinks.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -292,6 +297,15 @@ export class AgentApiServer {
       return
     }
 
+    if ((url.pathname === '/router' || url.pathname === '/router/') && method === 'GET') {
+      this.writeHtml(
+        response,
+        200,
+        buildToolRouterHtml(getAgentGatewayWebLinks(this.config)),
+      )
+      return
+    }
+
     if (isProtectedApiPath(url.pathname)) {
       if (!this.checkAuth(request, response)) return
     }
@@ -366,6 +380,76 @@ export class AgentApiServer {
       return
     }
 
+    if (url.pathname === '/api/router/overview' && method === 'GET') {
+      const projectRoot = this.config.runner.cwd || process.cwd()
+      try {
+        const [servers, skills] = await Promise.all([
+          listManagedMcpServers(projectRoot),
+          this.loadSkillStore().then(skillStore =>
+            skillStore.listSkillStore(projectRoot, this.skillStoreOptions),
+          ),
+        ])
+        this.writeJson(response, 200, {
+          data: {
+            tools: {
+              enabled: !this.config.runner.disableTools,
+              available: this.config.runner.availableTools,
+              disallowed: this.config.runner.disallowedTools,
+            },
+            mcp: {
+              total: servers.length,
+              enabled: servers.filter(server => server.enabled).length,
+            },
+            skills: { total: skills.length },
+            runtime: this.getRuntimeStatus?.() || {},
+          },
+        })
+      } catch (error) {
+        this.writeSkillStoreError(response, error)
+      }
+      return
+    }
+
+    if (url.pathname === '/api/router/activity' && method === 'GET') {
+      this.writeJson(response, 200, {
+        data: await listToolRouterAudit(parseLimit(url.searchParams.get('limit'), 50)),
+      })
+      return
+    }
+
+    if (url.pathname === '/api/router/tools') {
+      if (method === 'GET') {
+        this.writeJson(response, 200, {
+          data: {
+            enabled: !this.config.runner.disableTools,
+            available: this.config.runner.availableTools,
+            disallowed: this.config.runner.disallowedTools,
+          },
+        })
+        return
+      }
+      if (method === 'PATCH') {
+        try {
+          const body = await this.readJson(request)
+          if (typeof body.enabled !== 'boolean') {
+            this.writeJson(response, 400, openAiError("Missing boolean 'enabled'"))
+            return
+          }
+          await this.setToolsEnabled(body.enabled)
+          await recordToolRouterAudit({
+            action: body.enabled ? 'tools.enabled' : 'tools.disabled',
+            target: 'model-tool-calls',
+          })
+          this.writeJson(response, 200, {
+            data: { enabled: body.enabled },
+          })
+        } catch (error) {
+          this.writeApiError(response, error)
+        }
+        return
+      }
+    }
+
     if (url.pathname === '/api/mcp/servers') {
       if (method === 'GET') {
         const servers = await listManagedMcpServers(
@@ -399,6 +483,10 @@ export class AgentApiServer {
           this.config.runner.cwd || process.cwd(),
           parsed.config,
         )
+        await recordToolRouterAudit({
+          action: 'mcp.imported',
+          target: Object.keys(parsed.config.mcpServers).join(', '),
+        })
         this.writeJson(response, 201, {
           imported: Object.keys(parsed.config.mcpServers),
           normalized_npx: parsed.normalizedNpxServers,
@@ -423,6 +511,10 @@ export class AgentApiServer {
             name,
             body.enabled,
           )
+          await recordToolRouterAudit({
+            action: body.enabled ? 'mcp.enabled' : 'mcp.disabled',
+            target: name,
+          })
           this.writeJson(response, 200, {
             data: servers.map(describeManagedMcpServer),
           })
@@ -433,6 +525,7 @@ export class AgentApiServer {
             this.config.runner.cwd || process.cwd(),
             name,
           )
+          await recordToolRouterAudit({ action: 'mcp.deleted', target: name })
           this.writeJson(response, 200, {
             deleted: name,
             data: servers.map(describeManagedMcpServer),
@@ -469,6 +562,10 @@ export class AgentApiServer {
             body.skill ?? body,
             this.skillStoreOptions,
           )
+          await recordToolRouterAudit({
+            action: 'skill.created',
+            target: created.name,
+          })
           this.writeJson(response, 201, { data: created })
           return
         }
@@ -505,6 +602,7 @@ export class AgentApiServer {
             selector,
             this.skillStoreOptions,
           )
+          await recordToolRouterAudit({ action: 'skill.deleted', target: selector })
           this.writeJson(response, 200, {
             deleted: selector,
             data: skills,
@@ -1395,6 +1493,31 @@ export class AgentApiServer {
     this.writeJson(response, statusCode, openAiError(error.message))
   }
 
+  private writeApiError(response: ServerResponse, error: unknown): void {
+    if (isAgentApiHttpError(error)) {
+      this.writeJson(response, error.statusCode, openAiError(error.message, error.errorType))
+      return
+    }
+    this.writeJson(
+      response,
+      500,
+      openAiError(error instanceof Error ? error.message : String(error), 'server_error'),
+    )
+  }
+
+  private async setToolsEnabled(enabled: boolean): Promise<void> {
+    const updates = {
+      OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS: enabled ? '0' : '1',
+    }
+    await updateProjectEnvFile(this.config.runner.cwd || process.cwd(), updates)
+    applyRuntimeEnvUpdates(updates)
+    await updateAgentGatewayConfig(current => ({
+      ...current,
+      runner: { ...current.runner, disableTools: !enabled },
+    }))
+    this.config.runner.disableTools = !enabled
+  }
+
   private async handleJobRoute(
     method: string,
     jobId: string,
@@ -1736,6 +1859,21 @@ export class AgentApiServer {
     response.end(JSON.stringify(payload))
   }
 
+  private writeHtml(
+    response: ServerResponse,
+    status: number,
+    html: string,
+  ): void {
+    response.writeHead(status, {
+      ...this.corsHeaders(),
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Security-Policy': "default-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+    })
+    response.end(html)
+  }
+
   private startJsonKeepaliveResponse(
     response: ServerResponse,
     headers: Record<string, string> = {},
@@ -1796,6 +1934,49 @@ function openAiError(
   type = 'invalid_request_error',
 ): { error: { message: string; type: string } } {
   return { error: { message, type } }
+}
+
+async function updateProjectEnvFile(
+  projectRoot: string,
+  updates: Record<string, string>,
+): Promise<void> {
+  const file = join(projectRoot, '.env')
+  let raw = ''
+  try {
+    raw = await readFile(file, 'utf8')
+  } catch {
+    // A project without a .env file can still persist a router preference.
+  }
+  const lines = raw ? raw.split(/\r?\n/u) : []
+  const seen = new Set<string>()
+  const next = lines.map(line => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/u)
+    if (!match) return line
+    const key = match[1]!
+    if (!(key in updates)) return line
+    seen.add(key)
+    return `${key}=${quoteProjectEnv(updates[key])}`
+  })
+  for (const [key, value] of Object.entries(updates)) {
+    if (!seen.has(key)) next.push(`${key}=${quoteProjectEnv(value)}`)
+  }
+  await writeFile(file, `${next.join('\n').replace(/\n+$/u, '')}\n`, 'utf8')
+}
+
+function applyRuntimeEnvUpdates(updates: Record<string, string>): void {
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === '') delete process.env[key]
+    else process.env[key] = value
+  }
+}
+
+function quoteProjectEnv(value: string | undefined): string {
+  const text = String(value ?? '')
+  if (!text) return ''
+  if (/[\s#"'`$]/u.test(text)) {
+    return JSON.stringify(text)
+  }
+  return text
 }
 
 function formatAgentFailureForApi(result: AgentRunResult): string {

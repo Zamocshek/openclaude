@@ -103,6 +103,15 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/mode off - clear the active research mode for this chat')
     expect(help).toContain('/stop - abort the current running task')
     expect(help).toContain('/git commit <msg> - stage and commit all changes')
+    expect(help).toContain('Web consoles:')
+    expect(help).toContain(
+      `Tool Router: http://127.0.0.1:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'}/router`,
+    )
+    expect(help).toContain(
+      `Open WebUI: http://localhost:${process.env.OPENCLAUDE_OPEN_WEBUI_HOST_PORT || '8080'}`,
+    )
+    expect(help).toContain('Hindsight: http://localhost:8888')
+    expect(help).toContain('OpenRAG: http://localhost:3000')
     expect(commands).toContainEqual({
       command: 'help',
       description: 'Show Telegram control help',

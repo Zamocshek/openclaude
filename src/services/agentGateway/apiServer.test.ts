@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { getDefaultAgentGatewayConfig, type AgentGatewayConfig } from './config.js'
@@ -119,14 +119,19 @@ async function waitFor(
 describe('AgentApiServer', () => {
   let server: import('./apiServer.js').AgentApiServer | undefined
   let previousGatewayStateDir: string | undefined
+  let previousClaudeConfigDir: string | undefined
+  let previousRunnerDisableTools: string | undefined
   let tempGatewayStateDir: string | undefined
 
   beforeEach(async () => {
     runOpenClaudeAgent.mockClear()
     runOpenClaudeAgent.mockImplementation(defaultRunOpenClaudeAgent)
     previousGatewayStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
+    previousRunnerDisableTools = process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS
     tempGatewayStateDir = await mkdtemp(join(tmpdir(), 'openclaude-api-server-'))
     process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = tempGatewayStateDir
+    process.env.CLAUDE_CONFIG_DIR = join(tempGatewayStateDir, 'config')
   })
 
   afterEach(async () => {
@@ -136,6 +141,16 @@ describe('AgentApiServer', () => {
       delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
     } else {
       process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousGatewayStateDir
+    }
+    if (previousClaudeConfigDir === undefined) {
+      delete process.env.CLAUDE_CONFIG_DIR
+    } else {
+      process.env.CLAUDE_CONFIG_DIR = previousClaudeConfigDir
+    }
+    if (previousRunnerDisableTools === undefined) {
+      delete process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS
+    } else {
+      process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS = previousRunnerDisableTools
     }
     if (tempGatewayStateDir) {
       await rm(tempGatewayStateDir, { recursive: true, force: true })
@@ -337,6 +352,57 @@ describe('AgentApiServer', () => {
     }
     expect(removedBody.deleted).toBe('search')
     expect(removedBody.data.map(item => item.name)).toEqual(['core'])
+  })
+
+  test('serves the Tool Router shell and persists protected runtime controls', async () => {
+    const projectRoot = join(tempGatewayStateDir!, 'project')
+    await mkdir(projectRoot, { recursive: true })
+    const config = testConfig({
+      api: { apiKey: 'secret' } as never,
+      runner: { cwd: projectRoot } as never,
+    })
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config,
+      skillStoreRoot: join(tempGatewayStateDir!, 'skills'),
+    })
+    await server.start()
+
+    const page = await fetch(`${server.url}/router`)
+    expect(page.status).toBe(200)
+    expect(page.headers.get('content-security-policy')).toContain("connect-src 'self'")
+    expect(await page.text()).toContain('OpenClaude Tool Router')
+
+    expect((await fetch(`${server.url}/api/router/overview`)).status).toBe(401)
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    }
+    const overview = await fetch(`${server.url}/api/router/overview`, { headers })
+    expect(overview.status).toBe(200)
+    expect((await overview.json() as { data: { tools: { enabled: boolean } } }).data.tools.enabled).toBe(true)
+
+    const disabled = await fetch(`${server.url}/api/router/tools`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ enabled: false }),
+    })
+    expect(disabled.status).toBe(200)
+    expect(config.runner.disableTools).toBe(true)
+    expect(await readFile(join(projectRoot, '.env'), 'utf8')).toContain(
+      'OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS=1',
+    )
+
+    const activity = await fetch(`${server.url}/api/router/activity`, { headers })
+    expect(activity.status).toBe(200)
+    expect((await activity.json() as {
+      data: Array<{ action: string; target: string }>
+    }).data).toContainEqual({
+      action: 'tools.disabled',
+      target: 'model-tool-calls',
+      id: expect.any(String),
+      timestamp: expect.any(String),
+    })
   })
 
   test('browses and creates native skills through the protected Skill Store API', async () => {
