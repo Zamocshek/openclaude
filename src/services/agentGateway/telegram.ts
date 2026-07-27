@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, stat, writeFile } from 'fs/promises'
 import { basename, extname, join } from 'path'
 import { randomUUID } from 'crypto'
-import type { AgentGatewayConfig } from './config.js'
+import type { AgentGatewayConfig, AgentGatewaySubagentRoute } from './config.js'
 import {
   getAgentGatewayStateDir,
   getDefaultAgentGatewayConfig,
@@ -72,6 +72,7 @@ import {
   type SkillStoreItem,
   type SkillStoreItemDetails,
 } from './skillStore.js'
+import { describeGatewaySubagents } from './subagentRuntime.js'
 
 export type TelegramFileRef = {
   file_id: string
@@ -368,6 +369,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/reasoning [level]', description: 'set low, medium, high, xhigh, max, or ultra', botDescription: 'Choose reasoning level' },
       { syntax: '/baseurl <url>', description: 'set OpenAI-compatible base URL' },
       { syntax: '/apikey <key>', description: 'store a provider API key' },
+      { syntax: '/subagents [on|off|list|set|remove]', description: 'manage provider/model subagent routes', botDescription: 'Manage subagent routing' },
     ],
   },
   {
@@ -435,7 +437,7 @@ export function buildTelegramHelpText(
   config: Pick<AgentGatewayConfig, 'api' | 'openWebUI' | 'openRAG'> = getDefaultAgentGatewayConfig(),
 ): string {
   const lines = [
-    'OpenClaude Telegram inference is online. Send text or files; attachments are passed to the agent, and audio is transcribed when available.',
+    'OpenClaude Telegram inference is online.',
     '',
     'Available commands:',
   ]
@@ -1129,6 +1131,14 @@ export class TelegramAgentBridge {
     const providerShortcut = getTelegramProviderShortcut(commandText)
     if (providerShortcut) {
       await this.handleProviderShortcutCommand(chatId, providerShortcut)
+      return
+    }
+
+    if (commandText === '/subagents' || commandText.startsWith('/subagents ')) {
+      await this.handleSubagentsCommand(
+        chatId,
+        getTelegramCommandBody(text, 'subagents'),
+      )
       return
     }
 
@@ -2039,6 +2049,100 @@ export class TelegramAgentBridge {
         ...message,
         text: body,
       }, body, mode),
+    )
+  }
+
+  private async handleSubagentsCommand(
+    chatId: string,
+    commandBody: string,
+  ): Promise<void> {
+    const body = commandBody.trim()
+    const [action = 'status', ...parts] = body.split(/\s+/u)
+    const normalizedAction = action.toLowerCase()
+
+    if (!body || ['status', 'list', 'show'].includes(normalizedAction)) {
+      await this.sendMessage(chatId, formatTelegramSubagentStatus(this.config))
+      return
+    }
+
+    if (['on', 'off'].includes(normalizedAction)) {
+      const next = await updateAgentGatewayConfig(current => ({
+        ...current,
+        subagents: { ...current.subagents, enabled: normalizedAction === 'on' },
+      }))
+      this.config.subagents = next.subagents
+      await this.sendMessage(chatId, formatTelegramSubagentStatus(this.config))
+      return
+    }
+
+    if (normalizedAction === 'remove') {
+      const name = normalizeSubagentRole(parts[0] || '')
+      if (!name) {
+        await this.sendMessage(chatId, 'Usage: /subagents remove <role>')
+        return
+      }
+      if (!this.config.subagents.routes[name]) {
+        await this.sendMessage(chatId, `Subagent route not found: ${name}`)
+        return
+      }
+      const next = await updateAgentGatewayConfig(current => {
+        const routes = { ...current.subagents.routes }
+        delete routes[name]
+        return { ...current, subagents: { ...current.subagents, routes } }
+      })
+      this.config.subagents = next.subagents
+      await this.sendMessage(chatId, `Removed subagent route: ${name}`)
+      return
+    }
+
+    if (normalizedAction === 'set') {
+      const [rawName, rawProvider, rawModel, rawBaseUrl, rawApiKey] = parts
+      const name = normalizeSubagentRole(rawName || '')
+      const provider = String(rawProvider || '').trim().toLowerCase()
+      const model = String(rawModel || '').trim()
+      if (!name || !provider || !model) {
+        await this.sendMessage(
+          chatId,
+          'Usage: /subagents set <role> <provider> <model> [base_url] [api_key]',
+        )
+        return
+      }
+      const previous = this.config.subagents.routes[name]
+      const info = getTelegramProviderInfo(provider)
+      const baseUrl = String(
+        rawBaseUrl || previous?.baseUrl || info.baseUrl ||
+          (provider === 'codex' ? 'https://chatgpt.com/backend-api/codex' : ''),
+      ).trim().replace(/\/+$/, '')
+      if (!baseUrl) {
+        await this.sendMessage(chatId, 'This provider needs an explicit base_url.')
+        return
+      }
+      const route: AgentGatewaySubagentRoute = {
+        provider,
+        model,
+        baseUrl,
+        ...(rawApiKey ? { apiKey: rawApiKey } : previous?.apiKey ? { apiKey: previous.apiKey } : {}),
+        ...(previous?.apiKeyEnv
+          ? { apiKeyEnv: previous.apiKeyEnv }
+          : defaultSubagentApiKeyEnv(provider)
+            ? { apiKeyEnv: defaultSubagentApiKeyEnv(provider) }
+            : {}),
+      }
+      const next = await updateAgentGatewayConfig(current => ({
+        ...current,
+        subagents: {
+          ...current.subagents,
+          routes: { ...current.subagents.routes, [name]: route },
+        },
+      }))
+      this.config.subagents = next.subagents
+      await this.sendMessage(chatId, formatTelegramSubagentStatus(this.config))
+      return
+    }
+
+    await this.sendMessage(
+      chatId,
+      'Usage:\n/subagents [status|on|off|list]\n/subagents set <role> <provider> <model> [base_url] [api_key]\n/subagents remove <role>',
     )
   }
 
@@ -3144,6 +3248,29 @@ export class TelegramAgentBridge {
 
       if (data === 'menu:mcp') {
         await this.editMcpMenu(query)
+        return
+      }
+
+      if (data === 'menu:subagents') {
+        await this.editCallbackMessage(
+          query,
+          formatTelegramSubagentStatus(this.config),
+          buildTelegramSubagentKeyboard(this.config.subagents.enabled),
+        )
+        return
+      }
+
+      if (data === 'subagents:toggle') {
+        const next = await updateAgentGatewayConfig(current => ({
+          ...current,
+          subagents: { ...current.subagents, enabled: !current.subagents.enabled },
+        }))
+        this.config.subagents = next.subagents
+        await this.editCallbackMessage(
+          query,
+          formatTelegramSubagentStatus(this.config),
+          buildTelegramSubagentKeyboard(this.config.subagents.enabled),
+        )
         return
       }
 
@@ -4475,6 +4602,7 @@ export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
       { text: 'Skill Store', callback_data: 'menu:skills' },
       { text: 'Runtime', callback_data: 'menu:runtime' },
     ],
+    [{ text: 'Subagents', callback_data: 'menu:subagents' }],
     [
       { text: 'Schedules', callback_data: 'menu:schedule' },
       { text: 'Memory', callback_data: 'menu:memory' },
@@ -4488,6 +4616,13 @@ export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
       { text: 'Help', callback_data: 'control:help' },
     ],
     [{ text: 'New chat', callback_data: 'conversation:new' }],
+  ]
+}
+
+function buildTelegramSubagentKeyboard(enabled: boolean): TelegramInlineKeyboard {
+  return [
+    [{ text: enabled ? 'Disable subagents' : 'Enable subagents', callback_data: 'subagents:toggle' }],
+    [{ text: 'Control panel', callback_data: 'menu:control' }],
   ]
 }
 
@@ -5450,6 +5585,46 @@ function formatProviderProfile(profile: AgentProviderProfile): string {
     `Base URL: ${profile.baseUrl || 'not set'}`,
     authentication,
   ].join('\n')
+}
+
+function formatTelegramSubagentStatus(config: AgentGatewayConfig): string {
+  const status = describeGatewaySubagents(config)
+  const lines = [
+    'Gateway subagents',
+    `Status: ${status.enabled ? 'ON' : 'OFF'}`,
+    `Parallel read-only delegates: ${status.maxParallel}`,
+    '',
+  ]
+  if (status.routes.length === 0) {
+    lines.push('No routes configured.')
+  } else {
+    for (const route of status.routes) {
+      lines.push(
+        `${route.apiKeyConfigured ? 'READY' : 'AUTH NEEDED'} ${route.name}`,
+        `${route.provider} / ${route.model}`,
+        route.baseUrl,
+      )
+    }
+  }
+  lines.push(
+    '',
+    'Roles: gateway-explore, gateway-plan, gateway-implement, gateway-review.',
+    'Use /subagents set <role> <provider> <model> [base_url] [api_key] to change a route.',
+  )
+  return lines.join('\n').slice(0, 3900)
+}
+
+function normalizeSubagentRole(value: string): string | undefined {
+  const name = value.trim().toLowerCase()
+  return /^gateway-[a-z][a-z0-9-]{2,44}$/u.test(name) ? name : undefined
+}
+
+function defaultSubagentApiKeyEnv(provider: string): string | undefined {
+  if (provider === 'deepseek') return 'DEEPSEEK_API_KEY'
+  if (provider === 'openrouter') return 'OPENROUTER_API_KEY'
+  if (provider === 'codex') return 'CODEX_API_KEY'
+  if (provider === 'lmstudio' || provider === 'lmstudio-lan' || provider === 'ollama') return undefined
+  return 'OPENAI_API_KEY'
 }
 
 async function loadProviderModels(profile: AgentProviderProfile): Promise<string> {

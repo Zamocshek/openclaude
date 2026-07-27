@@ -76,6 +76,7 @@ import {
 import { buildFileManagerHtml } from './fileManagerUi.js'
 import { buildToolRouterHtml } from './routerUi.js'
 import { getAgentGatewayWebLinks } from './webLinks.js'
+import { describeGatewaySubagents } from './subagentRuntime.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -502,6 +503,7 @@ export class AgentApiServer {
               enabled: servers.filter(server => server.enabled).length,
             },
             skills: { total: skills.length },
+            subagents: describeGatewaySubagents(this.config),
             runtime: this.getRuntimeStatus?.() || {},
           },
         })
@@ -509,6 +511,36 @@ export class AgentApiServer {
         this.writeSkillStoreError(response, error)
       }
       return
+    }
+
+    if (url.pathname === '/api/subagents') {
+      if (method === 'GET') {
+        this.writeJson(response, 200, { data: describeGatewaySubagents(this.config) })
+        return
+      }
+      if (method === 'PATCH') {
+        try {
+          const body = await this.readJson(request)
+          const next = await updateAgentGatewayConfig(current => ({
+            ...current,
+            subagents: {
+              ...current.subagents,
+              ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}),
+              ...(body.maxParallel === undefined ? {} : { maxParallel: body.maxParallel }),
+              ...(body.routes === undefined ? {} : { routes: body.routes }),
+            },
+          }))
+          Object.assign(this.config.subagents, next.subagents)
+          await recordToolRouterAudit({
+            action: 'subagents.updated',
+            target: `${next.subagents.enabled ? 'enabled' : 'disabled'}; ${Object.keys(next.subagents.routes).length} routes`,
+          })
+          this.writeJson(response, 200, { data: describeGatewaySubagents(this.config) })
+        } catch (error) {
+          this.writeApiError(response, error)
+        }
+        return
+      }
     }
 
     if (url.pathname === '/api/router/activity' && method === 'GET') {

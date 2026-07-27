@@ -429,6 +429,49 @@ describe('AgentApiServer', () => {
     })
   })
 
+  test('manages subagent provider routes without returning API keys', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({ api: { apiKey: 'secret' } as never }),
+    })
+    await server.start()
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    }
+
+    expect((await fetch(`${server.url}/api/subagents`)).status).toBe(401)
+    const updated = await fetch(`${server.url}/api/subagents`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({
+        enabled: true,
+        maxParallel: 2,
+        routes: {
+          'gateway-review': {
+            provider: 'deepseek',
+            model: 'deepseek-v4-pro',
+            baseUrl: 'https://api.deepseek.com/v1',
+            apiKey: 'do-not-return-this',
+          },
+        },
+      }),
+    })
+    expect(updated.status).toBe(200)
+    const body = await updated.json() as {
+      data: { enabled: boolean; maxParallel: number; routes: Array<Record<string, unknown>> }
+    }
+    expect(body.data.enabled).toBe(true)
+    expect(body.data.maxParallel).toBe(2)
+    expect(body.data.routes).toEqual([expect.objectContaining({
+      name: 'gateway-review',
+      provider: 'deepseek',
+      model: 'deepseek-v4-pro',
+      apiKeyConfigured: true,
+    })])
+    expect(JSON.stringify(body)).not.toContain('do-not-return-this')
+  })
+
   test('serves a protected streaming workspace file manager', async () => {
     const projectRoot = join(tempGatewayStateDir!, 'project')
     await mkdir(join(projectRoot, 'existing'), { recursive: true })

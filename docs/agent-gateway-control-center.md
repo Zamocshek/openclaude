@@ -208,6 +208,19 @@ Inference and providers:
 - `/context auto|1m|<tokens>` - set a manual context window or return to
   model/provider auto mode; `unlimited` maps to the 1M client window.
 
+Gateway subagents:
+
+- `/subagents [on|off|list|set|remove]` - inspect or control provider/model
+  routing for `gateway-explore`, `gateway-plan`, `gateway-implement`, and
+  `gateway-review`.
+- `/subagents set gateway-review deepseek deepseek-v4-pro` - route a role to a
+  separate API/model. The coordinator parallelizes only independent read-only
+  delegates and serializes conflicting edits.
+
+The protected Gateway API also provides `GET` and `PATCH /api/subagents` for
+automation. It never returns API keys; routes can use an existing environment
+variable such as `DEEPSEEK_API_KEY` through `apiKeyEnv`.
+
 Tasks and files:
 
 - `/stop` - abort the current running task.

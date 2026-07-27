@@ -5,6 +5,16 @@ import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 export type AgentGatewayPermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions'
 
+export type AgentGatewaySubagentRoute = {
+  provider: string
+  model: string
+  baseUrl: string
+  /** Optional literal key. Prefer apiKeyEnv for secrets already managed by Docker/.env. */
+  apiKey?: string
+  /** Environment variable containing the key for this provider. */
+  apiKeyEnv?: string
+}
+
 export type AgentGatewayConfig = {
   api: {
     enabled: boolean
@@ -84,6 +94,11 @@ export type AgentGatewayConfig = {
     disableTools: boolean
     availableTools: string[]
     disallowedTools: string[]
+  }
+  subagents: {
+    enabled: boolean
+    maxParallel: number
+    routes: Record<string, AgentGatewaySubagentRoute>
   }
 }
 
@@ -176,6 +191,36 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
       availableTools: [],
       disallowedTools: [],
     },
+    subagents: {
+      enabled: true,
+      maxParallel: 3,
+      routes: {
+        'gateway-explore': {
+          provider: 'deepseek',
+          model: 'deepseek-v4-flash',
+          baseUrl: 'https://api.deepseek.com/v1',
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+        },
+        'gateway-plan': {
+          provider: 'codex',
+          model: 'gpt-5.6-sol?reasoning=xhigh',
+          baseUrl: 'https://chatgpt.com/backend-api/codex',
+          apiKeyEnv: 'CODEX_API_KEY',
+        },
+        'gateway-implement': {
+          provider: 'codex',
+          model: 'gpt-5.6-sol?reasoning=xhigh',
+          baseUrl: 'https://chatgpt.com/backend-api/codex',
+          apiKeyEnv: 'CODEX_API_KEY',
+        },
+        'gateway-review': {
+          provider: 'deepseek',
+          model: 'deepseek-v4-pro',
+          baseUrl: 'https://api.deepseek.com/v1',
+          apiKeyEnv: 'DEEPSEEK_API_KEY',
+        },
+      },
+    },
   }
 }
 
@@ -240,6 +285,8 @@ export function normalizeAgentGatewayConfig(
   const ui = input.ui && typeof input.ui === 'object' ? input.ui : {}
   const runner =
     input.runner && typeof input.runner === 'object' ? input.runner : {}
+  const subagents =
+    input.subagents && typeof input.subagents === 'object' ? input.subagents : {}
 
   return {
     api: {
@@ -400,7 +447,46 @@ export function normalizeAgentGatewayConfig(
         ? normalizeStringArray(runner.disallowedTools)
         : defaults.runner.disallowedTools,
     },
+    subagents: {
+      enabled: subagents.enabled !== false,
+      maxParallel: normalizeFiniteNumber(
+        subagents.maxParallel,
+        defaults.subagents.maxParallel,
+        { min: 1, max: 8, integer: true },
+      ),
+      routes: normalizeSubagentRoutes(subagents.routes, defaults.subagents.routes),
+    },
   }
+}
+
+function normalizeSubagentRoutes(
+  value: unknown,
+  fallback: Record<string, AgentGatewaySubagentRoute>,
+): Record<string, AgentGatewaySubagentRoute> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ...fallback }
+  }
+
+  const routes: Record<string, AgentGatewaySubagentRoute> = {}
+  for (const [rawName, rawRoute] of Object.entries(value as Record<string, unknown>)) {
+    if (!rawRoute || typeof rawRoute !== 'object' || Array.isArray(rawRoute)) continue
+    const route = rawRoute as Record<string, unknown>
+    const name = rawName.trim().toLowerCase()
+    const provider = String(route.provider || '').trim().toLowerCase()
+    const model = String(route.model || '').trim()
+    const baseUrl = String(route.baseUrl || route.base_url || '').trim().replace(/\/+$/, '')
+    if (!name || !provider || !model || !baseUrl) continue
+    const apiKey = String(route.apiKey || route.api_key || '').trim()
+    const apiKeyEnv = String(route.apiKeyEnv || route.api_key_env || '').trim()
+    routes[name] = {
+      provider,
+      model,
+      baseUrl,
+      ...(apiKey ? { apiKey } : {}),
+      ...(apiKeyEnv ? { apiKeyEnv } : {}),
+    }
+  }
+  return routes
 }
 
 function normalizeTranscriptionProvider(

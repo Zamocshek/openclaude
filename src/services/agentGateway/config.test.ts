@@ -44,4 +44,32 @@ describe('agent gateway config normalization', () => {
 
     expect(next.telegram.mirrorAgentApiResponses).toBe(false)
   })
+
+  test('normalizes bounded subagent routing without requiring stored API keys', () => {
+    const config = normalizeAgentGatewayConfig({
+      subagents: {
+        enabled: true,
+        maxParallel: 999,
+        routes: {
+          'gateway-review': {
+            provider: 'DeepSeek',
+            model: 'deepseek-v4-pro',
+            base_url: 'https://api.deepseek.com/v1/',
+            api_key_env: 'DEEPSEEK_API_KEY',
+          },
+          malformed: { provider: 'deepseek' },
+        },
+      },
+    })
+
+    expect(config.subagents.maxParallel).toBe(8)
+    expect(config.subagents.routes).toEqual({
+      'gateway-review': {
+        provider: 'deepseek',
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/v1',
+        apiKeyEnv: 'DEEPSEEK_API_KEY',
+      },
+    })
+  })
 })

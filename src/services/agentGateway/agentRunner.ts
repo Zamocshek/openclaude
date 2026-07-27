@@ -14,6 +14,11 @@ import { CODE_SKILL_PROMPT } from '../../skills/codingWorkflow.js'
 import { getReasoningEffortForModel } from '../api/providerConfig.js'
 import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
 import { redactAgentText } from './redaction.js'
+import {
+  buildGatewaySubagentAppendPrompt,
+  prepareGatewaySubagentRuntime,
+  type GatewaySubagentRuntime,
+} from './subagentRuntime.js'
 
 export { redactAgentText } from './redaction.js'
 
@@ -246,7 +251,11 @@ function splitCommandLine(value: string): string[] {
 
 export function buildAgentArgs(
   config: AgentGatewayConfig,
-  options: { streamEvents?: boolean; prompt?: string } = {},
+  options: {
+    streamEvents?: boolean
+    prompt?: string
+    subagentRuntime?: GatewaySubagentRuntime
+  } = {},
 ): string[] {
   const args = [
     '--print',
@@ -254,7 +263,7 @@ export function buildAgentArgs(
     '--output-format',
     options.streamEvents ? 'stream-json' : 'text',
     '--append-system-prompt',
-    getApiGatewayAppendSystemPrompt(config, options.prompt),
+    getApiGatewayAppendSystemPrompt(config, options.prompt, options.subagentRuntime),
     '--max-turns',
     String(config.runner.maxTurns),
   ]
@@ -278,11 +287,21 @@ export function buildAgentArgs(
   if (config.runner.disableTools) {
     args.push('--tools', '')
   } else if (config.runner.availableTools.length > 0) {
-    args.push('--tools', config.runner.availableTools.join(','))
+    // A configured allowlist otherwise removes the Agent tool entirely. Keep
+    // delegation available only for runs that have a prepared subagent runtime.
+    const availableTools = options.subagentRuntime && !config.runner.availableTools.includes('Agent')
+      ? [...config.runner.availableTools, 'Agent']
+      : config.runner.availableTools
+    args.push('--tools', availableTools.join(','))
   }
 
   if (config.runner.disallowedTools.length > 0) {
     args.push('--disallowedTools', config.runner.disallowedTools.join(','))
+  }
+
+  if (options.subagentRuntime) {
+    args.push('--settings', options.subagentRuntime.settingsPath)
+    args.push('--agents', options.subagentRuntime.agentsJson)
   }
 
   return args
@@ -301,6 +320,7 @@ function getAgentGatewayAllowedDirs(config: AgentGatewayConfig): string[] {
 function getApiGatewayAppendSystemPrompt(
   config: AgentGatewayConfig,
   prompt = '',
+  subagentRuntime?: GatewaySubagentRuntime,
 ): string {
   const hasOpenRAG =
     config.openRAG.enabled ||
@@ -324,6 +344,11 @@ function getApiGatewayAppendSystemPrompt(
   parts.push(CAMOFOX_APPEND_SYSTEM_PROMPT)
   parts.push(HINDSIGHT_APPEND_SYSTEM_PROMPT)
   if (hasLifeRpgSystem(config)) parts.push(LIFE_RPG_APPEND_SYSTEM_PROMPT)
+  const subagentPrompt = buildGatewaySubagentAppendPrompt(
+    subagentRuntime,
+    config.subagents.maxParallel,
+  )
+  if (subagentPrompt) parts.push(subagentPrompt)
   parts.push(DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT)
   return parts.join('\n\n')
 }
@@ -553,14 +578,20 @@ export function runOpenClaudeAgent(
   return new Promise(resolve => {
     const invocation = getCliInvocation()
     const autoCodeWorkflow = hasCodingTaskIntent(options.prompt)
+    const cwd = options.cwd || options.config.runner.cwd || process.cwd()
+    const childEnv = buildAgentChildEnv(process.env, cwd)
+    const subagentRuntime = prepareGatewaySubagentRuntime(
+      options.config,
+      childEnv,
+    )
     const args = [
       ...invocation.args,
       ...buildAgentArgs(options.config, {
         streamEvents: options.streamEvents,
         prompt: options.prompt,
+        subagentRuntime,
       }),
     ]
-    const cwd = options.cwd || options.config.runner.cwd || process.cwd()
     const observerContext: AgentRunObserverContext = {
       prompt: options.prompt,
       cwd,
@@ -657,7 +688,7 @@ export function runOpenClaudeAgent(
 
     const proc = spawn(invocation.command, args, {
       cwd,
-      env: buildAgentChildEnv(process.env, cwd),
+      env: childEnv,
       detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],

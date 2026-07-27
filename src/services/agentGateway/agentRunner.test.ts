@@ -61,6 +61,21 @@ describe('agent gateway prompt builder', () => {
     expect(args).not.toContain('hello from api')
   })
 
+  test('adds Agent to an explicit tool allowlist only for configured subagents', () => {
+    const config = getDefaultAgentGatewayConfig()
+    config.runner.availableTools = ['Bash', 'Read']
+
+    const args = buildAgentArgs(config, {
+      subagentRuntime: {
+        settingsPath: '/tmp/subagent-routing.settings.json',
+        agentsJson: '{}',
+        roles: [{ name: 'gateway-explore', provider: 'deepseek', model: 'deepseek-v4-flash' }],
+      },
+    })
+
+    expect(args[args.indexOf('--tools') + 1]).toBe('Bash,Read,Agent')
+  })
+
   test('can disable model tool calls for local providers that reject tool schemas', () => {
     const config = getDefaultAgentGatewayConfig()
     config.runner.disableTools = true
