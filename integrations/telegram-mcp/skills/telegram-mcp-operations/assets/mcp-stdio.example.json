@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "telegram-mcp": {
+      "command": "python",
+      "args": ["<absolute-path-to-telegram-mcp>/main.py"],
+      "cwd": "<absolute-path-to-telegram-mcp>"
+    }
+  }
+}

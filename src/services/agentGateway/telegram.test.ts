@@ -114,6 +114,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     )
     expect(help).toContain('Hindsight: http://localhost:8888')
     expect(help).toContain('OpenRAG: http://localhost:3000')
+    expect(help).toContain('Telegram MCP: http://localhost:18765')
     expect(help).toContain(
       `File Manager: http://127.0.0.1:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'}/files`,
     )
@@ -224,6 +225,7 @@ describe('agent gateway Telegram bridge helpers', () => {
       description: `Description ${index}`,
       origin: index === 0 ? 'skills' : 'bundled',
       managed: index === 0,
+      enabled: true,
     }))
 
     const menu = formatTelegramSkillStoreMenu(skills, 0)

@@ -282,6 +282,24 @@ stored under the private Agent Gateway state directory; Telegram and API replies
 return only redacted targets and environment/header key names. Imported `npx`
 servers are launched without a shell and changes apply to the next agent run.
 
+### Telegram MCP And Maton
+
+The production stack runs the vendored Telegram MCP as one private
+streamable-HTTP sidecar. It provides multi-account Telethon tools, local
+Telegram memory/search, confirmed reply and publishing workflows, and optional
+Maton-connected services. A single sidecar prevents parallel agent runs from
+opening the same Telethon SQLite session files independently.
+
+Set `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and optionally `MATON_API_KEY` in
+the ignored project `.env`. Persistent sessions live at
+`%USERPROFILE%/.openclaude/telegram-mcp/session` by default. The loopback-only
+operator console is available at `http://localhost:18765`.
+
+The built-in `telegram-mcp-operations` and `maton-api-gateway` skills appear in
+the Skill Store and can be enabled or disabled independently. Provider-specific
+Maton references are vendored under
+`integrations/telegram-mcp/maton skills for telegram/references/`.
+
 ### Skill Store
 
 The Skill Store is available from Telegram `/skills` and the authenticated

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram MCP Operations"
+  short_description: "Run Telegram, Maton, and YouTube workflows"
+  default_prompt: "Use $telegram-mcp-operations to review a YouTube channel in Maton and safely prepare a Telegram content post."

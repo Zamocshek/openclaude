@@ -6,6 +6,7 @@ export type AgentGatewayWebLinks = {
   openWebUI: string
   hindsight: string
   openRAG: string
+  telegramMcp: string
 }
 
 export function getAgentGatewayWebLinks(
@@ -31,6 +32,10 @@ export function getAgentGatewayWebLinks(
     openRAG: publicUrl(
       process.env.OPENRAG_PUBLIC_URL,
       process.env.OPENRAG_URL || config.openRAG.url,
+    ),
+    telegramMcp: publicUrl(
+      process.env.TELEGRAM_MCP_WEB_PUBLIC_URL,
+      `http://localhost:${process.env.TELEGRAM_MCP_WEB_HOST_PORT || '18765'}`,
     ),
   }
 }

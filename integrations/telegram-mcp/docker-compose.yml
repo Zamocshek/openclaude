@@ -1,0 +1,45 @@
+services:
+  telegram-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-mcp
+    # Load environment variables from a .env file in the same directory
+    env_file:
+      - .env
+    environment:
+      TELEGRAM_MCP_CONFIG_DIR: /app
+      TELEGRAM_MCP_DATA_DIR: /data
+      TELEGRAM_MCP_SESSION_DIR: /data/session
+      TELEGRAM_MCP_LOG_FILE: /data/logs/mcp_errors.log
+      TELEGRAM_MCP_ASSISTANT_DB: /data/session/assistant_memory.sqlite3
+    # Keep stdin open and allocate a pseudo-TTY, crucial for stdio MCP servers
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  telegram-mcp-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-mcp-web
+    command: ["python", "web_app.py"]
+    env_file:
+      - .env
+    environment:
+      TELEGRAM_MCP_CONFIG_DIR: /app
+      TELEGRAM_MCP_DATA_DIR: /data
+      TELEGRAM_MCP_SESSION_DIR: /data/session
+      TELEGRAM_MCP_LOG_FILE: /data/logs/mcp_errors.log
+      TELEGRAM_MCP_ASSISTANT_DB: /data/session/assistant_memory.sqlite3
+      TELEGRAM_MCP_WEB_HOST: 0.0.0.0
+      TELEGRAM_MCP_WEB_PORT: 8765
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    profiles:
+      - web

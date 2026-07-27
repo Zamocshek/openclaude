@@ -328,7 +328,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/control', description: 'open the button control panel' },
       { syntax: '/newchat', description: 'reset chat context; keep durable memory', botDescription: 'Start a new chat context' },
       { syntax: '/chatid', description: 'show the current chat ID' },
-      { syntax: '/status', description: 'show gateway, workers, cron, and evolution status' },
+      { syntax: '/status', description: 'show gateway and worker status' },
       { syntax: '/transcribe', description: 'show audio transcription status' },
     ],
   },
@@ -407,7 +407,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     title: 'Runtime control',
     commands: [
       { syntax: '/restart', description: 'soft-restart the gateway runtime' },
-      { syntax: '/panic', description: 'abort active tasks and stop the gateway runtime' },
+      { syntax: '/panic', description: 'stop tasks and gateway runtime' },
       { syntax: '/bg [start|stop|now|status]', description: 'control background consciousness' },
       { syntax: '/consciousness [start|stop|now|status]', description: 'alias for /bg' },
       { syntax: '/evolution [on|off|status]', description: 'control scheduled evolution cycles' },
@@ -458,6 +458,7 @@ export function buildTelegramHelpText(
     `Open WebUI: ${links.openWebUI}`,
     `Hindsight: ${links.hindsight}`,
     `OpenRAG: ${links.openRAG}`,
+    `Telegram MCP: ${links.telegramMcp}`,
     `File Manager: ${links.fileManager}`,
   )
 

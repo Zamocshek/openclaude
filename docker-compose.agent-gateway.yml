@@ -12,6 +12,8 @@ services:
     depends_on:
       searxng:
         condition: service_healthy
+      telegram-mcp:
+        condition: service_healthy
     environment:
       OPENCLAUDE_DOCKER_RUN_AS_ROOT: "${OPENCLAUDE_DOCKER_RUN_AS_ROOT:-1}"
       OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS: "${OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS:-1}"
@@ -27,6 +29,7 @@ services:
       OPENCLAUDE_OPEN_WEBUI_PUBLIC_URL: "${OPENCLAUDE_OPEN_WEBUI_PUBLIC_URL:-}"
       HINDSIGHT_PUBLIC_URL: "${HINDSIGHT_PUBLIC_URL:-}"
       OPENRAG_PUBLIC_URL: "${OPENRAG_PUBLIC_URL:-}"
+      TELEGRAM_MCP_WEB_PUBLIC_URL: "${TELEGRAM_MCP_WEB_PUBLIC_URL:-http://localhost:18765}"
       OPENCLAUDE_AGENT_WEB_BIND_HOST: "0.0.0.0"
       OPENCLAUDE_AGENT_WEB_PORTS: "3000-3010,5173,8000,8080"
       OPENCLAUDE_AGENT_WEB_HOST_URLS: "3000=http://localhost:13000,3001=http://localhost:13001,3002=http://localhost:13002,3003=http://localhost:13003,3004=http://localhost:13004,3005=http://localhost:13005,3006=http://localhost:13006,3007=http://localhost:13007,3008=http://localhost:13008,3009=http://localhost:13009,3010=http://localhost:13010,5173=http://localhost:15173,8000=http://localhost:18000,8080=http://localhost:18080"
@@ -223,6 +226,8 @@ services:
     depends_on:
       searxng:
         condition: service_healthy
+      telegram-mcp:
+        condition: service_healthy
     environment:
       OPENCLAUDE_DOCKER_RUN_AS_ROOT: "${OPENCLAUDE_WORKER_1_RUN_AS_ROOT:-${OPENCLAUDE_WORKER_RUN_AS_ROOT:-${OPENCLAUDE_DOCKER_RUN_AS_ROOT:-1}}}"
       OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS: "${OPENCLAUDE_WORKER_1_ALLOW_ROOT_BYPASS_PERMISSIONS:-${OPENCLAUDE_WORKER_ALLOW_ROOT_BYPASS_PERMISSIONS:-${OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS:-1}}}"
@@ -386,6 +391,8 @@ services:
     depends_on:
       searxng:
         condition: service_healthy
+      telegram-mcp:
+        condition: service_healthy
     environment:
       OPENCLAUDE_DOCKER_RUN_AS_ROOT: "${OPENCLAUDE_WORKER_2_RUN_AS_ROOT:-${OPENCLAUDE_WORKER_RUN_AS_ROOT:-${OPENCLAUDE_DOCKER_RUN_AS_ROOT:-1}}}"
       OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS: "${OPENCLAUDE_WORKER_2_ALLOW_ROOT_BYPASS_PERMISSIONS:-${OPENCLAUDE_WORKER_ALLOW_ROOT_BYPASS_PERMISSIONS:-${OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS:-1}}}"
@@ -532,6 +539,81 @@ services:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8742/health >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  telegram-mcp:
+    build:
+      context: ./integrations/telegram-mcp
+      dockerfile: Dockerfile
+    image: openclaude-telegram-mcp:local
+    restart: unless-stopped
+    command: ["python", "main.py"]
+    env_file:
+      - path: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}/.env"
+        required: false
+    environment:
+      TELEGRAM_MCP_CONFIG_DIR: "/app"
+      TELEGRAM_MCP_DATA_DIR: "/data"
+      TELEGRAM_MCP_SESSION_DIR: "/data/session"
+      TELEGRAM_MCP_LOG_FILE: "/data/logs/mcp_errors.log"
+      TELEGRAM_MCP_ASSISTANT_DB: "/data/session/assistant_memory.sqlite3"
+      TELEGRAM_MCP_CONTENT_DB: "/data/session/content_workflow.sqlite3"
+      TELEGRAM_MCP_TRANSPORT: "streamable-http"
+      TELEGRAM_MCP_HOST: "0.0.0.0"
+      TELEGRAM_MCP_PORT: "8766"
+    volumes:
+      - type: bind
+        source: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}"
+        target: /data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1',8766),5); s.close()",
+        ]
+      interval: 15s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+
+  telegram-mcp-web:
+    image: openclaude-telegram-mcp:local
+    restart: unless-stopped
+    depends_on:
+      telegram-mcp:
+        condition: service_healthy
+    command: ["python", "web_app.py"]
+    env_file:
+      - path: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}/.env"
+        required: false
+    environment:
+      TELEGRAM_MCP_CONFIG_DIR: "/app"
+      TELEGRAM_MCP_DATA_DIR: "/data"
+      TELEGRAM_MCP_SESSION_DIR: "/data/session"
+      TELEGRAM_MCP_LOG_FILE: "/data/logs/mcp_errors.log"
+      TELEGRAM_MCP_ASSISTANT_DB: "/data/session/assistant_memory.sqlite3"
+      TELEGRAM_MCP_CONTENT_DB: "/data/session/content_workflow.sqlite3"
+      TELEGRAM_MCP_WEB_HOST: "0.0.0.0"
+      TELEGRAM_MCP_WEB_PORT: "8765"
+    ports:
+      - "${TELEGRAM_MCP_WEB_BIND_ADDRESS:-127.0.0.1}:${TELEGRAM_MCP_WEB_HOST_PORT:-18765}:8765"
+    volumes:
+      - type: bind
+        source: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}"
+        target: /data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/',timeout=5)",
+        ]
+      interval: 15s
+      timeout: 6s
       retries: 12
       start_period: 20s
 

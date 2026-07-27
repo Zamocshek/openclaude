@@ -420,7 +420,12 @@ describe('AgentApiServer', () => {
     const activity = await fetch(`${server.url}/api/router/activity`, { headers })
     expect(activity.status).toBe(200)
     expect((await activity.json() as {
-      data: Array<{ action: string; target: string }>
+      data: Array<{
+        id: string
+        timestamp: string
+        action: string
+        target: string
+      }>
     }).data).toContainEqual({
       action: 'tools.disabled',
       target: 'model-tool-calls',

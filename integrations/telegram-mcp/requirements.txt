@@ -1,0 +1,11 @@
+fastapi>=0.115.0
+httpx>=0.28.1
+mcp[cli]>=1.8.0
+nest-asyncio>=1.6.0
+Pillow>=10.0.0
+python-dotenv>=1.1.0
+python-json-logger>=3.3.0
+python-multipart>=0.0.9
+python-socks[asyncio]>=2.4.0
+telethon>=1.39.0
+uvicorn[standard]>=0.34.0
