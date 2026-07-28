@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { parseEnv, validateProductionEnv } from './production-control.mjs'
+import {
+  PRODUCTION_BUILD_SERVICES,
+  parseEnv,
+  validateProductionEnv,
+  validateRequiredTelegramCapabilities,
+} from './production-control.mjs'
 
 describe('production control', () => {
   test('parses quoted dotenv values without exposing comments', () => {
@@ -47,5 +52,34 @@ describe('production control', () => {
       OPENCLAUDE_DOCKER_TELEGRAM_ALLOWED_USER_IDS: '5117562403',
       OPENCLAUDE_OPEN_WEBUI_BIND_ADDRESS: '127.0.0.1',
     })).toEqual([])
+  })
+
+  test('requires the Telegram MCP image in every production build', () => {
+    expect(PRODUCTION_BUILD_SERVICES).toContain('openclaude-agent')
+    expect(PRODUCTION_BUILD_SERVICES).toContain('telegram-mcp')
+  })
+
+  test('accepts an enabled Telegram MCP with all bundled skills', () => {
+    expect(validateRequiredTelegramCapabilities([
+      { name: 'telegram-mcp-operations', enabled: true },
+      { name: 'maton-api-gateway', enabled: true },
+      { name: 'vpromotions', enabled: true },
+    ], [{
+      name: 'telegram-mcp',
+      enabled: true,
+      transport: 'http',
+      target: 'http://telegram-mcp:8766/mcp',
+    }])).toEqual([])
+  })
+
+  test('rejects missing or disabled Telegram capabilities', () => {
+    const errors = validateRequiredTelegramCapabilities([
+      { name: 'telegram-mcp-operations', enabled: false },
+    ], [])
+    expect(errors).toContain(
+      'required Telegram skill is disabled: telegram-mcp-operations',
+    )
+    expect(errors).toContain('required MCP server is missing: telegram-mcp')
+    expect(errors.length).toBe(4)
   })
 })

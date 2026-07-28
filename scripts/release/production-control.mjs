@@ -14,6 +14,12 @@ const REPORTS_DIR = join(ROOT, 'reports')
 const BACKUPS_DIR = join(ROOT, 'backups')
 const COMPOSE_ARGS = ['compose', '-f', BASE_COMPOSE, '-f', PROD_COMPOSE]
 const LOOPBACKS = new Set(['127.0.0.1', '::1', 'localhost'])
+export const PRODUCTION_BUILD_SERVICES = ['openclaude-agent', 'telegram-mcp']
+export const REQUIRED_TELEGRAM_SKILLS = [
+  'telegram-mcp-operations',
+  'maton-api-gateway',
+  'vpromotions',
+]
 
 export function parseEnv(text) {
   const result = {}
@@ -186,6 +192,42 @@ async function requestOk(url, options = {}) {
     signal,
   })
   if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`)
+  return response
+}
+
+async function requestJson(url, options = {}) {
+  const response = await requestOk(url, options)
+  return response.json()
+}
+
+export function validateRequiredTelegramCapabilities(skills, servers) {
+  const errors = []
+  const skillMap = new Map(
+    (Array.isArray(skills) ? skills : []).map(skill => [skill.name, skill]),
+  )
+  for (const name of REQUIRED_TELEGRAM_SKILLS) {
+    const skill = skillMap.get(name)
+    if (!skill) errors.push(`required Telegram skill is missing: ${name}`)
+    else if (skill.enabled === false) {
+      errors.push(`required Telegram skill is disabled: ${name}`)
+    }
+  }
+
+  const telegramMcp = (Array.isArray(servers) ? servers : [])
+    .find(server => server.name === 'telegram-mcp')
+  if (!telegramMcp) errors.push('required MCP server is missing: telegram-mcp')
+  else {
+    if (telegramMcp.enabled === false) {
+      errors.push('required MCP server is disabled: telegram-mcp')
+    }
+    if (telegramMcp.transport !== 'http') {
+      errors.push('telegram-mcp must use the http transport')
+    }
+    if (telegramMcp.target !== 'http://telegram-mcp:8766/mcp') {
+      errors.push('telegram-mcp must target http://telegram-mcp:8766/mcp')
+    }
+  }
+  return errors
 }
 
 export async function verify(options = {}) {
@@ -200,6 +242,23 @@ export async function verify(options = {}) {
   await requestOk(`http://127.0.0.1:${apiPort}/v1/models`, {
     key: env.OPENCLAUDE_AGENT_INFERENCE_API_KEY,
   })
+  const [skillsPayload, serversPayload] = await Promise.all([
+    requestJson(`http://127.0.0.1:${apiPort}/api/skills`, {
+      key: env.OPENCLAUDE_AGENT_API_KEY,
+    }),
+    requestJson(`http://127.0.0.1:${apiPort}/api/mcp/servers`, {
+      key: env.OPENCLAUDE_AGENT_API_KEY,
+    }),
+  ])
+  const telegramErrors = validateRequiredTelegramCapabilities(
+    skillsPayload.data,
+    serversPayload.data,
+  )
+  if (telegramErrors.length > 0) {
+    throw new Error(
+      `Required Telegram capabilities failed verification:\n- ${telegramErrors.join('\n- ')}`,
+    )
+  }
   await requestOk(`http://127.0.0.1:${omniPort}/v1/models`, {
     key: env.OMNIROUTE_API_KEY,
   })
@@ -316,7 +375,7 @@ export async function deploy() {
   const { env, identity } = preflight()
   const nextEnv = releaseEnv(env, identity)
   if (!truthy(env.OPENCLAUDE_SKIP_DEPLOY_BACKUP)) backup()
-  docker([...COMPOSE_ARGS, 'build', 'openclaude-agent'], {
+  docker([...COMPOSE_ARGS, 'build', ...PRODUCTION_BUILD_SERVICES], {
     env: nextEnv,
   })
   docker([...COMPOSE_ARGS, 'up', '-d', '--remove-orphans', '--wait'], {

@@ -30,6 +30,16 @@ const COMPOSE_ARGS = COMPOSE_FILES.flatMap(file => ['-f', file])
 const COMPOSE_PROFILE_ARGS = [...COMPOSE_ARGS, '--profile', 'workers']
 const DEFAULT_MODEL = 'qwen3:1.7b'
 const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text:latest'
+const REQUIRED_TELEGRAM_REPOSITORY_FILES = [
+  'integrations/telegram-mcp/Dockerfile',
+  'integrations/telegram-mcp/main.py',
+  'integrations/telegram-mcp/web_app.py',
+  'integrations/telegram-mcp/skills/telegram-mcp-operations/SKILL.md',
+  'integrations/telegram-mcp/skills/maton-api-gateway/SKILL.md',
+  'integrations/telegram-mcp/skills/vpromotions/SKILL.md',
+  'integrations/telegram-mcp/maton skills for telegram/SKILL.md',
+  'src/skills/bundled/telegramMcp.ts',
+]
 
 export function portableDirectories(root = ROOT) {
   const data = join(root, '.openclaude-data')
@@ -43,6 +53,11 @@ export function portableDirectories(root = ROOT) {
     join(data, 'openrag'),
     join(data, 'openrag-workspace'),
   ]
+}
+
+export function hasRequiredTelegramRepositoryFiles(root = ROOT) {
+  return REQUIRED_TELEGRAM_REPOSITORY_FILES.every(path =>
+    existsSync(join(root, path)))
 }
 
 export function renderPortableDefaults() {
@@ -384,6 +399,11 @@ export function doctor() {
     ['Docker', commandAvailable('docker'), true],
     ['Docker Compose 2.24.4+', composeSupportsOverride(), true],
     ['Git (required for full OpenRAG)', commandAvailable('git'), true],
+    [
+      'Bundled Telegram MCP and skills',
+      hasRequiredTelegramRepositoryFiles(),
+      true,
+    ],
     ['uv (auto-installed for full OpenRAG)', commandAvailable('uv'), false],
   ]
   if (existsSync(ENV_PATH)) {
