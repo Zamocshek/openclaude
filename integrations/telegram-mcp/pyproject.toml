@@ -33,7 +33,7 @@ dependencies = [
     "python-json-logger>=3.3.0",
     "python-multipart>=0.0.9",
     "python-socks[asyncio]>=2.4.0",
-    "telethon>=1.39.0",
+    "telethon==1.44.0",
     "uvicorn[standard]>=0.34.0"
 ]
 
