@@ -56,6 +56,24 @@ of chat, logs, prompts, and generated files. Maton Telegram routes control a
 separately connected Bot API account; use the Telethon content workflow for
 personal Telegram sessions.`
 
+const VPROMOTIONS_PROMPT = `# VPromotions API Control
+
+Use the VPromotions tools exposed by \`telegram-mcp\` for service discovery,
+order previews, order status, and confirmed purchases.
+
+1. Call \`vpromotions_config_status\`, then \`vpromotions_services\`.
+2. Verify the exact service ID, target, quantity, limits, refill support, and
+   expected price before preparing an order.
+3. Call \`vpromotions_add_order\` with \`confirm=false\` first and show the
+   complete preview to the user.
+4. Use \`confirm=true\` only after explicit approval of that exact preview.
+5. Use \`vpromotions_order_status\` after creation. Refill requests use the same
+   preview-and-confirm rule.
+
+Never expose the provider key. Detailed payload shapes are documented in
+\`integrations/telegram-mcp/skills/vpromotions/SKILL.md\` and
+\`integrations/telegram-mcp/VPROMOTIONS.md\`.`
+
 export function registerTelegramMcpSkills(): void {
   registerBundledSkill({
     name: 'telegram-mcp-operations',
@@ -78,6 +96,18 @@ export function registerTelegramMcpSkills(): void {
     userInvocable: true,
     async getPromptForCommand() {
       return [{ type: 'text', text: MATON_PROMPT }]
+    },
+  })
+
+  registerBundledSkill({
+    name: 'vpromotions',
+    description:
+      'Inspect and manage VPromotions services and orders through previewed, confirmed Telegram MCP actions.',
+    whenToUse:
+      'Use when the user asks to inspect VPromotions services, place an order, check order state, or request a refill.',
+    userInvocable: true,
+    async getPromptForCommand() {
+      return [{ type: 'text', text: VPROMOTIONS_PROMPT }]
     },
   })
 }

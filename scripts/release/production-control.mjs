@@ -37,11 +37,26 @@ export function parseEnv(text) {
 
 export function validateProductionEnv(env) {
   const errors = []
-  const weakValues = new Set(['', 'change-me', 'sk_omniroute', 'replace-me'])
+  const weakValues = new Set([
+    '',
+    '123456',
+    'CHANGEME',
+    'change-me',
+    'sk_omniroute',
+    'replace-me',
+  ])
   for (const name of [
     'OPENCLAUDE_AGENT_API_KEY',
     'OPENCLAUDE_AGENT_INFERENCE_API_KEY',
+    'OPENCLAUDE_AGENT_WORKER_1_API_KEY',
+    'OPENCLAUDE_AGENT_WORKER_2_API_KEY',
     'OMNIROUTE_API_KEY',
+    'OMNIROUTE_INITIAL_PASSWORD',
+    'OMNIROUTE_STORAGE_ENCRYPTION_KEY',
+    'OMNIROUTE_JWT_SECRET',
+    'OMNIROUTE_API_KEY_SECRET',
+    'OMNIROUTE_WS_BRIDGE_SECRET',
+    'SEARXNG_SECRET',
     'SESSION_SECRET',
     'JWT_SIGNING_KEY',
     'OPENRAG_ENCRYPTION_KEY',
@@ -173,7 +188,7 @@ async function requestOk(url, options = {}) {
   if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`)
 }
 
-export async function verify() {
+export async function verify(options = {}) {
   const env = readProductionEnv()
   const apiPort = env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'
   const omniPort = env.OMNIROUTE_HOST_PORT || '20128'
@@ -213,8 +228,9 @@ export async function verify() {
     await requestOk(`http://127.0.0.1:${doclingPort}/docs`)
   }
 
+  const composeArgs = options.composeArgs || COMPOSE_ARGS
   const published = docker(
-    [...COMPOSE_ARGS, 'ps', '--format', 'json'],
+    [...composeArgs, 'ps', '--format', 'json'],
     { capture: true },
   )
   for (const line of published.split(/\r?\n/u).filter(Boolean)) {
@@ -325,13 +341,25 @@ export function ensureProductionSecrets() {
   const secretGenerators = {
     OPENCLAUDE_AGENT_API_KEY: () => `ocag_${randomBytes(32).toString('hex')}`,
     OPENCLAUDE_AGENT_INFERENCE_API_KEY: () => `ocag_${randomBytes(32).toString('hex')}`,
+    OPENCLAUDE_AGENT_WORKER_1_API_KEY: () => `ocag_${randomBytes(32).toString('hex')}`,
+    OPENCLAUDE_AGENT_WORKER_2_API_KEY: () => `ocag_${randomBytes(32).toString('hex')}`,
     OMNIROUTE_API_KEY: () => `ocag_${randomBytes(32).toString('hex')}`,
+    OMNIROUTE_INITIAL_PASSWORD: () => randomBytes(24).toString('base64url'),
+    OMNIROUTE_STORAGE_ENCRYPTION_KEY: () => randomBytes(32).toString('hex'),
+    OMNIROUTE_JWT_SECRET: () => randomBytes(48).toString('base64url'),
+    OMNIROUTE_API_KEY_SECRET: () => randomBytes(32).toString('hex'),
+    OMNIROUTE_WS_BRIDGE_SECRET: () => randomBytes(32).toString('hex'),
+    SEARXNG_SECRET: () => randomBytes(32).toString('hex'),
     SESSION_SECRET: () => randomBytes(32).toString('hex'),
     JWT_SIGNING_KEY: () => randomBytes(32).toString('hex'),
     OPENRAG_ENCRYPTION_KEY: () => randomBytes(32).toString('base64'),
   }
   for (const [name, generate] of Object.entries(secretGenerators)) {
-    if (!env[name] || ['change-me', 'sk_omniroute', 'replace-me'].includes(env[name])) {
+    if (
+      !env[name] ||
+      ['123456', 'CHANGEME', 'change-me', 'sk_omniroute', 'replace-me']
+        .includes(env[name])
+    ) {
       additions.push(`${name}=${generate()}`)
     }
   }

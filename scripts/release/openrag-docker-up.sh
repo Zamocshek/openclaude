@@ -24,7 +24,8 @@ EMBEDDING_PROVIDER="${OPENCLAUDE_OPENRAG_EMBEDDING_PROVIDER:-${EMBEDDING_PROVIDE
 EMBEDDING_MODEL="${OPENCLAUDE_OPENRAG_EMBEDDING_MODEL:-${EMBEDDING_MODEL:-nomic-embed-text:latest}}"
 OLLAMA_ENDPOINT="${OPENCLAUDE_OPENRAG_OLLAMA_ENDPOINT:-${OLLAMA_ENDPOINT:-http://host.docker.internal:11434}}"
 OPENRAG_VERSION="${OPENCLAUDE_OPENRAG_VERSION:-${OPENRAG_VERSION:-0.5.1}}"
-if [ "${LLM_PROVIDER,,}" = "ollama" ]; then
+SHARED_DOCKER_NETWORK="${OPENCLAUDE_OPENRAG_DOCKER_NETWORK:-}"
+if [ "$(printf '%s' "$LLM_PROVIDER" | tr '[:upper:]' '[:lower:]')" = "ollama" ]; then
   OPENAI_API_KEY=""
 fi
 export OPENSEARCH_PASSWORD LANGFLOW_SUPERUSER LANGFLOW_SUPERUSER_PASSWORD FRONTEND_PORT LANGFLOW_PORT
@@ -100,4 +101,13 @@ fi
 docker compose -f docker-compose.yml -f docker-compose.openclaude.override.yml \
   pull opensearch openrag-backend openrag-frontend langflow
 docker compose -f docker-compose.yml -f docker-compose.openclaude.override.yml up -d --no-build
-docker compose -f docker-compose.yml -f docker-compose.openclaude.override.yml restart openrag-backend
+if [ -n "$SHARED_DOCKER_NETWORK" ]; then
+  docker network inspect "$SHARED_DOCKER_NETWORK" >/dev/null
+  for container in openrag-backend openrag-frontend langflow; do
+    if ! docker inspect "$container" --format '{{json .NetworkSettings.Networks}}' |
+      grep -Fq "\"$SHARED_DOCKER_NETWORK\""; then
+      docker network connect "$SHARED_DOCKER_NETWORK" "$container"
+    fi
+  done
+fi
+docker compose -f docker-compose.yml -f docker-compose.openclaude.override.yml restart langflow openrag-backend

@@ -11,6 +11,7 @@ const pkgDir = path.join(root, 'node_modules', '@askjo', 'camofox-browser')
 const serverJs = path.join(pkgDir, 'server.js')
 const port = process.env.CAMOFOX_PORT || '9377'
 const url = (process.env.CAMOFOX_URL || `http://localhost:${port}`).replace(/\/+$/, '')
+const version = process.env.OPENCLAUDE_CAMOFOX_VERSION || '1.13.0'
 
 if (action === 'help' || action === '-h' || action === '--help') {
   console.log(`OpenClaude Camofox helper
@@ -25,6 +26,7 @@ Environment:
   CAMOFOX_PORT=${port}
   CAMOFOX_URL=${url}
   CAMOFOX_ACCESS_KEY=optional-bearer-token
+  OPENCLAUDE_CAMOFOX_VERSION=${version}
 `)
   process.exit(0)
 }
@@ -48,7 +50,7 @@ async function install() {
   }
 
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-  const result = spawnSync(npmCmd, ['install', '@askjo/camofox-browser@latest'], {
+  const result = spawnSync(npmCmd, ['install', `@askjo/camofox-browser@${version}`], {
     cwd: root,
     stdio: 'inherit',
     shell: process.platform === 'win32',

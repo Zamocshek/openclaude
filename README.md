@@ -1,6 +1,8 @@
 # OpenClaude
 
-Production deployment and operations are documented in
+Clone-to-production setup for Windows, Linux, macOS, and servers is documented
+in [`docs/portable-deployment.md`](docs/portable-deployment.md). Existing
+instance operations are covered by
 [`docs/production-runbook.md`](docs/production-runbook.md).
 
 OpenClaude is an open-source coding-agent CLI for cloud and local model providers.
@@ -31,6 +33,36 @@ OpenClaude is also mirrored to GitLawb:
 - Use the bundled VS Code extension for launch integration and theme support
 
 ## Quick Start
+
+### Complete Docker agent
+
+The portable profile keeps runtime data outside Git, generates production
+secrets, downloads the local Ollama models, and starts the Agent Gateway,
+OpenWebUI, Tool Router, File Manager, OmniRoute, SearXNG, Telegram MCP, skills,
+MCP servers, and workers.
+
+Windows:
+
+```powershell
+git clone https://github.com/Zamocshek/openclaude.git
+cd openclaude
+.\openclaude.ps1 init
+.\openclaude.ps1 up
+```
+
+Linux, macOS, or a server:
+
+```bash
+git clone https://github.com/Zamocshek/openclaude.git
+cd openclaude
+./openclaude.sh init
+./openclaude.sh up
+```
+
+Add `-Full` on PowerShell or `--full` on POSIX to include Hindsight and the
+pinned OpenRAG stack. See the
+[portable deployment guide](docs/portable-deployment.md) for Telegram,
+provider, Codex subscription, and public-server setup.
 
 ### Install
 
