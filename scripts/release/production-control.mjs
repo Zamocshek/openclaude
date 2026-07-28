@@ -15,6 +15,16 @@ const BACKUPS_DIR = join(ROOT, 'backups')
 const COMPOSE_ARGS = ['compose', '-f', BASE_COMPOSE, '-f', PROD_COMPOSE]
 const LOOPBACKS = new Set(['127.0.0.1', '::1', 'localhost'])
 export const PRODUCTION_BUILD_SERVICES = ['openclaude-agent', 'telegram-mcp']
+export const REQUIRED_BASE_MCP_SERVERS = [
+  'mcp-router',
+  'openrag',
+  'camofox',
+  'hindsight',
+  'codegraph',
+  'searxng',
+  'context7',
+  'telegram-mcp',
+]
 export const REQUIRED_TELEGRAM_SKILLS = [
   'telegram-mcp-operations',
   'maton-api-gateway',
@@ -230,6 +240,21 @@ export function validateRequiredTelegramCapabilities(skills, servers) {
   return errors
 }
 
+export function validateRequiredBaseMcpServers(servers) {
+  const errors = []
+  const serverMap = new Map(
+    (Array.isArray(servers) ? servers : []).map(server => [server.name, server]),
+  )
+  for (const name of REQUIRED_BASE_MCP_SERVERS) {
+    const server = serverMap.get(name)
+    if (!server) errors.push(`required base MCP server is missing: ${name}`)
+    else if (server.enabled === false) {
+      errors.push(`required base MCP server is disabled: ${name}`)
+    }
+  }
+  return errors
+}
+
 export async function verify(options = {}) {
   const env = readProductionEnv()
   const apiPort = env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'
@@ -254,11 +279,19 @@ export async function verify(options = {}) {
     skillsPayload.data,
     serversPayload.data,
   )
-  if (telegramErrors.length > 0) {
+  const baseMcpErrors = validateRequiredBaseMcpServers(serversPayload.data)
+  const capabilityErrors = [...baseMcpErrors, ...telegramErrors]
+  if (capabilityErrors.length > 0) {
     throw new Error(
-      `Required Telegram capabilities failed verification:\n- ${telegramErrors.join('\n- ')}`,
+      `Required agent capabilities failed verification:\n- ${capabilityErrors.join('\n- ')}`,
     )
   }
+  await requestOk(`http://127.0.0.1:${apiPort}/router`, {
+    key: env.OPENCLAUDE_AGENT_API_KEY,
+  })
+  await requestOk(`http://127.0.0.1:${apiPort}/files`, {
+    key: env.OPENCLAUDE_AGENT_API_KEY,
+  })
   await requestOk(`http://127.0.0.1:${omniPort}/v1/models`, {
     key: env.OMNIROUTE_API_KEY,
   })

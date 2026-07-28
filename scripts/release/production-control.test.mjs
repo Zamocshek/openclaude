@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  REQUIRED_BASE_MCP_SERVERS,
   PRODUCTION_BUILD_SERVICES,
   parseEnv,
+  validateRequiredBaseMcpServers,
   validateProductionEnv,
   validateRequiredTelegramCapabilities,
 } from './production-control.mjs'
@@ -57,6 +59,21 @@ describe('production control', () => {
   test('requires the Telegram MCP image in every production build', () => {
     expect(PRODUCTION_BUILD_SERVICES).toContain('openclaude-agent')
     expect(PRODUCTION_BUILD_SERVICES).toContain('telegram-mcp')
+  })
+
+  test('requires every base MCP server to remain enabled', () => {
+    const servers = REQUIRED_BASE_MCP_SERVERS.map(name => ({
+      name,
+      enabled: true,
+    }))
+    expect(validateRequiredBaseMcpServers(servers)).toEqual([])
+    expect(validateRequiredBaseMcpServers(
+      servers.filter(server => server.name !== 'hindsight'),
+    )).toContain('required base MCP server is missing: hindsight')
+    expect(validateRequiredBaseMcpServers(
+      servers.map(server =>
+        server.name === 'searxng' ? { ...server, enabled: false } : server),
+    )).toContain('required base MCP server is disabled: searxng')
   })
 
   test('accepts an enabled Telegram MCP with all bundled skills', () => {
