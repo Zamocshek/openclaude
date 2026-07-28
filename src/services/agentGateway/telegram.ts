@@ -510,8 +510,8 @@ export function buildTelegramHelpText(
     `Hindsight: ${links.hindsight}`,
     `OpenRAG: ${links.openRAG}`,
     `Telegram MCP: ${links.telegramMcp}`,
-    `OmniRoute: ${links.omniRoute}`,
     `File Manager: ${links.fileManager}`,
+    `OmniRoute: ${links.omniRoute}`,
   )
 
   return lines.join('\n')

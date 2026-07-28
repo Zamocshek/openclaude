@@ -119,10 +119,8 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('OpenRAG: http://localhost:3000')
     expect(help).toContain('Telegram MCP: http://localhost:18765')
     expect(help).toContain('OmniRoute: http://localhost:20128')
+    expect(help).toEndWith('OmniRoute: http://localhost:20128')
     expect(help).toContain(
-      `File Manager: http://127.0.0.1:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'}/files`,
-    )
-    expect(help).toEndWith(
       `File Manager: http://127.0.0.1:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'}/files`,
     )
     expect(commands).toContainEqual({
