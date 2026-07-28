@@ -9,6 +9,7 @@ import {
   stat,
 } from 'fs/promises'
 import { basename, relative, resolve, sep } from 'path'
+import { Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import type { IncomingMessage, ServerResponse } from 'http'
 
@@ -22,7 +23,12 @@ export type FileManagerEntry = {
 
 export class FileManagerError extends Error {
   constructor(
-    readonly code: 'invalid_path' | 'not_found' | 'conflict' | 'forbidden',
+    readonly code:
+      | 'invalid_path'
+      | 'not_found'
+      | 'conflict'
+      | 'forbidden'
+      | 'too_large',
     message: string,
   ) {
     super(message)
@@ -122,7 +128,15 @@ export async function streamFileManagerUpload(
   directory: string,
   filename: string,
   request: IncomingMessage,
+  maxBytes = getFileManagerMaxUploadBytes(),
 ): Promise<{ path: string; size: number }> {
+  const contentLength = Number(request.headers['content-length'] || 0)
+  if (maxBytes > 0 && Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new FileManagerError(
+      'too_large',
+      `Upload exceeds the ${maxBytes} byte limit`,
+    )
+  }
   const safeName = validateFileName(filename)
   const targetDirectory = await resolveManagedPath(root, directory)
   const directoryStat = await stat(targetDirectory.targetPath).catch(error => {
@@ -134,8 +148,22 @@ export async function streamFileManagerUpload(
   const targetPath = resolve(targetDirectory.targetPath, safeName)
   await ensureParentWithinRoot(targetDirectory.rootPath, targetPath)
   const output = createWriteStream(targetPath, { flags: 'wx' })
+  let received = 0
+  const limiter = new Transform({
+    transform(chunk, _encoding, callback) {
+      received += Buffer.byteLength(chunk)
+      if (maxBytes > 0 && received > maxBytes) {
+        callback(new FileManagerError(
+          'too_large',
+          `Upload exceeds the ${maxBytes} byte limit`,
+        ))
+        return
+      }
+      callback(null, chunk)
+    },
+  })
   try {
-    await pipeline(request, output)
+    await pipeline(request, limiter, output)
   } catch (error) {
     await rm(targetPath, { force: true }).catch(() => {})
     throw mapFileError(error, safeName)
@@ -145,6 +173,17 @@ export async function streamFileManagerUpload(
     path: relative(targetDirectory.rootPath, targetPath).split(sep).join('/'),
     size: uploaded.size,
   }
+}
+
+export function getFileManagerMaxUploadBytes(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const parsed = Number.parseInt(
+    String(env.OPENCLAUDE_FILE_MANAGER_MAX_UPLOAD_BYTES || ''),
+    10,
+  )
+  if (!Number.isFinite(parsed)) return 1024 * 1024 * 1024
+  return Math.max(0, parsed)
 }
 
 export async function streamFileManagerDownload(

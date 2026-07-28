@@ -1,0 +1,38 @@
+services:
+  openclaude-agent:
+    build:
+      context: .
+    image: "openclaude-agent:${OPENCLAUDE_RELEASE_TAG:-production}"
+    privileged: false
+    environment:
+      OPENCLAUDE_ROUTER_AUTO_AUTH: "0"
+      OPENCLAUDE_AGENT_INFERENCE_API_KEY: "${OPENCLAUDE_AGENT_INFERENCE_API_KEY:?set OPENCLAUDE_AGENT_INFERENCE_API_KEY}"
+    volumes: !override
+      - type: bind
+        source: "${OPENCLAUDE_HOST_CONFIG_DIR:-${USERPROFILE}/.openclaude}"
+        target: /home/node/.openclaude
+      - type: bind
+        source: "${OPENCLAUDE_HOST_CODEX_DIR:-${USERPROFILE}/.codex}"
+        target: /run/codex
+      - type: bind
+        source: .
+        target: /workspace
+    labels:
+      org.opencontainers.image.revision: "${OPENCLAUDE_RELEASE_REVISION:-unknown}"
+      org.opencontainers.image.version: "${OPENCLAUDE_RELEASE_TAG:-production}"
+
+  openclaude-worker-1:
+    image: "openclaude-agent:${OPENCLAUDE_RELEASE_TAG:-production}"
+    privileged: false
+
+  openclaude-worker-2:
+    image: "openclaude-agent:${OPENCLAUDE_RELEASE_TAG:-production}"
+    privileged: false
+
+  omniroute:
+    environment:
+      REQUIRE_API_KEY: "true"
+
+  open-webui:
+    environment:
+      OPENAI_API_KEYS: "${OPENCLAUDE_AGENT_INFERENCE_API_KEY:?set OPENCLAUDE_AGENT_INFERENCE_API_KEY}"

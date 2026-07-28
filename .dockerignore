@@ -8,6 +8,10 @@ dist
 !.env.example
 coverage
 reports
+backups
+output
+Vladimir_Kuplevatskyi
+logs
 vscode-extension
 python
 docs

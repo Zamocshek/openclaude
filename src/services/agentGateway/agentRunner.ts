@@ -180,8 +180,6 @@ const IGNORABLE_STDERR_PATTERNS = [
   /^\[web-search\]\s+/i,
 ]
 const IGNORABLE_POST_SUCCESS_STDERR_PATTERNS = [
-  /^API Error:\s*fetch failed\.?$/i,
-  /^TypeError:\s*fetch failed\.?$/i,
 ]
 const DEFAULT_FIRST_OUTPUT_PROGRESS_MS = 60_000
 const MAX_AGENT_TEXT_BUFFER_CHARS = 4 * 1024 * 1024
@@ -776,6 +774,7 @@ export function runOpenClaudeAgent(
           void observer.onFinish?.(observerContext, result)
         }
       }
+      subagentRuntime?.cleanup()
       resolve(result)
     }
 

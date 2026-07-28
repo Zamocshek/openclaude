@@ -1,7 +1,7 @@
 # ---- production dependencies ----
 # Keep this stage independent from source files so ordinary TypeScript changes
 # do not reinstall the complete MCP/runtime dependency tree.
-FROM node:22-slim AS production-deps
+FROM node:22-slim@sha256:f3a68cf41a855d227d1b0ab832bed9749469ef38cf4f58182fb8c893bc462383 AS production-deps
 
 RUN npm install -g bun@1.3.12
 
@@ -12,7 +12,7 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
 # ---- build stage ----
-FROM node:22-slim AS build
+FROM node:22-slim@sha256:f3a68cf41a855d227d1b0ab832bed9749469ef38cf4f58182fb8c893bc462383 AS build
 
 # Install Bun
 RUN npm install -g bun@1.3.12
@@ -35,7 +35,7 @@ COPY tsconfig.json ./
 RUN bun run build
 
 # ---- runtime stage ----
-FROM node:22-slim
+FROM node:22-slim@sha256:f3a68cf41a855d227d1b0ab832bed9749469ef38cf4f58182fb8c893bc462383
 
 WORKDIR /app
 
@@ -74,7 +74,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # changes do not trigger a fresh apt install during every Docker rebuild.
 COPY scripts/gateway-control-mcp.mjs scripts/gateway-control-mcp.mjs
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+ARG UV_VERSION=0.11.32
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
     && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
     && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
 

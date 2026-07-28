@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'fs'
+import { randomUUID } from 'crypto'
 import { join } from 'path'
 
 import {
@@ -10,6 +11,7 @@ import { getAgentGatewayStateDir, type AgentGatewayConfig, type AgentGatewaySuba
 export type GatewaySubagentRuntime = {
   settingsPath: string
   agentsJson: string
+  cleanup: () => void
   roles: Array<{
     name: string
     provider: string
@@ -34,7 +36,7 @@ type RuntimeRoute = AgentGatewaySubagentRoute & {
   apiKey: string
 }
 
-const SETTINGS_FILE = 'subagent-routing.settings.json'
+const SETTINGS_FILE_PREFIX = 'subagent-routing'
 
 /**
  * Produces an ephemeral OpenClaude settings layer for each gateway child run.
@@ -60,10 +62,9 @@ export function prepareGatewaySubagentRuntime(
   for (const [name, route] of routes) {
     const existing = agentModels[route.model]
     if (existing && (existing.base_url !== route.baseUrl || existing.api_key !== route.apiKey)) {
-      // The upstream agent-routing format keys providers by model ID. Refusing
-      // an ambiguous duplicate is safer than silently sending a task to a
-      // different API endpoint.
-      continue
+      throw new Error(
+        `Ambiguous subagent model route "${route.model}" is configured for multiple providers or endpoints`,
+      )
     }
     agentModels[route.model] = { base_url: route.baseUrl, api_key: route.apiKey }
     agentRouting[name] = route.model
@@ -73,7 +74,10 @@ export function prepareGatewaySubagentRuntime(
   if (roles.length === 0) return undefined
 
   const stateDir = getAgentGatewayStateDir()
-  const settingsPath = join(stateDir, SETTINGS_FILE)
+  const settingsPath = join(
+    stateDir,
+    `${SETTINGS_FILE_PREFIX}.${process.pid}.${randomUUID()}.settings.json`,
+  )
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(settingsPath, `${JSON.stringify({ agentModels, agentRouting }, null, 2)}\n`, {
     encoding: 'utf8',
@@ -84,6 +88,13 @@ export function prepareGatewaySubagentRuntime(
   return {
     settingsPath,
     agentsJson: JSON.stringify(buildGatewayAgentDefinitions(config, roles)),
+    cleanup: () => {
+      try {
+        rmSync(settingsPath, { force: true })
+      } catch {
+        // Child cleanup is best effort; stale files are mode 0600.
+      }
+    },
     roles,
   }
 }

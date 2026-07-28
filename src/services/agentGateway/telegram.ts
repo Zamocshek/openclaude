@@ -554,6 +554,8 @@ function parseTelegramBotCommandName(syntax: string): string | undefined {
 export class TelegramAgentBridge {
   private readonly config: AgentGatewayConfig
   private stopped = false
+  private pollAbortController: AbortController | undefined
+  private pollPromise: Promise<void> | undefined
   private offset = 0
   private pollLoopRunning = false
   private pollStartedAt: string | undefined
@@ -584,7 +586,8 @@ export class TelegramAgentBridge {
   start(): void {
     if (!this.config.telegram.enabled || !this.config.telegram.botToken) return
     void this.registerBotCommands()
-    void this.pollLoop().catch(error => {
+    this.pollAbortController = new AbortController()
+    this.pollPromise = this.pollLoop(this.pollAbortController.signal).catch(error => {
       this.pollLoopRunning = false
       this.lastPollErrorAt = new Date().toISOString()
       this.lastPollError = summarizeTelegramError(error)
@@ -622,17 +625,30 @@ export class TelegramAgentBridge {
     }
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true
     this.queueEpoch++
+    this.pollAbortController?.abort()
     for (const task of this.activeTasks.values()) {
       task.progress?.dispose()
       task.controller.abort()
     }
+    const pending = [
+      ...(this.pollPromise ? [this.pollPromise] : []),
+      ...this.taskQueues.values(),
+    ]
     this.activeTasks.clear()
     this.taskQueues.clear()
     this.queuedTaskCounts.clear()
     this.chatQueueEpochs.clear()
+    if (pending.length > 0) {
+      await Promise.race([
+        Promise.allSettled(pending),
+        sleep(getTelegramShutdownTimeoutMs()),
+      ])
+    }
+    this.pollPromise = undefined
+    this.pollAbortController = undefined
   }
 
   private async ensureChatSessionsLoaded(): Promise<void> {
@@ -979,6 +995,19 @@ export class TelegramAgentBridge {
     run: () => Promise<void>,
   ): Promise<void> {
     const waitingBefore = this.queuedTaskCounts.get(chatId) ?? 0
+    const limits = getTelegramQueueLimits()
+    const waitingTotal = [...this.queuedTaskCounts.values()]
+      .reduce((total, count) => total + count, 0)
+    if (
+      waitingBefore >= limits.perChat
+      || waitingTotal >= limits.global
+    ) {
+      await this.sendMessage(
+        chatId,
+        `Queue is full (${waitingBefore}/${limits.perChat} for this chat, ${waitingTotal}/${limits.global} globally). Wait for an active task or use /stop to clear this chat queue.`,
+      )
+      return
+    }
     const epoch = this.getChatQueueEpoch(chatId)
     const position = getTelegramQueuePosition({
       active: this.activeTasks.has(chatId),
@@ -1058,14 +1087,14 @@ export class TelegramAgentBridge {
     )
   }
 
-  private async pollLoop(): Promise<void> {
+  private async pollLoop(signal: AbortSignal): Promise<void> {
     this.pollLoopRunning = true
     this.pollStartedAt = new Date().toISOString()
     try {
-      while (!this.stopped) {
+      while (!this.stopped && !signal.aborted) {
         try {
           this.lastPollStartedAt = new Date().toISOString()
-          const updates = await this.getUpdates()
+          const updates = await this.getUpdates(signal)
           this.lastPollOkAt = new Date().toISOString()
           this.consecutivePollErrors = 0
           if (updates.length > 0) this.lastUpdateAt = this.lastPollOkAt
@@ -1079,6 +1108,7 @@ export class TelegramAgentBridge {
             }
           }
         } catch (error) {
+          if (this.stopped || signal.aborted) break
           this.consecutivePollErrors++
           this.lastPollErrorAt = new Date().toISOString()
           this.lastPollError = summarizeTelegramError(error)
@@ -1109,7 +1139,7 @@ export class TelegramAgentBridge {
     await this.sendMessage(chatId, `Telegram bridge error: ${detail}`)
   }
 
-  private async getUpdates(): Promise<TelegramUpdate[]> {
+  private async getUpdates(signal: AbortSignal): Promise<TelegramUpdate[]> {
     const token = this.config.telegram.botToken
     if (!token) return []
 
@@ -1118,7 +1148,9 @@ export class TelegramAgentBridge {
     url.searchParams.set('allowed_updates', JSON.stringify(['message', 'callback_query']))
     if (this.offset) url.searchParams.set('offset', String(this.offset))
 
-    const response = await fetch(url)
+    const response = await fetch(url, {
+      signal: combineAbortSignals(signal, getTelegramFetchTimeoutMs('getUpdates')),
+    })
     const data = await response.json() as TelegramApiResponse<TelegramUpdate[]>
     if (!data.ok) {
       throw new Error(data.description || 'Telegram getUpdates failed')
@@ -1134,7 +1166,9 @@ export class TelegramAgentBridge {
       const url = new URL(`https://api.telegram.org/bot${token}/getUpdates`)
       url.searchParams.set('timeout', '0')
       url.searchParams.set('offset', String(this.offset))
-      await fetch(url)
+      await fetch(url, {
+        signal: AbortSignal.timeout(getTelegramFetchTimeoutMs('getUpdates')),
+      })
     } catch {
       // Best effort. Restart/stop should not fail because Telegram ack failed.
     }
@@ -4252,6 +4286,7 @@ export class TelegramAgentBridge {
     const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: 'POST',
       body,
+      signal: AbortSignal.timeout(getTelegramFetchTimeoutMs(method)),
     })
     const data = await response.json() as TelegramApiResponse<unknown>
     if (!response.ok || !data.ok) {
@@ -4270,6 +4305,7 @@ export class TelegramAgentBridge {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(getTelegramFetchTimeoutMs(method)),
     })
     const data = await response.json() as TelegramApiResponse<T>
     if (!response.ok || !data.ok) {
@@ -4288,6 +4324,62 @@ export class TelegramAgentBridge {
       homeChatId: this.config.telegram.homeChatId,
     })
   }
+}
+
+export function getTelegramQueueLimits(
+  env: NodeJS.ProcessEnv = process.env,
+): { perChat: number; global: number } {
+  return {
+    perChat: boundedPositiveInteger(
+      env.OPENCLAUDE_TELEGRAM_MAX_QUEUED_PER_CHAT
+        || env.OPENCLAUDE_TELEGRAM_QUEUE_MAX_PER_CHAT,
+      50,
+      1,
+      1_000,
+    ),
+    global: boundedPositiveInteger(
+      env.OPENCLAUDE_TELEGRAM_MAX_QUEUED_TOTAL
+        || env.OPENCLAUDE_TELEGRAM_QUEUE_MAX_GLOBAL,
+      500,
+      1,
+      10_000,
+    ),
+  }
+}
+
+function getTelegramFetchTimeoutMs(method: string): number {
+  const fallback = method === 'getUpdates' ? 40_000 : 30_000
+  return boundedPositiveInteger(
+    process.env.OPENCLAUDE_TELEGRAM_FETCH_TIMEOUT_MS
+      || process.env.OPENCLAUDE_TELEGRAM_HTTP_TIMEOUT_MS,
+    fallback,
+    1_000,
+    120_000,
+  )
+}
+
+function getTelegramShutdownTimeoutMs(): number {
+  return boundedPositiveInteger(
+    process.env.OPENCLAUDE_TELEGRAM_SHUTDOWN_TIMEOUT_MS,
+    15_000,
+    1_000,
+    120_000,
+  )
+}
+
+function boundedPositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const parsed = Number.parseInt(String(value || ''), 10)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(maximum, Math.max(minimum, parsed))
+}
+
+function combineAbortSignals(signal: AbortSignal, timeoutMs: number): AbortSignal {
+  return AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
 }
 
 export function isTelegramActorAllowed(input: {
@@ -5432,7 +5524,7 @@ async function loadProviderProfile(): Promise<AgentProviderProfile> {
     else if (env.CLAUDE_CODE_USE_GITHUB) provider = 'github'
     else if (env.ANTHROPIC_API_KEY) provider = 'anthropic'
     else if (
-      env.CODEX_API_KEY &&
+      (env.CODEX_API_KEY || env.CODEX_AUTH_JSON_PATH || env.CODEX_HOME) &&
       isCodexAlias(env.OPENCLAUDE_MODEL || env.OPENAI_MODEL || '') &&
       !(env.OPENCLAUDE_BASE_URL || env.OPENAI_BASE_URL)
     ) {

@@ -290,6 +290,43 @@ describe('AgentApiServer', () => {
     expect(authorized.status).toBe(200)
   })
 
+  test('accepts the inference key for agent runs but not admin APIs', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({
+        api: {
+          apiKey: 'admin-secret',
+          inferenceApiKey: 'inference-secret',
+        } as never,
+      }),
+    })
+    await server.start()
+
+    const completion = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer inference-secret',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'Use an agent tool' }],
+      }),
+    })
+    expect(completion.status).toBe(200)
+    expect(runOpenClaudeAgent).toHaveBeenCalledTimes(1)
+
+    const admin = await fetch(`${server.url}/api/mcp/servers`, {
+      headers: { Authorization: 'Bearer inference-secret' },
+    })
+    expect(admin.status).toBe(401)
+
+    const authorizedAdmin = await fetch(`${server.url}/api/mcp/servers`, {
+      headers: { Authorization: 'Bearer admin-secret' },
+    })
+    expect(authorizedAdmin.status).not.toBe(401)
+  })
+
   test('manages redacted runtime MCP servers through the protected API', async () => {
     const projectRoot = join(tempGatewayStateDir!, 'project')
     await mkdir(projectRoot, { recursive: true })

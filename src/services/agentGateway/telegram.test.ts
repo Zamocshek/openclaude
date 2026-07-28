@@ -35,6 +35,7 @@ import {
   getTelegramAgentFailureKindLimit,
   getTelegramAgentRepeatedFailureLimit,
   getTelegramAgentRecoveryAttemptLimit,
+  getTelegramQueueLimits,
   getTelegramQueuePosition,
   getTelegramProviderShortcut,
   isTelegramActorAllowed,
@@ -800,6 +801,17 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(getTelegramQueuePosition({ active: true, waiting: 0 })).toBe(1)
     expect(getTelegramQueuePosition({ active: true, waiting: 2 })).toBe(3)
     expect(formatTelegramQueueNotice(2, 'second task')).toContain('Queued #2')
+  })
+
+  test('bounds Telegram queue backpressure settings', () => {
+    expect(getTelegramQueueLimits({
+      OPENCLAUDE_TELEGRAM_MAX_QUEUED_PER_CHAT: '75',
+      OPENCLAUDE_TELEGRAM_MAX_QUEUED_TOTAL: '900',
+    })).toEqual({ perChat: 75, global: 900 })
+    expect(getTelegramQueueLimits({
+      OPENCLAUDE_TELEGRAM_MAX_QUEUED_PER_CHAT: '0',
+      OPENCLAUDE_TELEGRAM_MAX_QUEUED_TOTAL: '999999',
+    })).toEqual({ perChat: 1, global: 10_000 })
   })
 
   test('stop clears queued Telegram tasks for the same chat', async () => {

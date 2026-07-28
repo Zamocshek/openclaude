@@ -22,6 +22,9 @@ describe('checkDomainBlocklist', () => {
     process.env.CLAUDE_CODE_USE_OPENAI = '1'
     mock.module('../../utils/model/providers.js', () => ({
       getAPIProvider: () => 'openai',
+      getAPIProviderForStatsig: () => 'openai',
+      isFirstPartyAnthropicBaseUrl: () => false,
+      usesAnthropicAccountFlow: () => false,
     }))
     const getSpy = mock(() =>
       Promise.resolve({ status: 200, data: { can_fetch: true } }),
@@ -39,6 +42,9 @@ describe('checkDomainBlocklist', () => {
     process.env.CLAUDE_CODE_USE_GEMINI = '1'
     mock.module('../../utils/model/providers.js', () => ({
       getAPIProvider: () => 'gemini',
+      getAPIProviderForStatsig: () => 'gemini',
+      isFirstPartyAnthropicBaseUrl: () => false,
+      usesAnthropicAccountFlow: () => false,
     }))
     const getSpy = mock(() =>
       Promise.resolve({ status: 200, data: { can_fetch: true } }),
@@ -59,6 +65,9 @@ describe('checkDomainBlocklist', () => {
 
     mock.module('../../utils/model/providers.js', () => ({
       getAPIProvider: () => 'firstParty',
+      getAPIProviderForStatsig: () => 'firstParty',
+      isFirstPartyAnthropicBaseUrl: () => true,
+      usesAnthropicAccountFlow: () => true,
     }))
     const getSpy = mock(() =>
       Promise.resolve({ status: 200, data: { can_fetch: true } }),

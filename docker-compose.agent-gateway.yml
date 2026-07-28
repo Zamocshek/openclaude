@@ -1,9 +1,18 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${OPENCLAUDE_DOCKER_LOG_MAX_SIZE:-20m}"
+    max-file: "${OPENCLAUDE_DOCKER_LOG_MAX_FILES:-5}"
+
 services:
   openclaude-agent:
     build:
       context: .
     image: openclaude-agent:local
     restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    logging: *default-logging
     command: ["--agent-gateway-server"]
     stdin_open: true
     tty: true
@@ -23,11 +32,12 @@ services:
       OPENCLAUDE_AGENT_API_HOST: "0.0.0.0"
       OPENCLAUDE_AGENT_API_PORT: "8642"
       OPENCLAUDE_AGENT_API_KEY: "${OPENCLAUDE_AGENT_API_KEY:-change-me}"
+      OPENCLAUDE_AGENT_INFERENCE_API_KEY: "${OPENCLAUDE_AGENT_INFERENCE_API_KEY:-${OPENCLAUDE_AGENT_API_KEY:-change-me}}"
       OPENCLAUDE_AGENT_API_HOST_PORT: "${OPENCLAUDE_AGENT_API_HOST_PORT:-8642}"
       OPENCLAUDE_OPEN_WEBUI_HOST_PORT: "${OPENCLAUDE_OPEN_WEBUI_HOST_PORT:-8080}"
       OPENCLAUDE_ROUTER_PUBLIC_URL: "${OPENCLAUDE_ROUTER_PUBLIC_URL:-}"
       OPENCLAUDE_FILE_MANAGER_PUBLIC_URL: "${OPENCLAUDE_FILE_MANAGER_PUBLIC_URL:-}"
-      OPENCLAUDE_ROUTER_AUTO_AUTH: "${OPENCLAUDE_ROUTER_AUTO_AUTH:-1}"
+      OPENCLAUDE_ROUTER_AUTO_AUTH: "${OPENCLAUDE_ROUTER_AUTO_AUTH:-0}"
       OPENCLAUDE_OPEN_WEBUI_PUBLIC_URL: "${OPENCLAUDE_OPEN_WEBUI_PUBLIC_URL:-}"
       HINDSIGHT_PUBLIC_URL: "${HINDSIGHT_PUBLIC_URL:-}"
       OPENRAG_PUBLIC_URL: "${OPENRAG_PUBLIC_URL:-}"
@@ -176,20 +186,20 @@ services:
       HINDSIGHT_MCP_TIMEOUT: "${HINDSIGHT_MCP_TIMEOUT:-60}"
     ports:
       - "${OPENCLAUDE_AGENT_API_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_API_HOST_PORT:-8642}:8642"
-      - "${OPENCLAUDE_AGENT_WEB_3000_PORT:-13000}:3000"
-      - "${OPENCLAUDE_AGENT_WEB_3001_PORT:-13001}:3001"
-      - "${OPENCLAUDE_AGENT_WEB_3002_PORT:-13002}:3002"
-      - "${OPENCLAUDE_AGENT_WEB_3003_PORT:-13003}:3003"
-      - "${OPENCLAUDE_AGENT_WEB_3004_PORT:-13004}:3004"
-      - "${OPENCLAUDE_AGENT_WEB_3005_PORT:-13005}:3005"
-      - "${OPENCLAUDE_AGENT_WEB_3006_PORT:-13006}:3006"
-      - "${OPENCLAUDE_AGENT_WEB_3007_PORT:-13007}:3007"
-      - "${OPENCLAUDE_AGENT_WEB_3008_PORT:-13008}:3008"
-      - "${OPENCLAUDE_AGENT_WEB_3009_PORT:-13009}:3009"
-      - "${OPENCLAUDE_AGENT_WEB_3010_PORT:-13010}:3010"
-      - "${OPENCLAUDE_AGENT_WEB_5173_PORT:-15173}:5173"
-      - "${OPENCLAUDE_AGENT_WEB_8000_PORT:-18000}:8000"
-      - "${OPENCLAUDE_AGENT_WEB_8080_PORT:-18080}:8080"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3000_PORT:-13000}:3000"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3001_PORT:-13001}:3001"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3002_PORT:-13002}:3002"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3003_PORT:-13003}:3003"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3004_PORT:-13004}:3004"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3005_PORT:-13005}:3005"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3006_PORT:-13006}:3006"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3007_PORT:-13007}:3007"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3008_PORT:-13008}:3008"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3009_PORT:-13009}:3009"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3010_PORT:-13010}:3010"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_5173_PORT:-15173}:5173"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_8000_PORT:-18000}:8000"
+      - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_8080_PORT:-18080}:8080"
     volumes:
       - type: bind
         source: "${OPENCLAUDE_HOST_CONFIG_DIR:-${USERPROFILE}/.openclaude}"
@@ -209,7 +219,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "node -e \"fetch('http://127.0.0.1:8642/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+          "node -e \"fetch('http://127.0.0.1:8642/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
         ]
       interval: 15s
       timeout: 5s
@@ -222,6 +232,9 @@ services:
       context: .
     image: openclaude-agent:local
     restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    logging: *default-logging
     command: ["--agent-gateway-server"]
     stdin_open: true
     tty: true
@@ -370,7 +383,7 @@ services:
       HINDSIGHT_BANK_ID: "${HINDSIGHT_WORKER_BANK_ID:-${HINDSIGHT_BANK_ID:-openclaude-agent}}"
       HINDSIGHT_MCP_TIMEOUT: "${HINDSIGHT_MCP_TIMEOUT:-60}"
     ports:
-      - "${OPENCLAUDE_AGENT_WORKER_1_HOST_PORT:-8741}:8741"
+      - "${OPENCLAUDE_AGENT_WORKER_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WORKER_1_HOST_PORT:-8741}:8741"
     volumes:
       - openclaude-worker-1-config:/home/node/.openclaude
       - ./:/workspace
@@ -378,7 +391,7 @@ services:
       - "host.docker.internal:host-gateway"
     working_dir: /workspace
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8741/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8741/ready >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 12
@@ -390,6 +403,9 @@ services:
       context: .
     image: openclaude-agent:local
     restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    logging: *default-logging
     command: ["--agent-gateway-server"]
     stdin_open: true
     tty: true
@@ -538,7 +554,7 @@ services:
       HINDSIGHT_BANK_ID: "${HINDSIGHT_WORKER_BANK_ID:-${HINDSIGHT_BANK_ID:-openclaude-agent}}"
       HINDSIGHT_MCP_TIMEOUT: "${HINDSIGHT_MCP_TIMEOUT:-60}"
     ports:
-      - "${OPENCLAUDE_AGENT_WORKER_2_HOST_PORT:-8742}:8742"
+      - "${OPENCLAUDE_AGENT_WORKER_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WORKER_2_HOST_PORT:-8742}:8742"
     volumes:
       - openclaude-worker-2-config:/home/node/.openclaude
       - ./:/workspace
@@ -546,7 +562,7 @@ services:
       - "host.docker.internal:host-gateway"
     working_dir: /workspace
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8742/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8742/ready >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 12
@@ -558,6 +574,7 @@ services:
       dockerfile: Dockerfile
     image: openclaude-telegram-mcp:local
     restart: unless-stopped
+    logging: *default-logging
     command: ["python", "main.py"]
     env_file:
       - path: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}/.env"
@@ -592,6 +609,7 @@ services:
   telegram-mcp-web:
     image: openclaude-telegram-mcp:local
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       telegram-mcp:
         condition: service_healthy
@@ -628,8 +646,9 @@ services:
       start_period: 20s
 
   omniroute-redis:
-    image: redis:8.6.2-alpine
+    image: redis:8.6.2-alpine@sha256:c5e375abb885e6b2021c0377879e4890bf76f9065b8922ffc113f2b226b9fc17
     restart: unless-stopped
+    logging: *default-logging
     command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
     volumes:
       - omniroute-redis:/data
@@ -643,6 +662,7 @@ services:
   omniroute:
     image: diegosouzapw/omniroute:latest@sha256:badb560971fdc23c2fb84b3e8695116239ff215b4cca4b07076201a8efae7f0d
     restart: unless-stopped
+    logging: *default-logging
     stop_grace_period: 40s
     depends_on:
       omniroute-redis:
@@ -653,7 +673,7 @@ services:
       HOSTNAME: "0.0.0.0"
       DATA_DIR: "/app/data"
       REDIS_URL: "redis://omniroute-redis:6379"
-      REQUIRE_API_KEY: "${OMNIROUTE_REQUIRE_API_KEY:-false}"
+      REQUIRE_API_KEY: "${OMNIROUTE_REQUIRE_API_KEY:-true}"
       OMNIROUTE_MEMORY_MB: "${OMNIROUTE_MEMORY_MB:-2048}"
       INITIAL_PASSWORD: "${OMNIROUTE_INITIAL_PASSWORD:-}"
       STORAGE_ENCRYPTION_KEY: "${OMNIROUTE_STORAGE_ENCRYPTION_KEY:-}"
@@ -674,6 +694,7 @@ services:
   searxng:
     image: docker.io/searxng/searxng:latest@sha256:268fdb05efbb7b4fdc5957a20c42389bfb1b1b27b5eddeb98f75ec80c45b960f
     restart: unless-stopped
+    logging: *default-logging
     environment:
       SEARXNG_BIND_ADDRESS: "0.0.0.0"
       SEARXNG_PORT: "8080"
@@ -693,25 +714,28 @@ services:
       start_period: 20s
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:main@sha256:b8095f79a6a8ffad8f830bdacc9b5b0aef805689b31bca0b065cc2424d3cfaeb
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
-      - openclaude-agent
+      openclaude-agent:
+        condition: service_healthy
     environment:
       OPENAI_API_BASE_URLS: "http://openclaude-agent:8642/v1"
-      OPENAI_API_KEYS: "${OPENCLAUDE_AGENT_API_KEY:-change-me}"
+      OPENAI_API_KEYS: "${OPENCLAUDE_AGENT_INFERENCE_API_KEY:-${OPENCLAUDE_AGENT_API_KEY:-change-me}}"
       WEBUI_AUTH: "${OPEN_WEBUI_AUTH:-False}"
     ports:
-      - "${OPENCLAUDE_OPEN_WEBUI_HOST_PORT:-8080}:8080"
+      - "${OPENCLAUDE_OPEN_WEBUI_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_OPEN_WEBUI_HOST_PORT:-8080}:8080"
     volumes:
       - open-webui:/app/backend/data
 
   openclaude-ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee
     container_name: openclaude-ollama
     restart: unless-stopped
+    logging: *default-logging
     ports:
-      - "${OPENCLAUDE_OLLAMA_HOST_PORT:-11434}:11434"
+      - "${OPENCLAUDE_OLLAMA_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_OLLAMA_HOST_PORT:-11434}:11434"
     volumes:
       - openclaude-ollama:/root/.ollama
     healthcheck:

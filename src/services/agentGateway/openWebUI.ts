@@ -45,7 +45,8 @@ export function getOpenWebUICommandPreview(
     ? envAssignment('DATA_DIR', config.openWebUI.dataDir)
     : ''
   const openAIBase = getAgentApiBaseUrl(config)
-  const openAIKey = config.api.apiKey || 'openclaude-local'
+  const openAIKey =
+    config.api.inferenceApiKey || config.api.apiKey || 'openclaude-local'
   const envPrefix = [
     dataPrefix,
     ...Object.entries(getOpenWebUIRuntimeEnv()).map(([name, value]) =>
@@ -96,7 +97,8 @@ export async function startOpenWebUI(
         ...(config.openWebUI.dataDir ? { DATA_DIR: config.openWebUI.dataDir } : {}),
         WEBUI_AUTH: getOpenWebUIAuthMode(),
         OPENAI_API_BASE_URLS: getAgentApiBaseUrl(config),
-        OPENAI_API_KEYS: config.api.apiKey || 'openclaude-local',
+        OPENAI_API_KEYS:
+          config.api.inferenceApiKey || config.api.apiKey || 'openclaude-local',
       },
     },
   )

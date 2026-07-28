@@ -21,6 +21,7 @@ export type AgentGatewayConfig = {
     host: string
     port: number
     apiKey?: string
+    inferenceApiKey?: string
     modelName: string
     corsOrigins: string[]
   }
@@ -294,6 +295,7 @@ export function normalizeAgentGatewayConfig(
       host: String(api.host || defaults.api.host),
       port: normalizePort(api.port, defaults.api.port),
       apiKey: String(api.apiKey || '').trim() || undefined,
+      inferenceApiKey: String(api.inferenceApiKey || '').trim() || undefined,
       modelName: String(api.modelName || defaults.api.modelName).trim(),
       corsOrigins: normalizeStringArray(api.corsOrigins),
     },
@@ -562,6 +564,8 @@ export function applyAgentGatewayEnvOverrides(
       host: env.OPENCLAUDE_AGENT_API_HOST ?? config.api.host,
       port: env.OPENCLAUDE_AGENT_API_PORT ?? config.api.port,
       apiKey: env.OPENCLAUDE_AGENT_API_KEY ?? config.api.apiKey,
+      inferenceApiKey:
+        env.OPENCLAUDE_AGENT_INFERENCE_API_KEY ?? config.api.inferenceApiKey,
       modelName: env.OPENCLAUDE_AGENT_API_MODEL ?? config.api.modelName,
       corsOrigins:
         env.OPENCLAUDE_AGENT_API_CORS_ORIGINS !== undefined

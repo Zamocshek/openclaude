@@ -25,6 +25,9 @@ const home = process.env.OPENCLAUDE_HINDSIGHT_HOME || path.join(os.homedir(), '.
 const dataDir = process.env.HINDSIGHT_DATA_DIR || path.join(os.homedir(), '.hindsight-docker')
 const apiPort = process.env.HINDSIGHT_API_PORT || '8888'
 const uiPort = process.env.HINDSIGHT_UI_PORT || '9999'
+const bindAddress = process.env.HINDSIGHT_BIND_ADDRESS || '127.0.0.1'
+const image = process.env.HINDSIGHT_IMAGE ||
+  'ghcr.io/vectorize-io/hindsight:latest@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1'
 const url = (process.env.HINDSIGHT_URL || `http://localhost:${apiPort}`).replace(/\/+$/, '')
 
 function help() {
@@ -42,6 +45,8 @@ Environment:
   HINDSIGHT_URL=${url}
   HINDSIGHT_API_PORT=${apiPort}
   HINDSIGHT_UI_PORT=${uiPort}
+  HINDSIGHT_BIND_ADDRESS=${bindAddress}
+  HINDSIGHT_IMAGE=${image}
   HINDSIGHT_API_LLM_API_KEY=<provider key used by Hindsight>
   HINDSIGHT_API_LLM_PROVIDER=openai|anthropic|gemini|groq|ollama|lmstudio|minimax
   HINDSIGHT_API_LLM_MODEL=<model>
@@ -85,18 +90,34 @@ function install() {
   console.log(`Hindsight source is ready: ${home}`)
 }
 
-function dockerUp() {
+async function waitForDockerApiReady(timeoutMs = 180_000) {
+  const startedAt = Date.now()
+  let lastError
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(`${url}/docs`, {
+        signal: AbortSignal.timeout(5_000),
+      })
+      if (response.status < 500) return
+      lastError = new Error(`HTTP ${response.status}`)
+    } catch (error) {
+      lastError = error
+    }
+    await new Promise(resolve => setTimeout(resolve, 2_000))
+  }
+  throw new Error(
+    `Hindsight API did not become ready within ${timeoutMs}ms: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  )
+}
+
+async function dockerUp() {
   if (!dockerAvailable()) throw new Error('Docker is required for Hindsight docker-up')
   fs.mkdirSync(dataDir, { recursive: true })
   const name = process.env.HINDSIGHT_CONTAINER_NAME || 'openclaude-hindsight'
   const running = dockerContainerRunning(name)
   if (running === true) {
-    run('docker', ['update', '--restart', 'unless-stopped', name])
-    console.log(`Hindsight API: http://localhost:${apiPort}`)
-    console.log(`Hindsight UI:  http://localhost:${uiPort}`)
-    return
-  }
-  if (running === false) {
+    run('docker', ['rm', '-f', name])
+  } else if (running === false) {
     run('docker', ['rm', '-f', name])
   }
   const env = {
@@ -115,13 +136,13 @@ function dockerUp() {
     '--name',
     name,
     '-p',
-    `${apiPort}:8888`,
+    `${bindAddress}:${apiPort}:8888`,
     '-p',
-    `${uiPort}:9999`,
+    `${bindAddress}:${uiPort}:9999`,
     '-e',
-    `HINDSIGHT_API_LLM_API_KEY=${env.HINDSIGHT_API_LLM_API_KEY}`,
+    'HINDSIGHT_API_LLM_API_KEY',
     '-e',
-    `HINDSIGHT_API_LLM_PROVIDER=${env.HINDSIGHT_API_LLM_PROVIDER}`,
+    'HINDSIGHT_API_LLM_PROVIDER',
     '-v',
     `${dataDir}:/home/hindsight/.pg0`,
   ]
@@ -133,8 +154,9 @@ function dockerUp() {
   } else if (process.env.OPENCLAUDE_BASE_URL || process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL) {
     args.push('-e', `HINDSIGHT_API_LLM_BASE_URL=${process.env.OPENCLAUDE_BASE_URL || process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL}`)
   }
-  args.push('ghcr.io/vectorize-io/hindsight:latest')
+  args.push(image)
   run('docker', args, { env })
+  await waitForDockerApiReady()
   console.log(`Hindsight API: http://localhost:${apiPort}`)
   console.log(`Hindsight UI:  http://localhost:${uiPort}`)
 }
@@ -174,7 +196,8 @@ async function request(pathname, options = {}) {
 
 async function test() {
   const bankId = encodeURIComponent(process.env.HINDSIGHT_BANK_ID || 'openclaude-agent')
-  const content = `OpenClaude Hindsight smoke test at ${new Date().toISOString()}`
+  const smokeId = `openclaude-smoke-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  const content = `OpenClaude Hindsight smoke test ${smokeId}`
   await request(`/v1/default/banks/${bankId}/memories`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -186,16 +209,30 @@ async function test() {
   const recall = await request(`/v1/default/banks/${bankId}/memories/recall`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query: 'OpenClaude Hindsight smoke test', budget: 'low' }),
+    body: JSON.stringify({ query: smokeId, budget: 'low' }),
   })
-  console.log(JSON.stringify(recall, null, 2))
+  const match = Array.isArray(recall?.results)
+    ? recall.results.find(result => String(result?.text || '').includes(smokeId))
+    : undefined
+  if (!match) throw new Error('Hindsight smoke memory was not recalled')
+  if (match.document_id) {
+    await request(
+      `/v1/default/banks/${bankId}/documents/${encodeURIComponent(match.document_id)}`,
+      { method: 'DELETE' },
+    )
+  }
+  console.log(JSON.stringify({
+    ok: true,
+    recalled: true,
+    cleanedUp: Boolean(match.document_id),
+  }))
 }
 
 async function main() {
   const command = process.argv[2] || 'help'
   if (command === 'help' || command === '--help' || command === '-h') help()
   else if (command === 'install') install()
-  else if (command === 'docker-up') dockerUp()
+  else if (command === 'docker-up') await dockerUp()
   else if (command === 'docker-down') dockerDown()
   else if (command === 'test') await test()
   else throw new Error(`Unknown command: ${command}`)

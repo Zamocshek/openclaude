@@ -142,6 +142,9 @@ class SseQueue {
       waiter(event)
       return
     }
+    if (this.events.length >= getApiRunMaxBufferedEvents()) {
+      this.events.shift()
+    }
     this.events.push(event)
   }
 
@@ -162,6 +165,11 @@ class SseQueue {
       this.waiters.push(waiter)
     })
   }
+}
+
+type ManagedRun = {
+  queue: SseQueue
+  cleanupTimer?: ReturnType<typeof setTimeout>
 }
 
 type FrontmatterStreamStripper = {
@@ -185,7 +193,7 @@ export class AgentApiServer {
   private readonly conversationLatest = new Map<string, string>()
   private readonly chatSessions = new Map<string, ConversationMessage[]>()
   private readonly chatSessionOrder: string[] = []
-  private readonly runs = new Map<string, SseQueue>()
+  private readonly runs = new Map<string, ManagedRun>()
   private apiAgentQueueTail: Promise<unknown> = Promise.resolve()
   private apiAgentQueueActive: ApiAgentQueueItem | undefined
   private apiAgentQueueWaiting = 0
@@ -233,6 +241,11 @@ export class AgentApiServer {
   }
 
   async stop(): Promise<void> {
+    for (const run of this.runs.values()) {
+      if (run.cleanupTimer) clearTimeout(run.cleanupTimer)
+      run.queue.push(null)
+    }
+    this.runs.clear()
     if (!this.server) return
     const server = this.server
     this.server = undefined
@@ -308,6 +321,28 @@ export class AgentApiServer {
       return
     }
 
+    if (url.pathname === '/ready' || url.pathname === '/v1/ready') {
+      const runtime = this.getRuntimeStatus?.() || {}
+      const telegram = runtime.telegram as {
+        stopped?: boolean
+        polling?: boolean
+      } | undefined
+      const telegramReady = !this.config.telegram.enabled
+        || Boolean(telegram && !telegram.stopped && telegram.polling)
+      const ready = this.config.api.enabled && telegramReady
+      this.writeJson(response, ready ? 200 : 503, {
+        status: ready ? 'ready' : 'not_ready',
+        checks: {
+          api: this.config.api.enabled,
+          telegram: telegramReady,
+          cron: this.config.cron.enabled,
+        },
+      }, {
+        'Cache-Control': 'no-store',
+      })
+      return
+    }
+
     if ((url.pathname === '/router' || url.pathname === '/router/') && method === 'GET') {
       this.writeHtml(
         response,
@@ -329,7 +364,7 @@ export class AgentApiServer {
     }
 
     if (isProtectedApiPath(url.pathname)) {
-      if (!this.checkAuth(request, response)) return
+      if (!this.checkAuth(request, response, url.pathname)) return
     }
 
     const apiPath = normalizeOpenAiPath(url.pathname)
@@ -1368,7 +1403,7 @@ export class AgentApiServer {
 
     const runId = `run_${randomUUID().replace(/-/g, '')}`
     const queue = new SseQueue()
-    this.runs.set(runId, queue)
+    this.runs.set(runId, { queue })
     const prompt = normalizeResponsesInput(input)
     const instructions =
       typeof body.instructions === 'string' ? body.instructions.trim() : ''
@@ -1418,8 +1453,8 @@ export class AgentApiServer {
       })
     }
 
-    void queued.promise.then(
-      async result => {
+    void queued.promise
+      .then(async result => {
         if (result.exitCode === 0) {
           const responseText = await this.prepareAgentResponseText(result.text, 'run')
           recordApiChatLog({
@@ -1436,7 +1471,16 @@ export class AgentApiServer {
             output: responseText,
             usage: emptyUsage(),
           })
-          await this.onAgentResponse?.(responseText, 'run')
+          try {
+            await this.onAgentResponse?.(responseText, 'run')
+          } catch (error) {
+            queue.push({
+              event: 'run.warning',
+              run_id: runId,
+              timestamp: Date.now() / 1000,
+              warning: `Response delivery hook failed: ${String(error)}`,
+            })
+          }
         } else {
           queue.push({
             event: 'run.failed',
@@ -1445,18 +1489,19 @@ export class AgentApiServer {
             error: formatAgentFailureForApi(result),
           })
         }
-        queue.push(null)
-      },
-      error => {
+      })
+      .catch(error => {
         queue.push({
           event: 'run.failed',
           run_id: runId,
           timestamp: Date.now() / 1000,
           error: String(error),
         })
+      })
+      .finally(() => {
         queue.push(null)
-      },
-    )
+        this.scheduleRunCleanup(runId, queue)
+      })
 
     this.writeJson(response, 202, {
       run_id: runId,
@@ -1470,11 +1515,12 @@ export class AgentApiServer {
     runId: string,
     response: ServerResponse,
   ): Promise<void> {
-    const queue = this.runs.get(runId)
-    if (!queue) {
+    const run = this.runs.get(runId)
+    if (!run) {
       this.writeJson(response, 404, openAiError('Run not found'))
       return
     }
+    const queue = run.queue
 
     response.writeHead(200, {
       ...this.corsHeaders(),
@@ -1496,8 +1542,21 @@ export class AgentApiServer {
       response.write(`data: ${JSON.stringify(event)}\n\n`)
     }
 
+    if (run.cleanupTimer) clearTimeout(run.cleanupTimer)
     this.runs.delete(runId)
     response.end()
+  }
+
+  private scheduleRunCleanup(runId: string, queue: SseQueue): void {
+    const run = this.runs.get(runId)
+    if (!run || run.queue !== queue) return
+    if (run.cleanupTimer) clearTimeout(run.cleanupTimer)
+    run.cleanupTimer = setTimeout(() => {
+      if (this.runs.get(runId)?.queue === queue) {
+        this.runs.delete(runId)
+      }
+    }, getApiRunRetentionMs())
+    run.cleanupTimer.unref?.()
   }
 
   private async handleMemoryCollection(
@@ -1662,6 +1721,8 @@ export class AgentApiServer {
     if (error instanceof FileManagerError) {
       const statusCode = error.code === 'not_found'
         ? 404
+        : error.code === 'too_large'
+          ? 413
         : error.code === 'conflict'
           ? 409
           : error.code === 'forbidden'
@@ -1979,12 +2040,20 @@ export class AgentApiServer {
   private checkAuth(
     request: IncomingMessage,
     response: ServerResponse,
+    pathname: string,
   ): boolean {
-    const apiKey = this.config.api.apiKey
-    if (!apiKey) return true
+    const adminApiKey = this.config.api.apiKey
+    const inferenceApiKey = this.config.api.inferenceApiKey
+    if (!adminApiKey && (!inferenceApiKey || !isInferenceApiPath(pathname))) {
+      return true
+    }
 
     const auth = request.headers.authorization || ''
-    if (auth.startsWith('Bearer ') && auth.slice(7).trim() === apiKey) {
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
+    if (
+      (adminApiKey && token === adminApiKey) ||
+      (inferenceApiKey && isInferenceApiPath(pathname) && token === inferenceApiKey)
+    ) {
       return true
     }
 
@@ -2063,6 +2132,8 @@ export class AgentApiServer {
       ...this.corsHeaders(),
       'Content-Type': 'text/html; charset=utf-8',
       'Content-Security-Policy': "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      'Cache-Control': 'no-store, max-age=0',
+      Pragma: 'no-cache',
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
     })
@@ -2182,6 +2253,24 @@ function getRouterAutoAuthKey(config: AgentGatewayConfig): string | undefined {
   return config.api.apiKey || undefined
 }
 
+function getApiRunRetentionMs(): number {
+  const parsed = Number.parseInt(
+    String(process.env.OPENCLAUDE_API_RUN_RETENTION_MS || ''),
+    10,
+  )
+  if (!Number.isFinite(parsed)) return 15 * 60 * 1000
+  return Math.min(24 * 60 * 60 * 1000, Math.max(10_000, parsed))
+}
+
+function getApiRunMaxBufferedEvents(): number {
+  const parsed = Number.parseInt(
+    String(process.env.OPENCLAUDE_API_RUN_MAX_BUFFERED_EVENTS || ''),
+    10,
+  )
+  if (!Number.isFinite(parsed)) return 4_096
+  return Math.min(100_000, Math.max(100, parsed))
+}
+
 function formatAgentFailureForApi(result: AgentRunResult): string {
   const lines = ['Agent run failed.']
   if (result.failureKind) {
@@ -2257,6 +2346,19 @@ function normalizeOpenAiPath(pathname: string): string {
 
 function isProtectedApiPath(pathname: string): boolean {
   if (pathname.startsWith('/api/')) return true
+  const path = normalizeOpenAiPath(pathname)
+  return (
+    path === '/models' ||
+    path.startsWith('/models/') ||
+    path === '/chat/completions' ||
+    path === '/responses' ||
+    path.startsWith('/responses/') ||
+    path === '/runs' ||
+    path.startsWith('/runs/')
+  )
+}
+
+function isInferenceApiPath(pathname: string): boolean {
   const path = normalizeOpenAiPath(pathname)
   return (
     path === '/models' ||

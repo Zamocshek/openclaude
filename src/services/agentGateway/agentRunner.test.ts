@@ -70,6 +70,7 @@ describe('agent gateway prompt builder', () => {
         settingsPath: '/tmp/subagent-routing.settings.json',
         agentsJson: '{}',
         roles: [{ name: 'gateway-explore', provider: 'deepseek', model: 'deepseek-v4-flash' }],
+        cleanup: () => {},
       },
     })
 
@@ -488,9 +489,11 @@ describe('agent gateway prompt builder', () => {
     const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
     process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = `"${process.execPath}" "${fakeCli}"`
     try {
+      const config = getDefaultAgentGatewayConfig()
+      config.subagents.enabled = false
       const result = await runOpenClaudeAgent({
         prompt: 'Fix code and run tests.',
-        config: getDefaultAgentGatewayConfig(),
+        config,
         cwd,
         streamEvents: true,
         suppressObservers: true,
@@ -538,14 +541,14 @@ describe('agent gateway prompt builder', () => {
     expect(providerUnauthorized.kind).toBe('auth')
   })
 
-  test('ignores late transient fetch stderr after stream-json success', () => {
+  test('does not hide late fetch failures after stream-json success', () => {
     expect(isIgnorablePostSuccessStderr({
       text: 'Saved.',
       streamResultText: 'Saved.',
       stderr: 'API Error: fetch failed',
       timedOut: false,
       activity: ['assistant response', 'result: success'],
-    })).toBe(true)
+    })).toBe(false)
 
     expect(isIgnorablePostSuccessStderr({
       text: '',
