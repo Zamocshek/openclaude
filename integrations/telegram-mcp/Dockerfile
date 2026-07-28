@@ -14,15 +14,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency definition files
-# If using Poetry:
-# COPY pyproject.toml poetry.lock* ./
-# RUN pip install --no-cache-dir poetry
-# RUN poetry config virtualenvs.create false && poetry install --no-dev --no-interaction --no-ansi
-# If using pip with requirements.txt:
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+# Install the exact dependency graph committed with the integration.
+COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir uv==0.9.27 \
+    && uv sync --frozen --no-dev --no-install-project
+ENV PATH="/app/.venv/bin:${PATH}"
 
 # Copy application code needed by both MCP and the web console.
 COPY main.py account_admin.py assistant_memory.py content_workflow.py maton_client.py operator_config.py post_formatting.py runtime_config.py web_app.py session_string_generator.py stat_report_renderer.py vpromotions_client.py ./
@@ -55,10 +52,8 @@ ENV TELEGRAM_MCP_TRANSPORT="stdio"
 ENV TELEGRAM_MCP_HOST="0.0.0.0"
 ENV TELEGRAM_MCP_PORT="8000"
 ENV VPROMOTIONS_API_URL="https://vpromotions.ru/api/v2"
-ENV VPROMOTIONS_API_KEY=""
 ENV VPROMOTIONS_TIMEOUT="30"
 ENV MATON_API_URL="https://api.maton.ai"
-ENV MATON_API_KEY=""
 ENV MATON_TIMEOUT="30"
 
 VOLUME ["/data"]

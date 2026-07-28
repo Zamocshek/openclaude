@@ -26,6 +26,7 @@ const dataDir = process.env.HINDSIGHT_DATA_DIR || path.join(os.homedir(), '.hind
 const apiPort = process.env.HINDSIGHT_API_PORT || '8888'
 const uiPort = process.env.HINDSIGHT_UI_PORT || '9999'
 const bindAddress = process.env.HINDSIGHT_BIND_ADDRESS || '127.0.0.1'
+const dockerNetwork = process.env.HINDSIGHT_DOCKER_NETWORK || ''
 const image = process.env.HINDSIGHT_IMAGE ||
   'ghcr.io/vectorize-io/hindsight:latest@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1'
 const url = (process.env.HINDSIGHT_URL || `http://localhost:${apiPort}`).replace(/\/+$/, '')
@@ -46,6 +47,7 @@ Environment:
   HINDSIGHT_API_PORT=${apiPort}
   HINDSIGHT_UI_PORT=${uiPort}
   HINDSIGHT_BIND_ADDRESS=${bindAddress}
+  HINDSIGHT_DOCKER_NETWORK=${dockerNetwork || '<optional existing Docker network>'}
   HINDSIGHT_IMAGE=${image}
   HINDSIGHT_API_LLM_API_KEY=<provider key used by Hindsight>
   HINDSIGHT_API_LLM_PROVIDER=openai|anthropic|gemini|groq|ollama|lmstudio|minimax
@@ -139,6 +141,8 @@ async function dockerUp() {
     `${bindAddress}:${apiPort}:8888`,
     '-p',
     `${bindAddress}:${uiPort}:9999`,
+    '--add-host',
+    'host.docker.internal:host-gateway',
     '-e',
     'HINDSIGHT_API_LLM_API_KEY',
     '-e',
@@ -146,6 +150,9 @@ async function dockerUp() {
     '-v',
     `${dataDir}:/home/hindsight/.pg0`,
   ]
+  if (dockerNetwork) {
+    args.push('--network', dockerNetwork)
+  }
   if (env.HINDSIGHT_API_LLM_MODEL) {
     args.push('-e', `HINDSIGHT_API_LLM_MODEL=${env.HINDSIGHT_API_LLM_MODEL}`)
   }
