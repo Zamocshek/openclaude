@@ -49,6 +49,7 @@ describe('production control', () => {
       SESSION_SECRET: 'session-secret',
       JWT_SIGNING_KEY: 'jwt-secret',
       OPENRAG_ENCRYPTION_KEY: 'encryption-secret',
+      PENTEST_GATEWAY_AUTH_TOKEN: 'pentest-gateway-secret',
       OPENCLAUDE_DOCKER_TELEGRAM_ENABLED: '1',
       OPENCLAUDE_DOCKER_TELEGRAM_BOT_TOKEN: 'configured',
       OPENCLAUDE_DOCKER_TELEGRAM_ALLOWED_USER_IDS: '5117562403',
@@ -78,6 +79,7 @@ describe('production control', () => {
 
   test('accepts an enabled Telegram MCP with all bundled skills', () => {
     expect(validateRequiredTelegramCapabilities([
+      { name: 'pentest', enabled: true },
       { name: 'telegram-mcp-operations', enabled: true },
       { name: 'maton-api-gateway', enabled: true },
       { name: 'vpromotions', enabled: true },
@@ -97,6 +99,6 @@ describe('production control', () => {
       'required Telegram skill is disabled: telegram-mcp-operations',
     )
     expect(errors).toContain('required MCP server is missing: telegram-mcp')
-    expect(errors.length).toBe(4)
+    expect(errors.length).toBe(5)
   })
 })

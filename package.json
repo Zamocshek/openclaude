@@ -65,6 +65,7 @@
     "portable:down:full": "node scripts/release/portable-control.mjs down --full",
     "portable:verify": "node scripts/release/portable-control.mjs verify",
     "test:hindsight:mcp": "node scripts/release/test-hindsight-mcp-bridge.cjs",
+    "test:pentest:mcp": "node scripts/release/test-pentest-mcp.cjs",
     "test:research:mcp": "node scripts/release/test-research-mcp.cjs",
     "check:base:mcp": "node scripts/release/check-base-mcp.cjs",
     "test": "bun test",

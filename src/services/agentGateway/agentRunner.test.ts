@@ -111,6 +111,28 @@ describe('agent gateway prompt builder', () => {
     expect(args).toContain('C:\\workspace')
   })
 
+  test('uses a strict read-only runtime for pentest mode', () => {
+    const config = getDefaultAgentGatewayConfig()
+    config.runner.permissionMode = 'bypassPermissions'
+
+    const args = buildAgentArgs(config, { toolPolicy: 'pentest' })
+
+    expect(args).toContain('--strict-mcp-config')
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('default')
+    expect(args).not.toContain('--dangerously-skip-permissions')
+    expect(args[args.indexOf('--tools') + 1]).toBe(
+      'Skill,TodoWrite,Agent',
+    )
+    const allowed = args[args.indexOf('--allowedTools') + 1]
+    expect(allowed).toContain('mcp__pentest__pentest_nmap_run')
+    expect(allowed).toContain('mcp__codegraph__codegraph_explore')
+    expect(allowed).not.toContain('context7')
+    const denied = args[args.indexOf('--disallowedTools') + 1]
+    expect(denied).toContain('Bash')
+    expect(denied).toContain('PowerShell')
+    expect(denied).toContain('WebFetch')
+  })
+
   test('adds OpenRAG usage guidance when RAG integration is configured', () => {
     const config = getDefaultAgentGatewayConfig()
     config.openRAG.enabled = true

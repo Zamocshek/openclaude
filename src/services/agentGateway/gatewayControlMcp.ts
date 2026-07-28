@@ -7,7 +7,9 @@ import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
 
 const CURRENT_FILE = fileURLToPath(import.meta.url)
 const CONTROL_MCP_CONFIG_FILE = 'gateway-control.mcp.json'
+const PENTEST_MCP_CONFIG_FILE = 'gateway-pentest.mcp.json'
 const CONTROL_MCP_NAME = 'gateway-control'
+const PENTEST_MCP_ALLOWLIST = new Set(['pentest', 'codegraph'])
 
 type McpConfig = {
   mcpServers?: Record<string, unknown>
@@ -18,24 +20,39 @@ type McpConfig = {
  * This exposes routing controls as real model tools instead of requiring the
  * Telegram bridge to infer configuration changes from user phrasing.
  */
-export function prepareGatewayControlMcpConfig(projectRoot: string): string | undefined {
+export function prepareGatewayControlMcpConfig(
+  projectRoot: string,
+  profile: 'default' | 'pentest' = 'default',
+): string | undefined {
   const scriptPath = resolveGatewayControlMcpScriptPath()
-  if (!scriptPath) return resolveEffectiveMcpConfigPath(projectRoot)
-
   const sourcePath = resolveEffectiveMcpConfigPath(projectRoot)
   const source = readMcpConfig(sourcePath)
-  const mcpServers = { ...(source.mcpServers || {}) }
-  mcpServers[CONTROL_MCP_NAME] = {
-    command: process.execPath,
-    args: [scriptPath],
-    env: {
-      OPENCLAUDE_AGENT_GATEWAY_CONFIG_PATH: getAgentGatewayConfigPath(),
-      OPENCLAUDE_AGENT_GATEWAY_STATE_DIR: getAgentGatewayStateDir(),
-    },
+  const sourceServers = source.mcpServers || {}
+  const mcpServers = profile === 'pentest'
+    ? Object.fromEntries(
+        Object.entries(sourceServers)
+          .filter(([name]) => PENTEST_MCP_ALLOWLIST.has(name)),
+      )
+    : { ...sourceServers }
+
+  if (profile === 'default' && scriptPath) {
+    mcpServers[CONTROL_MCP_NAME] = {
+      command: process.execPath,
+      args: [scriptPath],
+      env: {
+        OPENCLAUDE_AGENT_GATEWAY_CONFIG_PATH: getAgentGatewayConfigPath(),
+        OPENCLAUDE_AGENT_GATEWAY_STATE_DIR: getAgentGatewayStateDir(),
+      },
+    }
+  } else if (profile === 'default' && !scriptPath) {
+    return sourcePath
   }
 
   const stateDir = getAgentGatewayStateDir()
-  const outputPath = join(stateDir, CONTROL_MCP_CONFIG_FILE)
+  const outputPath = join(
+    stateDir,
+    profile === 'pentest' ? PENTEST_MCP_CONFIG_FILE : CONTROL_MCP_CONFIG_FILE,
+  )
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(outputPath, `${JSON.stringify({ mcpServers }, null, 2)}\n`, {
     encoding: 'utf8',
