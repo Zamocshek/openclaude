@@ -31,6 +31,7 @@ export type AgentRunOptions = {
   streamEvents?: boolean
   signal?: AbortSignal
   suppressObservers?: boolean
+  toolPolicy?: 'default' | 'pentest'
 }
 
 export type AgentRunResult = {
@@ -185,6 +186,19 @@ const DEFAULT_FIRST_OUTPUT_PROGRESS_MS = 60_000
 const MAX_AGENT_TEXT_BUFFER_CHARS = 4 * 1024 * 1024
 const MAX_AGENT_STDERR_BUFFER_CHARS = 1024 * 1024
 const MAX_TRACKED_TOOL_USES = 512
+const PENTEST_ALLOWED_TOOLS = [
+  'Skill',
+  'TodoWrite',
+  'Agent',
+  'mcp__pentest__pentest_health',
+  'mcp__pentest__pentest_scope_check',
+  'mcp__pentest__pentest_state_query',
+  'mcp__pentest__pentest_state_update',
+  'mcp__pentest__pentest_nmap_parse',
+  'mcp__pentest__pentest_nmap_run',
+  'mcp__pentest__pentest_report_generate',
+  'mcp__codegraph__codegraph_explore',
+]
 const CODING_TASK_INTENT_RE =
   /(?:\b(?:code|coding|bug|debug|implement|implementation|refactor|repository|script|unit test|integration test|typecheck|lint|build|deploy|function|class|endpoint)\b|\.(?:c|cc|cpp|cs|css|go|html|java|js|jsx|json|kt|php|py|rb|rs|sh|sql|swift|ts|tsx|vue|yaml|yml)\b|(?:код|баг|дебаг|рефактор|программ|скрипт|репозитор|тест|сборк|депло|функц|класс|эндпоинт|апи))/iu
 
@@ -253,8 +267,10 @@ export function buildAgentArgs(
     streamEvents?: boolean
     prompt?: string
     subagentRuntime?: GatewaySubagentRuntime
+    toolPolicy?: 'default' | 'pentest'
   } = {},
 ): string[] {
+  const pentestPolicy = options.toolPolicy === 'pentest'
   const args = [
     '--print',
     ...(options.streamEvents ? ['--verbose'] : []),
@@ -265,14 +281,24 @@ export function buildAgentArgs(
     '--max-turns',
     String(config.runner.maxTurns),
   ]
-  const mcpConfigPath = config.runner.cwd
-    ? prepareGatewayControlMcpConfig(config.runner.cwd)
+  const mcpProjectRoot = config.runner.cwd || (pentestPolicy ? process.cwd() : undefined)
+  const mcpConfigPath = mcpProjectRoot
+    ? prepareGatewayControlMcpConfig(
+        mcpProjectRoot,
+        pentestPolicy ? 'pentest' : 'default',
+      )
     : undefined
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath)
   }
+  if (pentestPolicy) {
+    args.push('--strict-mcp-config')
+  }
 
-  if (config.runner.permissionMode === 'acceptEdits') {
+  if (pentestPolicy) {
+    args.push('--permission-mode', 'default')
+    args.push('--allowedTools', PENTEST_ALLOWED_TOOLS.join(','))
+  } else if (config.runner.permissionMode === 'acceptEdits') {
     args.push('--permission-mode', 'acceptEdits')
   } else if (config.runner.permissionMode === 'bypassPermissions') {
     args.push('--allow-dangerously-skip-permissions')
@@ -282,7 +308,9 @@ export function buildAgentArgs(
     }
   }
 
-  if (config.runner.disableTools) {
+  if (pentestPolicy) {
+    args.push('--tools', PENTEST_ALLOWED_TOOLS.slice(0, 3).join(','))
+  } else if (config.runner.disableTools) {
     args.push('--tools', '')
   } else if (config.runner.availableTools.length > 0) {
     // A configured allowlist otherwise removes the Agent tool entirely. Keep
@@ -293,8 +321,22 @@ export function buildAgentArgs(
     args.push('--tools', availableTools.join(','))
   }
 
-  if (config.runner.disallowedTools.length > 0) {
-    args.push('--disallowedTools', config.runner.disallowedTools.join(','))
+  const disallowedTools = new Set(config.runner.disallowedTools)
+  if (pentestPolicy) {
+    for (const tool of [
+      'Bash',
+      'PowerShell',
+      'WebFetch',
+      'WebSearch',
+      'Edit',
+      'Write',
+      'NotebookEdit',
+    ]) {
+      disallowedTools.add(tool)
+    }
+  }
+  if (disallowedTools.size > 0) {
+    args.push('--disallowedTools', [...disallowedTools].join(','))
   }
 
   if (options.subagentRuntime) {
@@ -588,6 +630,7 @@ export function runOpenClaudeAgent(
         streamEvents: options.streamEvents,
         prompt: options.prompt,
         subagentRuntime,
+        toolPolicy: options.toolPolicy,
       }),
     ]
     const observerContext: AgentRunObserverContext = {

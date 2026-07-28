@@ -374,6 +374,43 @@ process immediately. Override these limits with
 `OPENCLAUDE_AGENT_RUNNER_MAX_TURNS`, `OPENCLAUDE_AGENT_RUNNER_TIMEOUT_MS`,
 `OPENCLAUDE_AGENT_WORKER_MAX_TURNS`, and `OPENCLAUDE_AGENT_WORKER_TIMEOUT_MS`.
 
+### Authorized Pentest Mode
+
+The bundled `pentest` skill and base `pentest` MCP provide an authorized
+penetration-testing workflow inspired by
+[PentestCode](https://github.com/s0ld13rr/pentestcode). In Telegram, send
+`/pentest` to keep the mode active for the chat, `/pentest <task>` for one
+request, or `/mode off` to leave it. Before active testing, record scope through
+the trusted Telegram bridge:
+
+```text
+/pentest auth lab-1 | 10.10.10.0/24,app.lab.example | I own this isolated lab
+```
+
+The model cannot mint this production authorization itself. The same skill and
+MCP state/report tools are available through OpenWebUI and the OpenAI-compatible
+Agent API; trusted production scope creation remains a Gateway operation.
+
+The mode records an explicit engagement scope before active testing and refuses
+targets or action classes that do not match it. Its persistent state includes
+hosts, services, findings, evidence, action history, and protected credential
+references. Nmap XML is parsed with `pentest_nmap_parse`; reports are generated
+with `pentest_report_generate`. Telegram pentest runs use a strict read-only
+runtime: direct shell, PowerShell, general web fetch, and file editing tools are
+removed, and only the Pentest and CodeGraph MCP servers are loaded.
+Bounded network scans run through `pentest_nmap_run`, which verifies
+`active_scan` scope before spawning Nmap without a shell and imports the XML
+result automatically. Docker also includes `nmap`, `dig`, `whois`, `ping`,
+`nc`, and `jq` for basic authorized assessment work. Engagement state defaults
+to the ignored `.openclaude-data/pentest/` directory and is shared by the main
+container and agent workers.
+
+The implementation intentionally does not reproduce PentestCode's `free` mode:
+active scans, vulnerability validation, credential tests, and post-exploitation
+must pass `pentest_scope_check`. Raw credentials and session secrets are
+excluded from tool responses, progress messages, durable memory, and generated
+reports.
+
 Start or refresh the stack with:
 
 ```bash
@@ -382,11 +419,13 @@ docker compose -f docker-compose.agent-gateway.yml up -d --build
 
 Production containers run a strict base-MCP preflight after CodeGraph indexing
 and before the gateway starts. It verifies the tracked `.mcp.json`, the pinned
-CodeGraph/SearXNG/Context7 packages, the CodeGraph database, and SearXNG health.
+CodeGraph/SearXNG/Context7 packages, the Pentest MCP contract, the CodeGraph
+database, and SearXNG health.
 Run the same local check with `bun run check:base:mcp`; use
 `OPENCLAUDE_MCP_PREFLIGHT_STRICT=0` only when intentionally accepting a degraded
 startup. The full protocol smoke test is `bun run test:research:mcp` and also
-checks CodeGraph plus the disconnected MCP Router fallback.
+checks CodeGraph plus the disconnected MCP Router fallback. Run the persistent
+scope/state/report smoke test with `bun run test:pentest:mcp`.
 
 For host-native MCP use, set `SEARXNG_URL=http://127.0.0.1:18088`. Docker uses
 the internal `http://searxng:8080` service address automatically. Keep SearXNG

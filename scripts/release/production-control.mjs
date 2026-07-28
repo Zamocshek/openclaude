@@ -23,9 +23,11 @@ export const REQUIRED_BASE_MCP_SERVERS = [
   'codegraph',
   'searxng',
   'context7',
+  'pentest',
   'telegram-mcp',
 ]
 export const REQUIRED_TELEGRAM_SKILLS = [
+  'pentest',
   'telegram-mcp-operations',
   'maton-api-gateway',
   'vpromotions',
@@ -76,6 +78,7 @@ export function validateProductionEnv(env) {
     'SESSION_SECRET',
     'JWT_SIGNING_KEY',
     'OPENRAG_ENCRYPTION_KEY',
+    'PENTEST_GATEWAY_AUTH_TOKEN',
   ]) {
     if (weakValues.has(String(env[name] || '').trim())) {
       errors.push(`${name} must contain a generated production secret`)
@@ -336,6 +339,16 @@ export async function verify(options = {}) {
       }
     }
   }
+  docker(
+    [
+      ...composeArgs,
+      'exec',
+      '-T',
+      'openclaude-agent',
+      'node',
+      'scripts/release/check-base-mcp.cjs',
+    ],
+  )
   console.log('Production verification passed')
 }
 
@@ -445,6 +458,7 @@ export function ensureProductionSecrets() {
     SESSION_SECRET: () => randomBytes(32).toString('hex'),
     JWT_SIGNING_KEY: () => randomBytes(32).toString('hex'),
     OPENRAG_ENCRYPTION_KEY: () => randomBytes(32).toString('base64'),
+    PENTEST_GATEWAY_AUTH_TOKEN: () => randomBytes(32).toString('hex'),
   }
   for (const [name, generate] of Object.entries(secretGenerators)) {
     if (

@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile, stat, writeFile } from 'fs/promises'
 import { basename, extname, join } from 'path'
 import { randomUUID } from 'crypto'
+import { spawn } from 'child_process'
 import type { AgentGatewayConfig, AgentGatewaySubagentRoute } from './config.js'
 import {
   getAgentGatewayStateDir,
@@ -160,7 +161,7 @@ export type TelegramBridgeStatus = {
   queuedTasks: number
 }
 
-export type TelegramResearchMode = 'bio' | 'social' | 'code'
+export type TelegramResearchMode = 'bio' | 'social' | 'code' | 'pentest'
 
 export type TelegramGetFileResult = {
   file_id: string
@@ -247,9 +248,122 @@ type TelegramBotCommand = {
 }
 
 type TelegramConversationSessions = Record<string, string>
+type TelegramResearchModes = Record<string, TelegramResearchMode>
+
+export type TelegramPentestAuthorization = {
+  engagement_id: string
+  name: string
+  authorized: true
+  authorization_statement: string
+  targets: string[]
+  exclusions: string[]
+  allowed_actions: string[]
+  mode: 'guided'
+}
 
 function telegramConversationSessionsPath(): string {
   return join(getAgentGatewayStateDir(), 'telegram-conversation-sessions.json')
+}
+
+function telegramResearchModesPath(): string {
+  return join(getAgentGatewayStateDir(), 'telegram-research-modes.json')
+}
+
+export function parseTelegramPentestAuthorization(
+  body: string,
+): TelegramPentestAuthorization {
+  const normalized = String(body || '').trim()
+    .replace(/^(?:auth|authorize)\s+/iu, '')
+  const parts = normalized.split('|').map(part => part.trim())
+  if (parts.length < 3) {
+    throw new Error(
+      'Usage: /pentest auth <engagement-id> | <target[,target]> | <authorization statement> [| exclusions] [| actions]',
+    )
+  }
+  const [engagementId, targetsText, authorizationStatement, exclusionsText, actionsText] = parts
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(engagementId || '')) {
+    throw new Error('engagement-id must use lowercase letters, digits, and dashes')
+  }
+  const splitList = (value = '') => [...new Set(
+    value.split(',').map(item => item.trim()).filter(Boolean),
+  )]
+  const targets = splitList(targetsText)
+  if (targets.length === 0) throw new Error('at least one target is required')
+  if (!authorizationStatement || authorizationStatement.length < 8) {
+    throw new Error('authorization statement must be at least 8 characters')
+  }
+  const allowedActions = splitList(actionsText)
+  return {
+    engagement_id: engagementId!,
+    name: `Telegram pentest: ${engagementId}`,
+    authorized: true,
+    authorization_statement: authorizationStatement,
+    targets,
+    exclusions: splitList(exclusionsText),
+    allowed_actions: allowedActions.length > 0
+      ? allowedActions
+      : [
+          'passive_recon',
+          'active_scan',
+          'vulnerability_validation',
+          'reporting',
+        ],
+    mode: 'guided',
+  }
+}
+
+async function runTrustedPentestAuthorization(
+  input: TelegramPentestAuthorization,
+  cwd: string,
+): Promise<Record<string, unknown>> {
+  const scriptPath = join(cwd, 'scripts', 'pentest-mcp.cjs')
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(process.execPath, [scriptPath, 'authorize-json'], {
+      cwd,
+      env: process.env,
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const finish = (
+      callback: (value: any) => void,
+      value: any,
+    ) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      callback(value)
+    }
+    const timer = setTimeout(() => {
+      child.kill()
+      finish(rejectRun, new Error('trusted pentest authorization timed out'))
+    }, 15_000)
+    timer.unref()
+    child.stdout.on('data', chunk => {
+      stdout = `${stdout}${String(chunk)}`.slice(0, 1024 * 1024)
+    })
+    child.stderr.on('data', chunk => {
+      stderr = `${stderr}${String(chunk)}`.slice(0, 1024 * 1024)
+    })
+    child.on('error', error => finish(rejectRun, error))
+    child.on('close', code => {
+      if (code !== 0) {
+        finish(
+          rejectRun,
+          new Error(stderr.trim() || `authorization process exited with ${code}`),
+        )
+        return
+      }
+      try {
+        finish(resolveRun, JSON.parse(stdout) as Record<string, unknown>)
+      } catch {
+        finish(rejectRun, new Error('authorization process returned invalid JSON'))
+      }
+    })
+    child.stdin.end(JSON.stringify(input))
+  })
 }
 
 type RecentChatLogEntry = Record<string, unknown>
@@ -389,7 +503,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     ],
   },
   {
-    title: 'Inference and providers',
+    title: 'Inference',
     commands: [
       { syntax: '/provider', description: 'show provider, model, and API endpoint', botDescription: 'Show or switch provider/model' },
       { syntax: '/provider models', description: 'load models from the active endpoint' },
@@ -415,6 +529,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/bio [prompt]', description: 'biology scientist mode for research tasks', botDescription: 'Biology research mode' },
       { syntax: '/social [prompt]', description: 'defensive social-engineering analysis mode' },
       { syntax: '/code [prompt]', description: 'scientific coding, MVP, and test-building mode' },
+      { syntax: '/pentest [prompt|auth id|targets|proof]', description: 'pentest mode', botDescription: 'Authorized pentest mode' },
       { syntax: '/mode off', description: 'clear the active research mode for this chat' },
     ],
   },
@@ -428,7 +543,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     ],
   },
   {
-    title: 'Cron and scheduling',
+    title: 'Cron',
     commands: [
       { syntax: '/schedule every 1h | prompt', description: 'create a cron job that replies here' },
       { syntax: '/cron [list|reload|chatid|path|examples]', description: 'manage cron jobs' },
@@ -454,7 +569,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     ],
   },
   {
-    title: 'Memory and repository',
+    title: 'Memory',
     commands: [
       { syntax: '/identity', description: 'show current identity' },
       { syntax: '/scratchpad', description: 'show working memory' },
@@ -476,7 +591,7 @@ export function buildTelegramHelpText(
   const lines = [
     'OpenClaude Telegram inference is online.',
     '',
-    'Available commands:',
+    'Commands:',
   ]
 
   for (const section of TELEGRAM_COMMAND_HELP_SECTIONS) {
@@ -574,10 +689,16 @@ export class TelegramAgentBridge {
   private queueEpoch = 0
   private chatModes = new Map<string, TelegramResearchMode>()
   /** Last prompt per chatId — for /retry */
-  private lastPrompts = new Map<string, { prompt: string; messageId: number }>()
+  private lastPrompts = new Map<string, {
+    prompt: string
+    messageId: number
+    toolPolicy?: 'pentest'
+  }>()
   private chatSessions = new Map<string, string>()
   private chatSessionsLoaded: Promise<void> | undefined
   private chatSessionsWrite = Promise.resolve()
+  private chatModesLoaded: Promise<void> | undefined
+  private chatModesWrite = Promise.resolve()
 
   constructor(config: AgentGatewayConfig) {
     this.config = config
@@ -585,6 +706,7 @@ export class TelegramAgentBridge {
 
   start(): void {
     if (!this.config.telegram.enabled || !this.config.telegram.botToken) return
+    void this.ensureChatModesLoaded()
     void this.registerBotCommands()
     this.pollAbortController = new AbortController()
     this.pollPromise = this.pollLoop(this.pollAbortController.signal).catch(error => {
@@ -675,6 +797,47 @@ export class TelegramAgentBridge {
     return this.chatSessions.get(chatId)
   }
 
+  private async ensureChatModesLoaded(): Promise<void> {
+    if (!this.chatModesLoaded) {
+      this.chatModesLoaded = (async () => {
+        try {
+          const raw = await readFile(telegramResearchModesPath(), 'utf8')
+          const parsed = JSON.parse(raw) as TelegramResearchModes
+          for (const [chatId, mode] of Object.entries(parsed)) {
+            if (mode === 'bio' || mode === 'social' || mode === 'code' || mode === 'pentest') {
+              this.chatModes.set(chatId, mode)
+            }
+          }
+        } catch {
+          // No stored mode means the chat starts in normal mode.
+        }
+      })()
+    }
+    await this.chatModesLoaded
+  }
+
+  private async getChatMode(chatId: string): Promise<TelegramResearchMode | undefined> {
+    await this.ensureChatModesLoaded()
+    return this.chatModes.get(chatId)
+  }
+
+  private async setChatMode(
+    chatId: string,
+    mode: TelegramResearchMode | undefined,
+  ): Promise<void> {
+    await this.ensureChatModesLoaded()
+    if (mode) this.chatModes.set(chatId, mode)
+    else this.chatModes.delete(chatId)
+    const snapshot = JSON.stringify(Object.fromEntries(this.chatModes), null, 2)
+    this.chatModesWrite = this.chatModesWrite
+      .catch(() => {})
+      .then(async () => {
+        await mkdir(getAgentGatewayStateDir(), { recursive: true })
+        await writeFile(telegramResearchModesPath(), `${snapshot}\n`, 'utf8')
+      })
+    await this.chatModesWrite
+  }
+
   private async persistChatSessions(): Promise<void> {
     const snapshot = JSON.stringify(Object.fromEntries(this.chatSessions), null, 2)
     this.chatSessionsWrite = this.chatSessionsWrite
@@ -689,7 +852,7 @@ export class TelegramAgentBridge {
   private async handleNewChatCommand(chatId: string): Promise<void> {
     const task = this.activeTasks.get(chatId)
     this.invalidateChatQueue(chatId)
-    this.chatModes.delete(chatId)
+    await this.setChatMode(chatId, undefined)
     this.lastPrompts.delete(chatId)
 
     if (task) {
@@ -857,7 +1020,10 @@ export class TelegramAgentBridge {
     chatId: string,
     prompt: string,
     phase = 'Running agent',
-    options?: { suppressObservers?: boolean },
+    options?: {
+      suppressObservers?: boolean
+      toolPolicy?: 'pentest'
+    },
   ): Promise<AgentRunResult> {
     if (this.activeTasks.has(chatId)) {
       throw new Error('A task is already running. Use /stop first.')
@@ -880,6 +1046,7 @@ export class TelegramAgentBridge {
         controller,
         progress,
         suppressObservers: options?.suppressObservers,
+        toolPolicy: options?.toolPolicy,
       })
     } finally {
       if (this.activeTasks.get(chatId)?.controller === controller) {
@@ -910,6 +1077,7 @@ export class TelegramAgentBridge {
     controller: AbortController
     progress: TelegramTaskProgress
     suppressObservers?: boolean
+    toolPolicy?: 'pentest'
   }): Promise<AgentRunResult> {
     const recovery = getTelegramAgentRecoveryAttemptLimit()
     let recoveryAttempt = 0
@@ -936,6 +1104,7 @@ export class TelegramAgentBridge {
         config: this.config,
         signal: input.controller.signal,
         suppressObservers: input.suppressObservers,
+        toolPolicy: input.toolPolicy,
         streamEvents: true,
         onProgress: event => input.progress.addEvent(event),
         onStdout: chunk => input.progress.observeStdout(chunk),
@@ -1278,7 +1447,7 @@ export class TelegramAgentBridge {
     }
 
     if (commandText === '/mode off') {
-      this.chatModes.delete(chatId)
+      await this.setChatMode(chatId, undefined)
       await this.sendMessage(chatId, 'Research mode cleared for this chat.')
       return
     }
@@ -1521,10 +1690,8 @@ export class TelegramAgentBridge {
     text: string,
     modeOverride?: TelegramResearchMode,
   ): Promise<void> {
-    const effectiveText = applyTelegramResearchMode(
-      modeOverride ?? this.chatModes.get(chatId),
-      text,
-    )
+    const activeMode = modeOverride ?? await this.getChatMode(chatId)
+    const effectiveText = applyTelegramResearchMode(activeMode, text)
     const attachments = await this.collectAttachments(message, chatId)
     if (!effectiveText && attachments.length === 0) return
 
@@ -1632,7 +1799,12 @@ export class TelegramAgentBridge {
     })
 
     // Save for /retry
-    this.lastPrompts.set(chatId, { prompt, messageId: message.message_id })
+    const toolPolicy = activeMode === 'pentest' ? 'pentest' : undefined
+    this.lastPrompts.set(chatId, {
+      prompt,
+      messageId: message.message_id,
+      toolPolicy,
+    })
 
     let result: AgentRunResult
     try {
@@ -1642,6 +1814,7 @@ export class TelegramAgentBridge {
         phase: 'Running Telegram request',
         controller,
         progress,
+        toolPolicy,
       })
     } finally {
       if (this.activeTasks.get(chatId)?.controller === controller) {
@@ -1726,10 +1899,8 @@ export class TelegramAgentBridge {
       ]
         .filter(Boolean)
         .join('\n')
-      const effectiveAgentText = applyTelegramResearchMode(
-        this.chatModes.get(chatId),
-        agentText,
-      )
+      const activeMode = await this.getChatMode(chatId)
+      const effectiveAgentText = applyTelegramResearchMode(activeMode, agentText)
       const providerProfile = await loadProviderProfile()
       const replyContext = buildTelegramReplyContext(message)
       const sessionId = await this.getChatSessionId(chatId)
@@ -1773,6 +1944,7 @@ export class TelegramAgentBridge {
         chatId,
         prompt,
         `Running agent from transcribed ${candidate.type}`,
+        { toolPolicy: activeMode === 'pentest' ? 'pentest' : undefined },
       )
 
       // Log the agent response
@@ -2130,8 +2302,34 @@ export class TelegramAgentBridge {
     mode: TelegramResearchMode,
     body: string,
   ): Promise<void> {
+    if (mode === 'pentest' && /^(?:auth|authorize)(?:\s|$)/iu.test(body)) {
+      try {
+        const authorization = parseTelegramPentestAuthorization(body)
+        const result = await runTrustedPentestAuthorization(
+          authorization,
+          this.config.runner.cwd || process.cwd(),
+        )
+        await this.setChatMode(chatId, 'pentest')
+        await this.sendMessage(
+          chatId,
+          [
+            `Pentest engagement authorized: ${String(result.engagementId || authorization.engagement_id)}`,
+            `Targets: ${authorization.targets.join(', ')}`,
+            `Actions: ${authorization.allowed_actions.join(', ')}`,
+            'Pentest mode is active for this chat.',
+          ].join('\n'),
+        )
+      } catch (error) {
+        await this.sendMessage(
+          chatId,
+          `Pentest authorization failed: ${redactAgentText(String(error))}`,
+        )
+      }
+      return
+    }
+
     if (!body) {
-      this.chatModes.set(chatId, mode)
+      await this.setChatMode(chatId, mode)
       await this.sendMessage(
         chatId,
         `Research mode set: /${mode}\nSend /mode off to clear it.`,
@@ -3696,19 +3894,19 @@ export class TelegramAgentBridge {
       }
 
       if (data === 'menu:research') {
+        const activeMode = await this.getChatMode(chatId)
         await this.editCallbackMessage(
           query,
-          `Research mode: ${this.chatModes.get(chatId) || 'off'}`,
-          buildTelegramResearchKeyboard(this.chatModes.get(chatId)),
+          `Research mode: ${activeMode || 'off'}`,
+          buildTelegramResearchKeyboard(activeMode),
         )
         return
       }
 
-      const modeAction = data.match(/^mode:(bio|social|code|off)$/u)
+      const modeAction = data.match(/^mode:(bio|social|code|pentest|off)$/u)
       if (modeAction) {
         const mode = modeAction[1] as TelegramResearchMode | 'off'
-        if (mode === 'off') this.chatModes.delete(chatId)
-        else this.chatModes.set(chatId, mode)
+        await this.setChatMode(chatId, mode === 'off' ? undefined : mode)
         await this.editCallbackMessage(
           query,
           `Research mode: ${mode}`,
@@ -3949,6 +4147,7 @@ export class TelegramAgentBridge {
         chatId,
         last.prompt,
         'Retrying last task',
+        { toolPolicy: last.toolPolicy },
       )
 
       if (result.exitCode !== 0) {
@@ -4432,7 +4631,12 @@ function getTelegramResearchMode(
   commandText: string,
 ): TelegramResearchMode | undefined {
   const command = commandText.split(/\s+/u)[0]
-  if (command === '/bio' || command === '/social' || command === '/code') {
+  if (
+    command === '/bio' ||
+    command === '/social' ||
+    command === '/code' ||
+    command === '/pentest'
+  ) {
     return command.slice(1) as TelegramResearchMode
   }
   return undefined
@@ -4457,6 +4661,7 @@ const TELEGRAM_RESEARCH_MODE_PROMPTS: Record<TelegramResearchMode, string> = {
   bio: 'Act as a careful biology research assistant. Use scientific framing, note uncertainty, distinguish evidence from speculation, and avoid medical diagnosis or unsafe wet-lab instructions.',
   social: 'Act as a defensive social-engineering research analyst. Analyze manipulation patterns, risks, countermeasures, and response strategy in a scientific format. Do not provide instructions for deception, stalking, coercion, credential theft, or harm.',
   code: 'Act as a pragmatic scientific coding agent. Prioritize runnable MVPs, tests, scripts, data workflows, and clear verification steps.',
+  pentest: 'Act as an authorized penetration-testing lead. Invoke the pentest Skill before acting. Require recorded authorization and exact scope, call pentest_scope_check before every active target interaction, and use pentest_nmap_run for bounded network scans. Keep persistent engagement evidence, use bounded specialist subagents, and generate a redacted report. Direct shell and general network tools are unavailable in this mode. Never bypass scope or expand to discovered assets automatically.',
 }
 
 type TelegramAgentRecoveryLimit = {
@@ -5164,7 +5369,10 @@ function buildTelegramResearchKeyboard(
     [
       { text: `${active === 'bio' ? '* ' : ''}Biology`, callback_data: 'mode:bio' },
       { text: `${active === 'social' ? '* ' : ''}Social`, callback_data: 'mode:social' },
+    ],
+    [
       { text: `${active === 'code' ? '* ' : ''}Code`, callback_data: 'mode:code' },
+      { text: `${active === 'pentest' ? '* ' : ''}Pentest`, callback_data: 'mode:pentest' },
     ],
     [
       { text: 'Mode off', callback_data: 'mode:off' },

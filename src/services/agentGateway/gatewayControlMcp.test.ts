@@ -36,4 +36,30 @@ describe('gateway control MCP configuration', () => {
     })
     expect(JSON.stringify(generated)).not.toContain('DEEPSEEK_API_KEY')
   })
+
+  test('builds a strict pentest MCP profile without unrelated or control servers', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'openclaude-pentest-mcp-project-'))
+    const state = await mkdtemp(join(tmpdir(), 'openclaude-pentest-mcp-state-'))
+    temporaryPaths.push(project, state)
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = state
+    await writeFile(join(project, '.mcp.json'), JSON.stringify({
+      mcpServers: {
+        pentest: { command: 'node', args: ['scripts/pentest-mcp.cjs'] },
+        codegraph: { command: 'node', args: ['codegraph.mjs'] },
+        context7: { command: 'node', args: ['context7.mjs'] },
+        camofox: { url: 'http://camofox:9377/mcp' },
+      },
+    }))
+
+    const generatedPath = prepareGatewayControlMcpConfig(project, 'pentest')
+    expect(generatedPath).toBe(join(state, 'gateway-pentest.mcp.json'))
+    const generated = JSON.parse(await readFile(generatedPath!, 'utf8'))
+    expect(Object.keys(generated.mcpServers).sort()).toEqual([
+      'codegraph',
+      'pentest',
+    ])
+    expect(generated.mcpServers['gateway-control']).toBeUndefined()
+    expect(generated.mcpServers.camofox).toBeUndefined()
+    expect(generated.mcpServers.context7).toBeUndefined()
+  })
 })

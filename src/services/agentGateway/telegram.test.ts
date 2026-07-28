@@ -43,6 +43,7 @@ import {
   applyTelegramResearchMode,
   repairLikelyMojibakeText,
   parseTelegramSkillCreateInput,
+  parseTelegramPentestAuthorization,
   summarizeAgentProgressChunk,
   safeTelegramFileName,
   selectLargestPhoto,
@@ -106,6 +107,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/context auto|1m|<tokens> - set context window or auto mode')
     expect(help).toContain('/delegate <role> <task> - delegate a task')
     expect(help).toContain('/bio [prompt] - biology scientist mode for research tasks')
+    expect(help).toContain('/pentest [prompt|auth id|targets|proof] - pentest mode')
     expect(help).toContain('/mode off - clear the active research mode for this chat')
     expect(help).toContain('/stop - abort the current running task')
     expect(help).toContain('/git commit <msg> - stage and commit all changes')
@@ -167,6 +169,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands).toContainEqual({
       command: 'bio',
       description: 'Biology research mode',
+    })
+    expect(commands).toContainEqual({
+      command: 'pentest',
+      description: 'Authorized pentest mode',
     })
     expect(commands.every(item => !item.command.startsWith('/'))).toBe(true)
     expect(commands.every(item => item.command.length <= 32)).toBe(true)
@@ -874,6 +880,45 @@ describe('agent gateway Telegram bridge helpers', () => {
     })
   })
 
+  test('persists Telegram research mode across gateway instances', async () => {
+    await withTempGatewayState(async stateDir => {
+      const first = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+      await (first as any).setChatMode('42', 'pentest')
+
+      const second = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+      expect(await (second as any).getChatMode('42')).toBe('pentest')
+
+      const persisted = JSON.parse(await readFile(
+        join(stateDir, 'telegram-research-modes.json'),
+        'utf8',
+      ))
+      expect(persisted).toEqual({ 42: 'pentest' })
+
+      await (second as any).setChatMode('42', undefined)
+      const cleared = JSON.parse(await readFile(
+        join(stateDir, 'telegram-research-modes.json'),
+        'utf8',
+      ))
+      expect(cleared).toEqual({})
+    })
+  })
+
+  test('parses trusted Telegram pentest authorization without model inference', () => {
+    expect(parseTelegramPentestAuthorization(
+      'auth lab-1 | 10.10.10.0/24, app.lab.example | I own this isolated lab | 10.10.10.250 | passive_recon, active_scan',
+    )).toMatchObject({
+      engagement_id: 'lab-1',
+      authorized: true,
+      targets: ['10.10.10.0/24', 'app.lab.example'],
+      exclusions: ['10.10.10.250'],
+      allowed_actions: ['passive_recon', 'active_scan'],
+      mode: 'guided',
+    })
+    expect(() => parseTelegramPentestAuthorization(
+      'auth BAD ID | 10.10.10.5 | I own this lab',
+    )).toThrow('engagement-id')
+  })
+
   test('applies safe Telegram research mode prompts', () => {
     const bio = applyTelegramResearchMode('bio', 'analyze cells')
     expect(bio).toContain('Active Telegram research mode: /bio')
@@ -883,6 +928,13 @@ describe('agent gateway Telegram bridge helpers', () => {
     const social = applyTelegramResearchMode('social', 'review phishing')
     expect(social).toContain('defensive social-engineering research analyst')
     expect(social).toContain('Do not provide instructions for deception')
+
+    const pentest = applyTelegramResearchMode('pentest', 'assess my lab')
+    expect(pentest).toContain('Active Telegram research mode: /pentest')
+    expect(pentest).toContain('Invoke the pentest Skill')
+    expect(pentest).toContain('pentest_scope_check')
+    expect(pentest).toContain('pentest_nmap_run')
+    expect(pentest).toContain('Never bypass scope')
   })
 
   test('extracts Telegram file upload directives and strips them from visible text', () => {

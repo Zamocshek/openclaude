@@ -11,7 +11,8 @@ The portable stack ships with:
   consciousness, evolution, OpenAI-compatible API, and model-driven subagents
 - Tool Router, File Manager, Skill Store, and the bundled coding skills
 - bundled Telegram MCP, Telegram operations, Maton, and VPromotions skills
-- CodeGraph, SearXNG, Context7, OpenRAG, Hindsight, and custom MCP JSON import
+- CodeGraph, SearXNG, Context7, authorized Pentest mode, OpenRAG, Hindsight,
+  and custom MCP JSON import
 - OpenWebUI, OmniRoute, two agent workers, and local Ollama
 
 Provider credentials, Telegram sessions, Codex OAuth tokens, and personal
@@ -75,6 +76,7 @@ New portable deployments keep all mutable data under the ignored
 | `telegram-mcp/` | Telegram sessions, SQLite memory, Maton settings |
 | `hindsight/` | Hindsight durable-memory database |
 | `openrag/` | pinned OpenRAG checkout and data |
+| `pentest/` | authorized engagement scope, evidence state, and reports |
 
 The generated `.env` is also ignored. Existing deployments with explicit
 `OPENCLAUDE_HOST_*` paths keep using those paths.

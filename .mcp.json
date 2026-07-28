@@ -81,6 +81,15 @@
         "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
       }
     },
+    "pentest": {
+      "command": "node",
+      "args": [
+        "scripts/pentest-mcp.cjs"
+      ],
+      "env": {
+        "PENTEST_STATE_DIR": "${PENTEST_STATE_DIR}"
+      }
+    },
     "telegram-mcp": {
       "type": "http",
       "url": "http://telegram-mcp:8766/mcp"
