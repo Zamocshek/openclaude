@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import {
+  hasRequiredTelegramRepositoryFiles,
   initializePortableLayout,
   portableDirectories,
   renderPortableDefaults,
@@ -38,6 +39,10 @@ describe('portable control', () => {
     expect(env).toContain('OPENCLAUDE_DOCKER_OPENRAG_URL=http://openrag-frontend:3000')
     expect(env).toContain('OPENCLAUDE_DOCKER_HINDSIGHT_URL=http://openclaude-hindsight:8888')
     expect(env).toContain('OPENCLAUDE_SHARED_DOCKER_NETWORK=openclaude_default')
+  })
+
+  test('ships Telegram MCP source and its required skills in the repository', () => {
+    expect(hasRequiredTelegramRepositoryFiles()).toBe(true)
   })
 
   test('updates a dotenv setting without creating duplicate active values', () => {
