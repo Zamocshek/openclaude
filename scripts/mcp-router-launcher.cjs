@@ -20,7 +20,11 @@ function hydrateEnvFromDotEnv() {
   if (!existsSync(envPath)) return
 
   const envText = readFileSync(envPath, 'utf8')
-  const preferDotEnv = new Set(['MCPR_TOKEN', 'MCPR_HOST', 'MCPR_PORT', 'MCPR_PROJECT'])
+  const preferDotEnv = new Set(['MCPR_TOKEN', 'MCPR_PROJECT'])
+  if ((process.env.MCPR_HOST || '').trim().toLowerCase() !== 'host.docker.internal') {
+    preferDotEnv.add('MCPR_HOST')
+    preferDotEnv.add('MCPR_PORT')
+  }
   for (const line of envText.split(/\r?\n/)) {
     const match = line.match(/^([A-Z0-9_]+)=(.*)$/)
     if (!match) continue
