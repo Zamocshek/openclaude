@@ -73,6 +73,15 @@ const OPENROUTER_MODELS: ProviderModelOption[] = [
   basicModel('openai/gpt-5.5-pro', 'GPT-5.5 Pro'),
 ]
 
+const OMNIROUTE_MODELS: ProviderModelOption[] = [
+  basicModel('auto', 'Auto'),
+  basicModel('auto/coding', 'Auto Coding'),
+  basicModel('auto/fast', 'Auto Fast'),
+  basicModel('auto/cheap', 'Auto Cheap'),
+  basicModel('auto/smart', 'Auto Smart'),
+  basicModel('auto/offline', 'Auto Offline'),
+]
+
 const LM_STUDIO_MODELS: ProviderModelOption[] = [
   basicModel('gemma-4-12b-obliterated', 'Gemma 4 12B'),
   basicModel(
@@ -131,6 +140,7 @@ export function getBuiltInProviderModels(provider: string): ProviderModelOption[
   if (provider === 'codex') return BUILT_IN_CODEX_MODELS.map(model => ({ ...model }))
   if (provider === 'deepseek') return DEEPSEEK_MODELS.map(model => ({ ...model }))
   if (provider === 'openrouter') return OPENROUTER_MODELS.map(model => ({ ...model }))
+  if (provider === 'omniroute') return OMNIROUTE_MODELS.map(model => ({ ...model }))
   if (provider === 'lmstudio' || provider === 'lmstudio-lan') {
     return LM_STUDIO_MODELS.map(model => ({ ...model }))
   }
@@ -159,8 +169,9 @@ export async function loadProviderModelCatalog(
 
   const fallback = getBuiltInProviderModels(profile.provider)
   try {
-    const models = await fetchOpenAICompatibleModels(profile)
-    if (models.length === 0) throw new Error('provider returned no models')
+    const liveModels = await fetchOpenAICompatibleModels(profile)
+    if (liveModels.length === 0) throw new Error('provider returned no models')
+    const models = mergeProviderModels(fallback, liveModels)
     return { models, source: 'live' }
   } catch (error) {
     return {
@@ -169,6 +180,18 @@ export async function loadProviderModelCatalog(
       warning: safeError(error),
     }
   }
+}
+
+function mergeProviderModels(
+  preferred: ProviderModelOption[],
+  live: ProviderModelOption[],
+): ProviderModelOption[] {
+  const seen = new Set<string>()
+  return [...preferred, ...live].filter(model => {
+    if (seen.has(model.id)) return false
+    seen.add(model.id)
+    return true
+  })
 }
 
 async function loadCodexModelCatalog(): Promise<ProviderModelCatalog> {

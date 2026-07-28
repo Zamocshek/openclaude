@@ -14,6 +14,8 @@ services:
         condition: service_healthy
       telegram-mcp:
         condition: service_healthy
+      omniroute:
+        condition: service_healthy
     environment:
       OPENCLAUDE_DOCKER_RUN_AS_ROOT: "${OPENCLAUDE_DOCKER_RUN_AS_ROOT:-1}"
       OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS: "${OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS:-1}"
@@ -30,6 +32,7 @@ services:
       HINDSIGHT_PUBLIC_URL: "${HINDSIGHT_PUBLIC_URL:-}"
       OPENRAG_PUBLIC_URL: "${OPENRAG_PUBLIC_URL:-}"
       TELEGRAM_MCP_WEB_PUBLIC_URL: "${TELEGRAM_MCP_WEB_PUBLIC_URL:-http://localhost:18765}"
+      OMNIROUTE_PUBLIC_URL: "${OMNIROUTE_PUBLIC_URL:-http://localhost:20128}"
       OPENCLAUDE_AGENT_WEB_BIND_HOST: "0.0.0.0"
       OPENCLAUDE_AGENT_WEB_PORTS: "3000-3010,5173,8000,8080"
       OPENCLAUDE_AGENT_WEB_HOST_URLS: "3000=http://localhost:13000,3001=http://localhost:13001,3002=http://localhost:13002,3003=http://localhost:13003,3004=http://localhost:13004,3005=http://localhost:13005,3006=http://localhost:13006,3007=http://localhost:13007,3008=http://localhost:13008,3009=http://localhost:13009,3010=http://localhost:13010,5173=http://localhost:15173,8000=http://localhost:18000,8080=http://localhost:18080"
@@ -105,6 +108,7 @@ services:
       OPENCLAUDE_BASE_URL: "${OPENCLAUDE_DOCKER_BASE_URL:-${OPENCLAUDE_BASE_URL:-}}"
       OPENCLAUDE_MODEL: "${OPENCLAUDE_DOCKER_MODEL:-${OPENCLAUDE_MODEL:-}}"
       OPENCLAUDE_API_KEY: "${OPENCLAUDE_DOCKER_API_KEY:-${OPENCLAUDE_API_KEY:-}}"
+      OMNIROUTE_API_KEY: "${OMNIROUTE_API_KEY:-sk_omniroute}"
       OPENCLAUDE_DEEPSEEK_API_KEY: "${OPENCLAUDE_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-}}"
       OPENAI_BASE_URL: "${OPENCLAUDE_DOCKER_BASE_URL:-${OPENAI_BASE_URL:-}}"
       OPENAI_MODEL: "${OPENCLAUDE_DOCKER_MODEL:-${OPENAI_MODEL:-}}"
@@ -228,6 +232,8 @@ services:
         condition: service_healthy
       telegram-mcp:
         condition: service_healthy
+      omniroute:
+        condition: service_healthy
     environment:
       OPENCLAUDE_DOCKER_RUN_AS_ROOT: "${OPENCLAUDE_WORKER_1_RUN_AS_ROOT:-${OPENCLAUDE_WORKER_RUN_AS_ROOT:-${OPENCLAUDE_DOCKER_RUN_AS_ROOT:-1}}}"
       OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS: "${OPENCLAUDE_WORKER_1_ALLOW_ROOT_BYPASS_PERMISSIONS:-${OPENCLAUDE_WORKER_ALLOW_ROOT_BYPASS_PERMISSIONS:-${OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS:-1}}}"
@@ -302,6 +308,7 @@ services:
       OPENCLAUDE_BASE_URL: "${OPENCLAUDE_BASE_URL:-}"
       OPENCLAUDE_MODEL: "${OPENCLAUDE_MODEL:-}"
       OPENCLAUDE_API_KEY: "${OPENCLAUDE_API_KEY:-}"
+      OMNIROUTE_API_KEY: "${OMNIROUTE_API_KEY:-sk_omniroute}"
       OPENCLAUDE_DEEPSEEK_API_KEY: "${OPENCLAUDE_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-}}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-}"
@@ -393,6 +400,8 @@ services:
         condition: service_healthy
       telegram-mcp:
         condition: service_healthy
+      omniroute:
+        condition: service_healthy
     environment:
       OPENCLAUDE_DOCKER_RUN_AS_ROOT: "${OPENCLAUDE_WORKER_2_RUN_AS_ROOT:-${OPENCLAUDE_WORKER_RUN_AS_ROOT:-${OPENCLAUDE_DOCKER_RUN_AS_ROOT:-1}}}"
       OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS: "${OPENCLAUDE_WORKER_2_ALLOW_ROOT_BYPASS_PERMISSIONS:-${OPENCLAUDE_WORKER_ALLOW_ROOT_BYPASS_PERMISSIONS:-${OPENCLAUDE_ALLOW_ROOT_BYPASS_PERMISSIONS:-1}}}"
@@ -467,6 +476,7 @@ services:
       OPENCLAUDE_BASE_URL: "${OPENCLAUDE_BASE_URL:-}"
       OPENCLAUDE_MODEL: "${OPENCLAUDE_MODEL:-}"
       OPENCLAUDE_API_KEY: "${OPENCLAUDE_API_KEY:-}"
+      OMNIROUTE_API_KEY: "${OMNIROUTE_API_KEY:-sk_omniroute}"
       OPENCLAUDE_DEEPSEEK_API_KEY: "${OPENCLAUDE_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-}}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-}"
@@ -617,6 +627,50 @@ services:
       retries: 12
       start_period: 20s
 
+  omniroute-redis:
+    image: redis:8.6.2-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - omniroute-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  omniroute:
+    image: diegosouzapw/omniroute:latest@sha256:badb560971fdc23c2fb84b3e8695116239ff215b4cca4b07076201a8efae7f0d
+    restart: unless-stopped
+    stop_grace_period: 40s
+    depends_on:
+      omniroute-redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: "production"
+      PORT: "20128"
+      HOSTNAME: "0.0.0.0"
+      DATA_DIR: "/app/data"
+      REDIS_URL: "redis://omniroute-redis:6379"
+      REQUIRE_API_KEY: "${OMNIROUTE_REQUIRE_API_KEY:-false}"
+      OMNIROUTE_MEMORY_MB: "${OMNIROUTE_MEMORY_MB:-2048}"
+      INITIAL_PASSWORD: "${OMNIROUTE_INITIAL_PASSWORD:-}"
+      STORAGE_ENCRYPTION_KEY: "${OMNIROUTE_STORAGE_ENCRYPTION_KEY:-}"
+      JWT_SECRET: "${OMNIROUTE_JWT_SECRET:-}"
+      API_KEY_SECRET: "${OMNIROUTE_API_KEY_SECRET:-}"
+      OMNIROUTE_WS_BRIDGE_SECRET: "${OMNIROUTE_WS_BRIDGE_SECRET:-}"
+    ports:
+      - "${OMNIROUTE_BIND_ADDRESS:-127.0.0.1}:${OMNIROUTE_HOST_PORT:-20128}:20128"
+    volumes:
+      - omniroute-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
   searxng:
     image: docker.io/searxng/searxng:latest@sha256:268fdb05efbb7b4fdc5957a20c42389bfb1b1b27b5eddeb98f75ec80c45b960f
     restart: unless-stopped
@@ -674,3 +728,5 @@ volumes:
   open-webui:
   openclaude-ollama:
   searxng-cache:
+  omniroute-data:
+  omniroute-redis:

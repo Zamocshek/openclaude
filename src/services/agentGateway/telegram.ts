@@ -316,6 +316,42 @@ const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
     model: 'huihui-gemma-4-12b-coder-fable5-composer2.5-v1-abliterated',
     description: 'switch to LM Studio Huihui Gemma Coder',
   },
+  {
+    command: '/omni',
+    provider: 'omniroute',
+    model: 'auto',
+    description: 'switch to OmniRoute automatic routing',
+  },
+  {
+    command: '/omnicode',
+    provider: 'omniroute',
+    model: 'auto/coding',
+    description: 'switch to OmniRoute coding routing',
+  },
+  {
+    command: '/omnifast',
+    provider: 'omniroute',
+    model: 'auto/fast',
+    description: 'switch to OmniRoute fast routing',
+  },
+  {
+    command: '/omnicheap',
+    provider: 'omniroute',
+    model: 'auto/cheap',
+    description: 'switch to OmniRoute low-cost routing',
+  },
+  {
+    command: '/omnismart',
+    provider: 'omniroute',
+    model: 'auto/smart',
+    description: 'switch to OmniRoute smart routing',
+  },
+  {
+    command: '/omnioffline',
+    provider: 'omniroute',
+    model: 'auto/offline',
+    description: 'switch to OmniRoute offline routing',
+  },
 ]
 
 const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
@@ -446,6 +482,21 @@ export function buildTelegramHelpText(
   for (const section of TELEGRAM_COMMAND_HELP_SECTIONS) {
     lines.push('', `${section.title}:`)
     for (const command of section.commands) {
+      if (command.syntax === '/help') {
+        lines.push('/help|commands - command reference')
+        continue
+      }
+      if (command.syntax === '/commands') continue
+      if (command.syntax === '/panel') {
+        lines.push('/panel|control - button control panel')
+        continue
+      }
+      if (command.syntax === '/control') continue
+      if (command.syntax.startsWith('/omni')) {
+        if (command.syntax !== '/omni') continue
+        lines.push('/omni* - OmniRoute modes: auto,code,fast,cheap,smart,offline')
+        continue
+      }
       lines.push(`${command.syntax} - ${command.description}`)
     }
   }
@@ -459,6 +510,7 @@ export function buildTelegramHelpText(
     `Hindsight: ${links.hindsight}`,
     `OpenRAG: ${links.openRAG}`,
     `Telegram MCP: ${links.telegramMcp}`,
+    `OmniRoute: ${links.omniRoute}`,
     `File Manager: ${links.fileManager}`,
   )
 
@@ -5077,6 +5129,7 @@ const TELEGRAM_PROVIDER_PRESETS: ProviderInfo[] = [
   { value: 'onlysq', flag: 'openai', baseUrl: 'https://api.onlysq.ru/ai/openai' },
   { value: 'openai', flag: 'openai', baseUrl: 'https://api.openai.com/v1' },
   { value: 'openrouter', flag: 'openai', baseUrl: 'https://openrouter.ai/api/v1' },
+  { value: 'omniroute', flag: 'openai', baseUrl: 'http://omniroute:20128/v1' },
   { value: 'deepseek', flag: 'openai', baseUrl: 'https://api.deepseek.com/v1' },
   { value: 'groq', flag: 'openai', baseUrl: 'https://api.groq.com/openai/v1' },
   { value: 'ollama', flag: 'openai', baseUrl: 'http://localhost:11434/v1', apiKey: 'ollama' },
@@ -5092,6 +5145,7 @@ const TELEGRAM_PROVIDER_BUTTONS = [
   { provider: 'deepseek', label: 'DeepSeek' },
   { provider: 'codex', label: 'Codex / ChatGPT' },
   { provider: 'openrouter', label: 'OpenRouter' },
+  { provider: 'omniroute', label: 'OmniRoute' },
   { provider: 'lmstudio-lan', label: 'LM Studio' },
 ] as const
 
@@ -5113,6 +5167,7 @@ function defaultTelegramProviderModel(provider: string): string {
       : model.id
   }
   if (provider === 'openrouter') return 'openai/gpt-5.6-sol'
+  if (provider === 'omniroute') return 'auto'
   if (provider === 'openai' || provider === 'openai-compatible') return 'gpt-5.6'
   return ''
 }
@@ -5512,6 +5567,9 @@ function providerSpecificApiKey(provider: string, env: Record<string, string | u
   if (provider === 'openrouter') {
     return env.OPENROUTER_API_KEY || ''
   }
+  if (provider === 'omniroute') {
+    return env.OMNIROUTE_API_KEY || ''
+  }
   return ''
 }
 
@@ -5560,6 +5618,9 @@ function providerProfileEnv(profile: AgentProviderProfile): Record<string, strin
     }
     if (profile.provider === 'openrouter' && profile.apiKey) {
       updates.OPENROUTER_API_KEY = profile.apiKey
+    }
+    if (profile.provider === 'omniroute' && profile.apiKey) {
+      updates.OMNIROUTE_API_KEY = profile.apiKey
     }
   } else if (info.flag === 'anthropic') {
     updates.ANTHROPIC_BASE_URL = profile.baseUrl
@@ -5691,6 +5752,7 @@ function normalizeSubagentRole(value: string): string | undefined {
 function defaultSubagentApiKeyEnv(provider: string): string | undefined {
   if (provider === 'deepseek') return 'DEEPSEEK_API_KEY'
   if (provider === 'openrouter') return 'OPENROUTER_API_KEY'
+  if (provider === 'omniroute') return 'OMNIROUTE_API_KEY'
   if (provider === 'codex') return 'CODEX_API_KEY'
   if (provider === 'lmstudio' || provider === 'lmstudio-lan' || provider === 'ollama') return undefined
   return 'OPENAI_API_KEY'

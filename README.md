@@ -357,6 +357,34 @@ For host-native MCP use, set `SEARXNG_URL=http://127.0.0.1:18088`. Docker uses
 the internal `http://searxng:8080` service address automatically. Keep SearXNG
 bound to loopback unless its authentication and reverse proxy are configured.
 
+### OmniRoute model router
+
+The Docker stack includes [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
+as an internal OpenAI-compatible model router. Its API is available to gateway
+and worker containers at `http://omniroute:20128/v1`; the dashboard and API are
+published on loopback at `http://localhost:20128`. Persistent OmniRoute state
+and Redis data live in named Docker volumes.
+
+Telegram exposes OmniRoute in the provider button menu and adds these shortcuts:
+
+- `/omni` selects `auto`
+- `/omnicode` selects `auto/coding`
+- `/omnifast` selects `auto/fast`
+- `/omnicheap` selects `auto/cheap`
+- `/omnismart` selects `auto/smart`
+- `/omnioffline` selects `auto/offline`
+
+Use `/provider models` or the model buttons to select any additional model
+reported by OmniRoute. The same provider can be assigned to a subagent with
+`/subagents set <role> omniroute auto/coding`.
+
+The loopback-only single-user deployment defaults to OmniRoute's documented
+`sk_omniroute` placeholder with `REQUIRE_API_KEY=false`. Before publishing the
+endpoint through a reverse proxy, create a real key in OmniRoute's API Keys
+screen, set `OMNIROUTE_REQUIRE_API_KEY=true`, and configure
+`OMNIROUTE_API_KEY`. Keep the dashboard, agent API, and generated secrets off
+public interfaces unless authentication and TLS are in place.
+
 ## Provider Notes
 
 OpenClaude supports multiple providers, but behavior is not identical across all of them.

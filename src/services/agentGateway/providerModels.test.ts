@@ -8,7 +8,7 @@ import {
 } from './providerModels.js'
 
 describe('agent gateway provider model catalog', () => {
-  test('ships current Codex, DeepSeek, and OpenRouter quick models', () => {
+  test('ships current Codex, DeepSeek, OpenRouter, and OmniRoute quick models', () => {
     expect(getBuiltInProviderModels('codex').map(model => model.id)).toEqual([
       'gpt-5.6-sol',
       'gpt-5.6-terra',
@@ -28,6 +28,14 @@ describe('agent gateway provider model catalog', () => {
     expect(getBuiltInProviderModels('openrouter').map(model => model.id)).toContain(
       'openai/gpt-5.5-pro',
     )
+    expect(getBuiltInProviderModels('omniroute').map(model => model.id)).toEqual([
+      'auto',
+      'auto/coding',
+      'auto/fast',
+      'auto/cheap',
+      'auto/smart',
+      'auto/offline',
+    ])
   })
 
   test('preserves supported Codex reasoning levels from the live catalog', () => {

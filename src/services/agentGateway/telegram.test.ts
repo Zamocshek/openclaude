@@ -88,7 +88,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('OpenClaude Telegram inference is online.')
     expect(help.length).toBeLessThanOrEqual(3900)
     expect(help).toContain('/provider set <provider> <model> [base_url] [api_key]')
-    expect(help).toContain('/panel - open the button control panel')
+    expect(help).toContain('/panel|control - button control panel')
     expect(help).toContain('/newchat - reset chat context; keep durable memory')
     expect(help).toContain('/mcp add <json> - import mcpServers JSON')
     expect(help).toContain('/skills - browse the Skill Store')
@@ -99,6 +99,9 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/evolve [on|off|now|status] - control evolution or run one cycle')
     expect(help).toContain('/dsflash - switch to DeepSeek V4 Flash')
     expect(help).toContain('/gemmacoder - switch to LM Studio Huihui Gemma Coder')
+    expect(help).toContain(
+      '/omni* - OmniRoute modes: auto,code,fast,cheap,smart,offline',
+    )
     expect(help).toContain('/context auto|1m|<tokens> - set context window or auto mode')
     expect(help).toContain('/delegate <role> <task> - delegate a task')
     expect(help).toContain('/bio [prompt] - biology scientist mode for research tasks')
@@ -115,6 +118,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('Hindsight: http://localhost:8888')
     expect(help).toContain('OpenRAG: http://localhost:3000')
     expect(help).toContain('Telegram MCP: http://localhost:18765')
+    expect(help).toContain('OmniRoute: http://localhost:20128')
     expect(help).toContain(
       `File Manager: http://127.0.0.1:${process.env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'}/files`,
     )
@@ -1091,6 +1095,18 @@ describe('agent gateway Telegram bridge helpers', () => {
       provider: 'lmstudio-lan',
       model: 'huihui-gemma-4-12b-coder-fable5-composer2.5-v1-abliterated',
     })
+    expect(getTelegramProviderShortcut('/omni')).toMatchObject({
+      provider: 'omniroute',
+      model: 'auto',
+    })
+    expect(getTelegramProviderShortcut('/omnicode@openclaude_bot')).toMatchObject({
+      provider: 'omniroute',
+      model: 'auto/coding',
+    })
+    expect(getTelegramProviderShortcut('/omnifast')).toMatchObject({
+      provider: 'omniroute',
+      model: 'auto/fast',
+    })
     expect(getTelegramProviderShortcut('/unknown')).toBeUndefined()
   })
 
@@ -1099,6 +1115,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(providers).toContainEqual({
       text: '* Codex / ChatGPT',
       callback_data: 'provider:codex',
+    })
+    expect(providers).toContainEqual({
+      text: 'OmniRoute',
+      callback_data: 'provider:omniroute',
     })
 
     const models = buildTelegramModelKeyboard(
@@ -1153,5 +1173,25 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(profile.model).toBe('gemma-4-12b-obliterated')
     expect(profile.baseUrl).toBe('http://192.168.187.1:1234/v1')
     expect(profile.apiKey).toBe('lm-studio')
+  })
+
+  test('switches Telegram provider profile without persisting a placeholder OmniRoute key', () => {
+    const profile = buildTelegramProviderProfileUpdate(
+      {
+        provider: 'deepseek',
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/v1',
+        apiKey: 'deepseek-key',
+      },
+      {
+        provider: 'omniroute',
+        model: 'auto/coding',
+      },
+    )
+
+    expect(profile.provider).toBe('omniroute')
+    expect(profile.model).toBe('auto/coding')
+    expect(profile.baseUrl).toBe('http://omniroute:20128/v1')
+    expect(profile.apiKey).toBe('')
   })
 })

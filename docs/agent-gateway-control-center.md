@@ -310,6 +310,7 @@ It starts:
 
 - `openclaude-agent` on host port `8642`;
 - `open-webui` on host port `8080`;
+- `omniroute` on loopback host port `20128`;
 - persistent volumes for OpenClaude config and Open WebUI data.
 
 If those host ports are already used, override only the published host ports:
@@ -322,6 +323,10 @@ docker compose -f docker-compose.agent-gateway.yml up --build
 ```
 
 Inside Docker, Open WebUI still talks to `http://openclaude-agent:8642/v1`.
+OpenClaude agents and worker replicas reach OmniRoute through
+`http://omniroute:20128/v1`. Choose it with `/provider`, `/omni`, or another
+`/omni*` shortcut; configure providers, keys, combos, routing strategies, and
+usage from `http://localhost:20128`.
 
 Docker can inherit the local provider/API settings or use a separate provider
 profile. In the Control Center Docker section, disable "Reuse local
