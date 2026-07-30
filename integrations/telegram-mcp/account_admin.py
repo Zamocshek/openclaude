@@ -23,12 +23,39 @@ from runtime_config import get_session_dir
 SAFE_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_.@+-]{1,120}$")
 SUPPORTED_UPLOAD_SUFFIXES = {".session", ".json"}
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+PRESERVED_SESSION_FILES = {"smooth.json", "operator_config.json"}
+PRESERVED_SESSION_PREFIXES = (
+    "assistant_memory.sqlite3",
+    "content_workflow.sqlite3",
+)
 
 
 def _session_dir() -> Path:
     path = get_session_dir()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def purge_account_session_files() -> List[str]:
+    """Delete Telegram account credentials without touching MCP memory/config."""
+
+    deleted: List[str] = []
+    for path in _session_dir().iterdir():
+        if not path.is_file():
+            continue
+        name = path.name
+        if name in PRESERVED_SESSION_FILES:
+            continue
+        if any(name.startswith(prefix) for prefix in PRESERVED_SESSION_PREFIXES):
+            continue
+        if (
+            name == "proxies.json"
+            or name.endswith(".json")
+            or ".session" in name
+        ):
+            path.unlink()
+            deleted.append(name)
+    return sorted(deleted)
 
 
 def validate_account_id(account_id: str) -> str:
