@@ -15,9 +15,9 @@ from typing import List, Dict, Optional, Union, Any
 import nest_asyncio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger import json as jsonlogger
 from telethon import TelegramClient, connection as tl_connection, functions, types, utils
-from telethon.sessions import StringSession
+from telethon.sessions import MemorySession, StringSession
 from telethon.tl.types import (
     User,
     Chat,
@@ -38,7 +38,13 @@ from telethon.tl.types import (
 )
 from telethon.network.connection.tcpmtproxy import TcpMTProxy as _TcpMTProxy
 
-from runtime_config import ensure_runtime_dirs, get_default_session_name, get_log_file, get_session_dir
+from runtime_config import (
+    default_session_file_exists,
+    ensure_runtime_dirs,
+    get_default_session_name,
+    get_log_file,
+    get_session_dir,
+)
 import assistant_memory as am
 import content_workflow as cw
 import post_formatting as pf
@@ -126,16 +132,37 @@ MCP_HOST = os.getenv("TELEGRAM_MCP_HOST", "127.0.0.1").strip() or "127.0.0.1"
 MCP_PORT = int(os.getenv("TELEGRAM_MCP_PORT", "8000"))
 
 # Check if a string session exists in environment, otherwise use file-based session
-SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING")
+SESSION_STRING = (os.getenv("TELEGRAM_SESSION_STRING") or "").strip() or None
+DEFAULT_SESSION_AVAILABLE = bool(SESSION_STRING) or default_session_file_exists(
+    TELEGRAM_SESSION_NAME
+)
+DEFAULT_SESSION_LOAD_ERROR: Optional[str] = None
 
 mcp = FastMCP("telegram", host=MCP_HOST, port=MCP_PORT)
 
-if SESSION_STRING:
-    # Use the string session if available
-    client = TelegramClient(StringSession(SESSION_STRING), TELEGRAM_API_ID, TELEGRAM_API_HASH)
-else:
-    # Use file-based session
-    client = TelegramClient(TELEGRAM_SESSION_NAME, TELEGRAM_API_ID, TELEGRAM_API_HASH)
+try:
+    if SESSION_STRING:
+        # Use the string session if available.
+        client = TelegramClient(
+            StringSession(SESSION_STRING), TELEGRAM_API_ID, TELEGRAM_API_HASH
+        )
+    elif DEFAULT_SESSION_AVAILABLE:
+        # Reuse an explicitly provisioned file-backed default session.
+        client = TelegramClient(
+            TELEGRAM_SESSION_NAME, TELEGRAM_API_ID, TELEGRAM_API_HASH
+        )
+    else:
+        # Do not create an empty .session artifact merely by starting the MCP.
+        # Account authorization tools create named, persistent sessions explicitly.
+        client = TelegramClient(
+            MemorySession(), TELEGRAM_API_ID, TELEGRAM_API_HASH
+        )
+except Exception as session_error:
+    # A legacy or partially written SQLite session must not take down the MCP
+    # control plane. Keep account-management tools available for repair/purge.
+    DEFAULT_SESSION_AVAILABLE = False
+    DEFAULT_SESSION_LOAD_ERROR = str(session_error)
+    client = TelegramClient(MemorySession(), TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
 # Setup robust logging with both file and console output
 logger = logging.getLogger("telegram_mcp")
@@ -394,6 +421,7 @@ _session_configs: Dict[str, Dict[str, Any]] = {}
 _proxies_config: Dict[str, Any] = {}
 _started_accounts: set = set()
 _failed_accounts: set = set()
+_session_load_errors: Dict[str, str] = {}
 
 _FATAL_ERRORS = (
     "auth_key_unregistered", "user_deactivated", "session_revoked",
@@ -776,7 +804,11 @@ if os.path.isdir(SESSION_DIR):
         if _f_name.endswith(".session"):
             _name = _f_name[:-8]
             _session_configs[_name] = _load_session_config(_name)
-            MULTI_ACCOUNT_CLIENTS[_name] = _create_session_client(_name)
+            try:
+                MULTI_ACCOUNT_CLIENTS[_name] = _create_session_client(_name)
+            except Exception as session_error:
+                _failed_accounts.add(_name)
+                _session_load_errors[_name] = str(session_error)
 
 
 # ---------------------------------------------------------------------------
@@ -790,7 +822,9 @@ async def list_accounts() -> str:
     """
     List all available Telegram accounts (sessions) with status and proxy info.
     """
-    session_ids = sorted(MULTI_ACCOUNT_CLIENTS.keys())
+    session_ids = sorted(
+        set(MULTI_ACCOUNT_CLIENTS.keys()) | set(_session_load_errors.keys())
+    )
     if not session_ids:
         return f"No multi-account sessions found in {SESSION_DIR}."
     lines = [f"Found {len(session_ids)} account(s):", ""]
@@ -821,6 +855,11 @@ async def check_account(account_id: str) -> str:
     Args:
         account_id: Session name from list_accounts.
     """
+    if account_id in _session_load_errors:
+        return (
+            f"error: session could not be loaded: "
+            f"{_session_load_errors[account_id]}"
+        )
     if account_id not in MULTI_ACCOUNT_CLIENTS:
         return f"error: account '{account_id}' not found"
 
@@ -901,7 +940,9 @@ async def check_all_accounts() -> str:
     Safe: each account has its own timeout, one bad account won't block the rest.
     """
     results = []
-    all_ids = sorted(MULTI_ACCOUNT_CLIENTS.keys())
+    all_ids = sorted(
+        set(MULTI_ACCOUNT_CLIENTS.keys()) | set(_session_load_errors.keys())
+    )
     delay = _smooth_config.get("delay_between_accounts", 8)
     max_parallel = max(1, int(_smooth_config.get("max_parallel", 1) or 1))
 
@@ -940,12 +981,16 @@ async def delete_session(account_id: str) -> str:
     Args:
         account_id: Session name to delete.
     """
-    if account_id not in MULTI_ACCOUNT_CLIENTS:
+    if (
+        account_id not in MULTI_ACCOUNT_CLIENTS
+        and account_id not in _session_load_errors
+    ):
         return f"Account '{account_id}' not found."
 
     c = MULTI_ACCOUNT_CLIENTS.pop(account_id, None)
     _started_accounts.discard(account_id)
     _failed_accounts.discard(account_id)
+    _session_load_errors.pop(account_id, None)
     _session_configs.pop(account_id, None)
 
     if c:
@@ -1001,11 +1046,14 @@ async def delete_all_sessions(confirm: bool = False) -> str:
         return_exceptions=True,
     )
 
-    account_count = len(MULTI_ACCOUNT_CLIENTS)
+    account_count = len(
+        set(MULTI_ACCOUNT_CLIENTS.keys()) | set(_session_load_errors.keys())
+    )
     MULTI_ACCOUNT_CLIENTS.clear()
     _session_configs.clear()
     _started_accounts.clear()
     _failed_accounts.clear()
+    _session_load_errors.clear()
     _account_last_request.clear()
     _account_rate_locks.clear()
     _pending_auth.clear()
@@ -8249,10 +8297,22 @@ async def assistant_memory_stats(account_id: Optional[str] = None) -> str:
 async def _main() -> None:
     try:
         print("Starting Telegram client...", file=sys.stderr)
+        if DEFAULT_SESSION_LOAD_ERROR:
+            print(
+                "WARNING: Default Telegram session could not be loaded and was ignored: "
+                f"{DEFAULT_SESSION_LOAD_ERROR}",
+                file=sys.stderr,
+            )
         if not TELEGRAM_CONFIGURED:
             print(
                 "WARNING: TELEGRAM_API_ID/TELEGRAM_API_HASH are not configured. "
                 "Telegram account tools will remain unavailable.",
+                file=sys.stderr,
+            )
+        elif not DEFAULT_SESSION_AVAILABLE:
+            print(
+                "No default Telegram session configured. "
+                f"Multi-account sessions from {SESSION_DIR} remain available.",
                 file=sys.stderr,
             )
         else:

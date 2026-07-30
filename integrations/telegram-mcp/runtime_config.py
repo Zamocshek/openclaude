@@ -70,6 +70,15 @@ def get_default_session_name(raw_name: Optional[str] = None) -> str:
     return str((get_config_dir() / path).resolve())
 
 
+def default_session_file_exists(session_name: str) -> bool:
+    """Return whether a file-backed Telethon default session already exists."""
+    path = Path(session_name).expanduser()
+    candidates = [path]
+    if path.suffix != ".session":
+        candidates.append(Path(f"{path}.session"))
+    return any(candidate.is_file() for candidate in candidates)
+
+
 def ensure_runtime_dirs() -> None:
     get_data_dir().mkdir(parents=True, exist_ok=True)
     get_session_dir().mkdir(parents=True, exist_ok=True)
