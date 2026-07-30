@@ -91,3 +91,15 @@ def test_explicit_telegram_session_paths_are_preserved(monkeypatch):
     assert runtime_config.get_default_session_name("custom/path/session") == str(
         (runtime_config.get_config_dir() / "custom" / "path" / "session").resolve()
     )
+
+
+def test_default_session_file_detection_does_not_create_artifacts(tmp_path):
+    session_name = tmp_path / "telegram_session"
+
+    assert runtime_config.default_session_file_exists(str(session_name)) is False
+    assert list(tmp_path.iterdir()) == []
+
+    session_file = tmp_path / "telegram_session.session"
+    session_file.write_bytes(b"existing-session")
+    assert runtime_config.default_session_file_exists(str(session_name)) is True
+    assert runtime_config.default_session_file_exists(str(session_file)) is True
