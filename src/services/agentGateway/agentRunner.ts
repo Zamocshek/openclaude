@@ -42,8 +42,15 @@ export type AgentRunResult = {
   durationMs?: number
   costUsd?: number
   activity?: string[]
+  artifacts?: AgentRunArtifact[]
   failureKind?: AgentRunFailureKind
   diagnostic?: string
+}
+
+export type AgentRunArtifact = {
+  path: string
+  kind: 'image' | 'document'
+  source: string
 }
 
 export type AgentRunFailureKind =
@@ -61,6 +68,8 @@ export type AgentRunFailureKind =
 
 export type StreamProgressContext = {
   toolUseById: Map<string, string>
+  toolNameById?: Map<string, string>
+  artifacts?: Map<string, AgentRunArtifact>
 }
 
 export type AgentRunObserverContext = {
@@ -127,8 +136,23 @@ const CAMOFOX_APPEND_SYSTEM_PROMPT = [
   'Camofox browser may be available through MCP tools named camofox_*.',
   'For real web browsing, anti-bot pages, browser screenshots, clicking/typing in pages, or page snapshots, prefer Camofox tools when they are available.',
   'Use camofox_create_tab first, then camofox_snapshot to get stable element refs, then camofox_click/camofox_type/camofox_press/camofox_scroll as needed.',
-  'Use camofox_screenshot when the user asks for a browser screenshot; it saves a local PNG path.',
+  'For Telegram browser work, call camofox_screenshot after the final page interaction when the user asks to see the result; the gateway automatically uploads the saved PNG.',
+  'Do not invent screenshot paths or claim a screenshot was sent unless camofox_screenshot succeeded.',
   'If Camofox is unavailable, report that clearly and fall back to other available browser or web tools when appropriate.',
+].join(' ')
+const TELEGRAM_MCP_APPEND_SYSTEM_PROMPT = [
+  'Telegram MCP user-account sessions are dynamic and may intentionally be empty.',
+  'Before every Telegram MCP operation that reads or acts through a user account, call list_accounts and use only an account ID returned by that call.',
+  'If list_accounts reports no sessions, state that no Telegram user accounts are configured and do not assume a default account or claim that an account action ran.',
+  'Use delete_all_sessions with confirm=true only when the user explicitly requests removal of every Telegram MCP user-account session.',
+].join(' ')
+const TERMINAL_BENCH_APPEND_SYSTEM_PROMPT = [
+  'Terminal-Bench execution profile is active.',
+  'Treat the task instruction and its verifier as the acceptance contract: inspect repository instructions and available tests first, then run the narrowest baseline check before editing.',
+  'Use a TodoWrite checklist and keep durable checkpoints for multi-step tasks.',
+  'Run terminal commands with explicit bounded timeouts, inspect exit status and stderr, and never repeat an identical failed command without changing the strategy.',
+  'After an error, classify it as command syntax, environment, dependency, permissions, timeout, test failure, or implementation failure and continue with a corrected action.',
+  'Finish by running the relevant verifier or tests, inspecting generated artifacts and the final diff, and report any unverified requirement explicitly.',
 ].join(' ')
 const HINDSIGHT_APPEND_SYSTEM_PROMPT = [
   'Hindsight durable memory may be available through MCP tools named hindsight_*.',
@@ -382,7 +406,11 @@ function getApiGatewayAppendSystemPrompt(
   parts.push(CONTEXT7_APPEND_SYSTEM_PROMPT)
   if (hasOpenRAG) parts.push(OPENRAG_APPEND_SYSTEM_PROMPT)
   parts.push(CAMOFOX_APPEND_SYSTEM_PROMPT)
+  parts.push(TELEGRAM_MCP_APPEND_SYSTEM_PROMPT)
   parts.push(HINDSIGHT_APPEND_SYSTEM_PROMPT)
+  if (isEnvTruthy(process.env.OPENCLAUDE_TERMINAL_BENCH)) {
+    parts.push(TERMINAL_BENCH_APPEND_SYSTEM_PROMPT)
+  }
   if (hasLifeRpgSystem(config)) parts.push(LIFE_RPG_APPEND_SYSTEM_PROMPT)
   const subagentPrompt = buildGatewaySubagentAppendPrompt(
     subagentRuntime,
@@ -653,6 +681,8 @@ export function runOpenClaudeAgent(
     const seenProgress = new Set<string>()
     const progressContext: StreamProgressContext = {
       toolUseById: new Map(),
+      toolNameById: new Map(),
+      artifacts: new Map(),
     }
 
     const recordProgress = (label: string) => {
@@ -805,6 +835,9 @@ export function runOpenClaudeAgent(
           ? {}
           : { costUsd: streamResultCostUsd }),
         activity: [...activity],
+        ...(progressContext.artifacts?.size
+          ? { artifacts: [...progressContext.artifacts.values()] }
+          : {}),
         ...(failure
           ? {
               failureKind: failure.kind,
@@ -975,10 +1008,12 @@ export function summarizeStreamJsonProgress(
         const id = typeof record.id === 'string' ? record.id : ''
         if (id && context) {
           context.toolUseById.set(id, event)
+          context.toolNameById?.set(id, String(record.name || 'tool'))
           while (context.toolUseById.size > MAX_TRACKED_TOOL_USES) {
             const oldest = context.toolUseById.keys().next().value
             if (oldest === undefined) break
             context.toolUseById.delete(oldest)
+            context.toolNameById?.delete(oldest)
           }
         }
         events.push(event)
@@ -990,8 +1025,19 @@ export function summarizeStreamJsonProgress(
     for (const block of getMessageContentBlocks(message)) {
       if (!block || typeof block !== 'object') continue
       const record = block as Record<string, unknown>
-      if (record.type === 'tool_result' && record.is_error) {
-        const id = typeof record.tool_use_id === 'string' ? record.tool_use_id : ''
+      if (record.type !== 'tool_result') continue
+      const id = typeof record.tool_use_id === 'string' ? record.tool_use_id : ''
+      if (!record.is_error) {
+        const toolName = id ? context?.toolNameById?.get(id) : ''
+        if (toolName && context?.artifacts) {
+          for (const artifact of extractCamofoxScreenshotArtifacts(
+            toolName,
+            normalizeMessageContent(record.content),
+          )) {
+            context.artifacts.set(`${artifact.kind}:${artifact.path}`, artifact)
+          }
+        }
+      } else {
         const tool = id ? context?.toolUseById.get(id) : ''
         events.push(
           tool
@@ -1024,6 +1070,26 @@ export function summarizeStreamJsonProgress(
   return events
     .map(event => redactAgentText(event).replace(/\s+/g, ' ').trim())
     .filter(Boolean)
+}
+
+export function extractCamofoxScreenshotArtifacts(
+  toolName: string,
+  output: string,
+): AgentRunArtifact[] {
+  if (!/(?:^|_)camofox_screenshot$/iu.test(toolName.trim())) return []
+  const artifacts: AgentRunArtifact[] = []
+  for (const line of output.split(/\r?\n/u)) {
+    const match = line.match(/^Saved Camofox screenshot:\s*(.+)$/iu)
+    if (!match?.[1]) continue
+    const path = match[1].trim().replace(/^["']|["']$/g, '')
+    if (!/^(?:[A-Za-z]:[\\/]|\/).+\.png$/iu.test(path)) continue
+    artifacts.push({
+      path,
+      kind: 'image',
+      source: toolName,
+    })
+  }
+  return artifacts
 }
 
 function getMessageContentBlocks(message: Record<string, unknown>): unknown[] {

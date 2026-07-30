@@ -374,6 +374,15 @@ process immediately. Override these limits with
 `OPENCLAUDE_AGENT_RUNNER_MAX_TURNS`, `OPENCLAUDE_AGENT_RUNNER_TIMEOUT_MS`,
 `OPENCLAUDE_AGENT_WORKER_MAX_TURNS`, and `OPENCLAUDE_AGENT_WORKER_TIMEOUT_MS`.
 
+For verifier-driven terminal coding tasks, set
+`OPENCLAUDE_TERMINAL_BENCH=1`. This enables a verifier-first execution profile
+with bounded commands, explicit error classification, checkpoints, and final
+artifact/diff verification. Run `bun run bench:terminal` for the fast local
+UTF-8, exit-code, and timeout smoke. It is not an official benchmark score;
+official Terminal-Bench evaluation uses
+[Terminal-Bench](https://github.com/harbor-framework/terminal-bench) and the
+[Harbor/TB2 harness](https://github.com/harbor-framework/terminal-bench-2).
+
 ### Authorized Pentest Mode
 
 The bundled `pentest` skill and base `pentest` MCP provide an authorized

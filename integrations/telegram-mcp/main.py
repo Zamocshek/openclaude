@@ -46,6 +46,7 @@ import operator_config as oc
 import stat_report_renderer as sr
 import maton_client as mt
 import vpromotions_client as vp
+import account_admin as aa
 
 _orig_normalize_secret = _TcpMTProxy.normalize_secret
 
@@ -972,6 +973,63 @@ async def delete_session(account_id: str) -> str:
     if deleted:
         return f"Deleted: {', '.join(deleted)}. Account '{account_id}' removed."
     return f"Account '{account_id}' removed from memory (no files found to delete)."
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete All Sessions",
+        openWorldHint=True,
+        destructiveHint=True,
+    )
+)
+async def delete_all_sessions(confirm: bool = False) -> str:
+    """
+    Disconnect and permanently remove every Telegram user account session.
+    MCP memory databases and operator settings are preserved.
+    Args:
+        confirm: Must be true to execute the destructive purge.
+    """
+    global _default_client_authorized
+    if confirm is not True:
+        return "Confirmation required. Call delete_all_sessions with confirm=true."
+
+    clients = list(MULTI_ACCOUNT_CLIENTS.values())
+    if client not in clients:
+        clients.append(client)
+    await asyncio.gather(
+        *[_safe_disconnect(item, timeout=5) for item in clients],
+        return_exceptions=True,
+    )
+
+    account_count = len(MULTI_ACCOUNT_CLIENTS)
+    MULTI_ACCOUNT_CLIENTS.clear()
+    _session_configs.clear()
+    _started_accounts.clear()
+    _failed_accounts.clear()
+    _account_last_request.clear()
+    _account_rate_locks.clear()
+    _pending_auth.clear()
+    _proxies_config.clear()
+    _default_client_authorized = False
+
+    try:
+        config = oc.load_config()
+        config["account_labels"] = {}
+        oc.save_config(config)
+    except Exception:
+        pass
+
+    deleted = aa.purge_account_session_files()
+    string_session_warning = (
+        " TELEGRAM_SESSION_STRING is still configured and must be removed "
+        "from the environment before restart."
+        if SESSION_STRING
+        else ""
+    )
+    return (
+        f"Deleted {account_count} account(s) and {len(deleted)} session artifact(s). "
+        f"No Telegram user accounts remain.{string_session_warning}"
+    )
 
 
 # ---------------------------------------------------------------------------

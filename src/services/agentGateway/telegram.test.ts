@@ -36,6 +36,7 @@ import {
   getTelegramAgentRepeatedFailureLimit,
   getTelegramAgentRecoveryAttemptLimit,
   getTelegramQueueLimits,
+  mergeAgentArtifactsWithTelegramDirectives,
   getTelegramQueuePosition,
   getTelegramProviderShortcut,
   isTelegramActorAllowed,
@@ -962,6 +963,31 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(parsed.directives).toEqual([
       { path: 'C:\\tmp\\chart.png', kind: 'image' },
       { path: 'C:\\tmp\\report.docx', kind: 'document' },
+    ])
+  })
+
+  test('adds runner artifacts once even when the model emitted a duplicate directive', () => {
+    expect(mergeAgentArtifactsWithTelegramDirectives(
+      [{ path: '/workspace/output/browser.png', kind: 'image' }],
+      [
+        {
+          path: '/workspace/output/browser.png',
+          kind: 'image',
+          source: 'mcp__camofox__camofox_screenshot',
+        },
+        {
+          path: '/workspace/output/second.png',
+          kind: 'image',
+          source: 'mcp__camofox__camofox_screenshot',
+        },
+      ],
+    )).toEqual([
+      { path: '/workspace/output/browser.png', kind: 'image' },
+      {
+        path: '/workspace/output/second.png',
+        kind: 'image',
+        caption: 'Camofox browser result',
+      },
     ])
   })
 

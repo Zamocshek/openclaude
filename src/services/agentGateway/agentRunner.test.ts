@@ -7,6 +7,7 @@ import {
   buildAgentChildEnv,
   buildPromptFromChatMessages,
   classifyAgentRunFailure,
+  extractCamofoxScreenshotArtifacts,
   extractStreamJsonResult,
   hasCodingTaskIntent,
   isIgnorablePostSuccessStderr,
@@ -173,6 +174,38 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('resolve-library-id')
     expect(systemPrompt).toContain('query-docs')
     expect(systemPrompt).toContain('without waiting for an explicit user request')
+  })
+
+  test('requires live account discovery before Telegram MCP account actions', () => {
+    const args = buildAgentArgs(getDefaultAgentGatewayConfig())
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(systemPrompt).toContain('call list_accounts')
+    expect(systemPrompt).toContain('no Telegram user accounts are configured')
+    expect(systemPrompt).toContain('delete_all_sessions with confirm=true')
+  })
+
+  test('enables verifier-first terminal execution only when requested', () => {
+    const previous = process.env.OPENCLAUDE_TERMINAL_BENCH
+    try {
+      delete process.env.OPENCLAUDE_TERMINAL_BENCH
+      const normalArgs = buildAgentArgs(getDefaultAgentGatewayConfig())
+      const normalPrompt = normalArgs[normalArgs.indexOf('--append-system-prompt') + 1]
+      expect(normalPrompt).not.toContain('Terminal-Bench execution profile is active')
+
+      process.env.OPENCLAUDE_TERMINAL_BENCH = '1'
+      const benchArgs = buildAgentArgs(getDefaultAgentGatewayConfig())
+      const benchPrompt = benchArgs[benchArgs.indexOf('--append-system-prompt') + 1]
+      expect(benchPrompt).toContain('Terminal-Bench execution profile is active')
+      expect(benchPrompt).toContain('explicit bounded timeouts')
+      expect(benchPrompt).toContain('never repeat an identical failed command')
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAUDE_TERMINAL_BENCH
+      } else {
+        process.env.OPENCLAUDE_TERMINAL_BENCH = previous
+      }
+    }
   })
 
   test('routes personal RPG and life-management requests through the system index', () => {
@@ -348,6 +381,50 @@ describe('agent gateway prompt builder', () => {
     expect(context.toolUseById.size).toBeLessThanOrEqual(512)
     expect(context.toolUseById.has('toolu_0')).toBe(false)
     expect(context.toolUseById.has('toolu_699')).toBe(true)
+  })
+
+  test('captures successful Camofox screenshots as Telegram-ready artifacts', () => {
+    const context: StreamProgressContext = {
+      toolUseById: new Map(),
+      toolNameById: new Map(),
+      artifacts: new Map(),
+    }
+    summarizeStreamJsonProgress({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_camofox',
+          name: 'mcp__camofox__camofox_screenshot',
+          input: { tabId: 'tab-1' },
+        }],
+      },
+    }, context)
+    summarizeStreamJsonProgress({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_camofox',
+          content: [{
+            type: 'text',
+            text: 'Saved Camofox screenshot: /workspace/output/camofox/result.png',
+          }],
+        }],
+      },
+    }, context)
+
+    expect([...context.artifacts!.values()]).toEqual([{
+      path: '/workspace/output/camofox/result.png',
+      kind: 'image',
+      source: 'mcp__camofox__camofox_screenshot',
+    }])
+    expect(
+      extractCamofoxScreenshotArtifacts(
+        'Read',
+        'Saved Camofox screenshot: /workspace/not-from-camofox.png',
+      ),
+    ).toEqual([])
   })
 
   test('classifies provider rate limits from activity and redacts Abacus-style keys', () => {

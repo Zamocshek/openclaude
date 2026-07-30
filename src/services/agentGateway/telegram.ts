@@ -9,7 +9,11 @@ import {
   updateAgentGatewayConfig,
 } from './config.js'
 import { createCronJob, deleteCronJob, getCronJob, getCronJobsPath, listCronJobs, pauseCronJob, resumeCronJob, runCronJobNow, updateCronJob, type CronJob, type CronJobMode } from './cron.js'
-import { runOpenClaudeAgent, type AgentRunResult } from './agentRunner.js'
+import {
+  runOpenClaudeAgent,
+  type AgentRunArtifact,
+  type AgentRunResult,
+} from './agentRunner.js'
 import { redactAgentText } from './redaction.js'
 import { detectTranscriptionTool, transcribeAudio } from './transcription.js'
 import {
@@ -1842,7 +1846,12 @@ export class TelegramAgentBridge {
       return
     }
 
-    await this.deliverAgentText(chatId, result.text, '(No response generated)')
+    await this.deliverAgentText(
+      chatId,
+      result.text,
+      '(No response generated)',
+      result.artifacts,
+    )
   }
 
   private async handleAudioMessage(
@@ -1956,7 +1965,12 @@ export class TelegramAgentBridge {
         return
       }
 
-      await this.deliverAgentText(chatId, result.text, '(No response generated)')
+      await this.deliverAgentText(
+        chatId,
+        result.text,
+        '(No response generated)',
+        result.artifacts,
+      )
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)
       await recordTelegramError(chatId, 'audio-message', detail)
@@ -4156,7 +4170,12 @@ export class TelegramAgentBridge {
         return
       }
 
-      await this.deliverAgentText(chatId, result.text, '(No response generated)')
+      await this.deliverAgentText(
+        chatId,
+        result.text,
+        '(No response generated)',
+        result.artifacts,
+      )
     })
   }
 
@@ -4265,11 +4284,16 @@ export class TelegramAgentBridge {
     chatId: string,
     text: string,
     fallback?: string,
+    artifacts: AgentRunArtifact[] = [],
   ): Promise<void> {
     const repairedText = repairLikelyMojibakeText(text)
     const memoryProcessed = await this.applyAgentMemoryDirectives(chatId, repairedText)
     const cronProcessed = await this.applyAgentCronDirectives(chatId, memoryProcessed)
     const parsed = extractTelegramSendDirectives(cronProcessed.text)
+    const directives = mergeAgentArtifactsWithTelegramDirectives(
+      parsed.directives,
+      artifacts,
+    )
     const visibleText = [
       parsed.text.trim(),
       ...cronProcessed.messages,
@@ -4278,7 +4302,7 @@ export class TelegramAgentBridge {
       await this.sendMessage(chatId, visibleText)
     }
 
-    for (const directive of parsed.directives) {
+    for (const directive of directives) {
       try {
         await this.sendFile(
           chatId,
@@ -4294,7 +4318,7 @@ export class TelegramAgentBridge {
       }
     }
 
-    if (!visibleText.trim() && parsed.directives.length === 0 && fallback) {
+    if (!visibleText.trim() && directives.length === 0 && fallback) {
       await this.sendMessage(chatId, fallback)
     }
   }
@@ -6581,6 +6605,7 @@ export function buildTelegramAgentPrompt(input: {
     '[TELEGRAM_SEND_FILE path="C:\\path\\to\\file.png" caption="optional caption"]',
     'You can also use [[image:C:\\path\\to\\image.png]] or [[document:C:\\path\\to\\file.pdf]].',
     'The bridge will remove those control tokens from visible text and upload the local file.',
+    'A successful camofox_screenshot tool result is uploaded automatically; do not add a duplicate TELEGRAM_SEND_FILE line for that same PNG.',
     '',
     'User message:',
     input.text || '(no text; user sent attachments)',
@@ -7016,6 +7041,33 @@ export function extractTelegramSendDirectives(text: string): {
     text: cleanedLines.join('\n').trim(),
     directives: directives.filter(directive => directive.path),
   }
+}
+
+export function mergeAgentArtifactsWithTelegramDirectives(
+  directives: TelegramSendDirective[],
+  artifacts: AgentRunArtifact[],
+): TelegramSendDirective[] {
+  const merged = [...directives]
+  const seen = new Set(
+    directives.map(directive => normalizeTelegramArtifactPath(directive.path)),
+  )
+  for (const artifact of artifacts) {
+    const key = normalizeTelegramArtifactPath(artifact.path)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    merged.push({
+      path: artifact.path,
+      kind: artifact.kind,
+      ...(artifact.source.toLowerCase().includes('camofox')
+        ? { caption: 'Camofox browser result' }
+        : {}),
+    })
+  }
+  return merged
+}
+
+function normalizeTelegramArtifactPath(path: string): string {
+  return path.trim().replace(/\\/g, '/').toLowerCase()
 }
 
 function buildTelegramDirective(
