@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   REQUIRED_BASE_MCP_SERVERS,
   PRODUCTION_BUILD_SERVICES,
+  getOpenRagVerificationUrls,
   parseEnv,
   validateRequiredBaseMcpServers,
   validateProductionEnv,
@@ -75,6 +76,22 @@ describe('production control', () => {
       servers.map(server =>
         server.name === 'searxng' ? { ...server, enabled: false } : server),
     )).toContain('required base MCP server is disabled: searxng')
+  })
+
+  test('checks Docling only when the OpenRAG stack explicitly publishes it', () => {
+    expect(getOpenRagVerificationUrls({})).toEqual([
+      'http://127.0.0.1:3000/',
+      'http://127.0.0.1:7860/health',
+    ])
+    expect(getOpenRagVerificationUrls({
+      OPENCLAUDE_OPENRAG_FRONTEND_PORT: '3100',
+      OPENCLAUDE_OPENRAG_LANGFLOW_PORT: '7861',
+      OPENCLAUDE_OPENRAG_DOCLING_PORT: '5001',
+    })).toEqual([
+      'http://127.0.0.1:3100/',
+      'http://127.0.0.1:7861/health',
+      'http://127.0.0.1:5001/docs',
+    ])
   })
 
   test('accepts an enabled Telegram MCP with all bundled skills', () => {

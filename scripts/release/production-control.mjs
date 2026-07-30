@@ -200,10 +200,16 @@ export function preflight() {
 
 async function requestOk(url, options = {}) {
   const signal = AbortSignal.timeout(options.timeoutMs || 15_000)
-  const response = await fetch(url, {
-    headers: options.key ? { Authorization: `Bearer ${options.key}` } : {},
-    signal,
-  })
+  let response
+  try {
+    response = await fetch(url, {
+      headers: options.key ? { Authorization: `Bearer ${options.key}` } : {},
+      signal,
+    })
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`${url} request failed: ${detail}`, { cause: error })
+  }
   if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`)
   return response
 }
@@ -256,6 +262,19 @@ export function validateRequiredBaseMcpServers(servers) {
     }
   }
   return errors
+}
+
+export function getOpenRagVerificationUrls(env) {
+  const urls = [
+    `http://127.0.0.1:${env.OPENCLAUDE_OPENRAG_FRONTEND_PORT || '3000'}/`,
+    `http://127.0.0.1:${env.OPENCLAUDE_OPENRAG_LANGFLOW_PORT || '7860'}/health`,
+  ]
+  if (env.OPENCLAUDE_OPENRAG_DOCLING_PORT) {
+    urls.push(
+      `http://127.0.0.1:${env.OPENCLAUDE_OPENRAG_DOCLING_PORT}/docs`,
+    )
+  }
+  return urls
 }
 
 export async function verify(options = {}) {
@@ -315,12 +334,9 @@ export async function verify(options = {}) {
   }
 
   if (truthy(env.OPENCLAUDE_OPENRAG_ENABLED)) {
-    const openragPort = env.OPENCLAUDE_OPENRAG_FRONTEND_PORT || '3000'
-    const langflowPort = env.OPENCLAUDE_OPENRAG_LANGFLOW_PORT || '7860'
-    const doclingPort = env.OPENCLAUDE_OPENRAG_DOCLING_PORT || '5001'
-    await requestOk(`http://127.0.0.1:${openragPort}/`)
-    await requestOk(`http://127.0.0.1:${langflowPort}/health`)
-    await requestOk(`http://127.0.0.1:${doclingPort}/docs`)
+    for (const url of getOpenRagVerificationUrls(env)) {
+      await requestOk(url)
+    }
   }
 
   const composeArgs = options.composeArgs || COMPOSE_ARGS
