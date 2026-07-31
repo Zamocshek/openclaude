@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, writeFile } from 'fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -17,6 +17,7 @@ import {
   type StreamProgressContext,
 } from './agentRunner.js'
 import { getDefaultAgentGatewayConfig } from './config.js'
+import { setManagedMcpServerEnabled } from './mcpRegistry.js'
 import { redactAgentText } from './redaction.js'
 
 describe('agent gateway prompt builder', () => {
@@ -57,6 +58,7 @@ describe('agent gateway prompt builder', () => {
     expect(args).not.toContain('--bare')
     expect(args).toContain('--tools')
     expect(args).toContain('Bash,Read,Write')
+    expect(args).toContain('--strict-mcp-config')
     expect(args).toContain('--disallowedTools')
     expect(args).toContain('WebSearch')
     expect(args).not.toContain('hello from api')
@@ -78,7 +80,7 @@ describe('agent gateway prompt builder', () => {
     expect(args[args.indexOf('--tools') + 1]).toBe('Bash,Read,Agent')
   })
 
-  test('can disable model tool calls for local providers that reject tool schemas', () => {
+  test('can disable model tool calls and all MCP process startup', async () => {
     const config = getDefaultAgentGatewayConfig()
     config.runner.disableTools = true
     config.runner.availableTools = ['Bash']
@@ -87,6 +89,85 @@ describe('agent gateway prompt builder', () => {
 
     expect(args).toContain('--tools')
     expect(args[args.indexOf('--tools') + 1]).toBe('')
+    expect(args).toContain('--strict-mcp-config')
+    const mcpConfigPath = args[args.indexOf('--mcp-config') + 1]
+    expect(JSON.parse(await readFile(mcpConfigPath, 'utf8')).mcpServers).toEqual({})
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+    expect(systemPrompt).not.toContain('codegraph_explore')
+    expect(systemPrompt).not.toContain('available Skill descriptions')
+  })
+
+  test('keeps disabled MCP servers out of strict config and capability guidance', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'openclaude-agent-router-project-'))
+    const state = await mkdtemp(join(tmpdir(), 'openclaude-agent-router-state-'))
+    const previousStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    try {
+      process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = state
+      await writeFile(join(project, '.mcp.json'), JSON.stringify({
+        mcpServers: {
+          codegraph: { command: 'node', args: ['codegraph.mjs'] },
+          context7: { command: 'node', args: ['context7.mjs'] },
+        },
+      }))
+      await setManagedMcpServerEnabled(project, 'context7', false)
+
+      const config = getDefaultAgentGatewayConfig()
+      config.runner.cwd = project
+      const args = buildAgentArgs(config)
+      const mcpConfigPath = args[args.indexOf('--mcp-config') + 1]
+      const prepared = JSON.parse(await readFile(mcpConfigPath, 'utf8'))
+      const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+      expect(args).toContain('--strict-mcp-config')
+      expect(prepared.mcpServers.codegraph).toBeTruthy()
+      expect(prepared.mcpServers.context7).toBeUndefined()
+      expect(systemPrompt).toContain('codegraph_explore')
+      expect(systemPrompt).not.toContain('resolve-library-id')
+      expect(systemPrompt).not.toContain('query-docs')
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+      } else {
+        process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousStateDir
+      }
+      await Promise.all([
+        rm(project, { recursive: true, force: true }),
+        rm(state, { recursive: true, force: true }),
+      ])
+    }
+  })
+
+  test('keeps disabled skills out of capability guidance', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'openclaude-agent-router-skills-'))
+    const state = await mkdtemp(join(tmpdir(), 'openclaude-agent-router-skill-state-'))
+    const previousStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    try {
+      process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = state
+      await writeFile(join(project, '.mcp.json'), '{"mcpServers":{}}\n')
+      await writeFile(
+        join(project, '.env'),
+        'OPENCLAUDE_DISABLED_SKILLS=code,qwen-collab\n',
+      )
+      const config = getDefaultAgentGatewayConfig()
+      config.runner.cwd = project
+      const args = buildAgentArgs(config, {
+        prompt: 'Fix the TypeScript code and run tests.',
+      })
+      const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+      expect(systemPrompt).not.toContain('# Production Coding Workflow')
+      expect(systemPrompt).not.toContain('bundled qwen-collab Skill')
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+      } else {
+        process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousStateDir
+      }
+      await Promise.all([
+        rm(project, { recursive: true, force: true }),
+        rm(state, { recursive: true, force: true }),
+      ])
+    }
   })
 
   test('can request verbose stream-json for gateway progress observers', () => {
@@ -115,6 +196,7 @@ describe('agent gateway prompt builder', () => {
   test('uses a strict read-only runtime for pentest mode', () => {
     const config = getDefaultAgentGatewayConfig()
     config.runner.permissionMode = 'bypassPermissions'
+    config.runner.disableTools = true
 
     const args = buildAgentArgs(config, { toolPolicy: 'pentest' })
 
@@ -132,6 +214,8 @@ describe('agent gateway prompt builder', () => {
     expect(denied).toContain('Bash')
     expect(denied).toContain('PowerShell')
     expect(denied).toContain('WebFetch')
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+    expect(systemPrompt).toContain('perform a private capability-routing pass')
   })
 
   test('adds OpenRAG usage guidance when RAG integration is configured', () => {

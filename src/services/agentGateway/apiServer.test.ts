@@ -525,7 +525,31 @@ describe('AgentApiServer', () => {
     }
     const overview = await fetch(`${server.url}/api/router/overview`, { headers })
     expect(overview.status).toBe(200)
-    expect((await overview.json() as { data: { tools: { enabled: boolean } } }).data.tools.enabled).toBe(true)
+    const overviewBody = await overview.json() as {
+      data: {
+        tools: {
+          enabled: boolean
+          catalog: Array<{ name: string; group: string; enabled: boolean }>
+        }
+      }
+    }
+    expect(overviewBody.data.tools.enabled).toBe(true)
+    expect(overviewBody.data.tools.catalog).toContainEqual({
+      name: 'WebSearch',
+      group: 'Research',
+      enabled: true,
+    })
+
+    const webSearchDisabled = await fetch(`${server.url}/api/router/tools`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ tool: 'WebSearch', enabled: false }),
+    })
+    expect(webSearchDisabled.status).toBe(200)
+    expect(config.runner.disallowedTools).toContain('WebSearch')
+    expect(await readFile(join(projectRoot, '.env'), 'utf8')).toContain(
+      'OPENCLAUDE_AGENT_RUNNER_DISALLOWED_TOOLS=WebSearch',
+    )
 
     const disabled = await fetch(`${server.url}/api/router/tools`, {
       method: 'PATCH',
@@ -553,6 +577,14 @@ describe('AgentApiServer', () => {
       id: expect.any(String),
       timestamp: expect.any(String),
     })
+    expect((await fetch(`${server.url}/api/router/activity`, { headers }).then(
+      response => response.json(),
+    ) as {
+      data: Array<{ action: string; target: string }>
+    }).data).toContainEqual(expect.objectContaining({
+      action: 'tool.disabled',
+      target: 'WebSearch',
+    }))
   })
 
   test('manages subagent provider routes without returning API keys', async () => {

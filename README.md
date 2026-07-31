@@ -106,7 +106,8 @@ Telegram:
 - `/skills`, `/skill <name>`, `/skill create <name> | <description> |
   <instructions>`, `/skill delete <name>` - browse the button-driven Skill
   Store, inspect skills, and create or remove persistent user skills
-- `/tools [on|off]` - inspect or toggle model tool calls for subsequent runs
+- `/tools [on|off|list|enable NAME|disable NAME]` - inspect or toggle all
+  model tools, or enable/disable one built-in tool for subsequent runs
 - `/chatid` - show the current chat ID
 - `/status` - show gateway, worker, cron, budget, and Ouroboros status
 - `/provider`, `/models`, `/provider models`,
@@ -399,6 +400,14 @@ gateway bearer authentication. Runtime MCP definitions and their secrets are
 stored under the private Agent Gateway state directory; Telegram and API replies
 return only redacted targets and environment/header key names. Imported `npx`
 servers are launched without a shell and changes apply to the next agent run.
+The generated configuration is passed with `--strict-mcp-config`, so a disabled
+server cannot be silently restored from the tracked project `.mcp.json`.
+
+The Tool Router has three independent reduction layers: MCP server switches,
+Skill Store switches, and per-tool switches under **Tools & Runtime**. The
+global model-tools switch starts subsequent runs with an empty strict MCP
+configuration and no built-in tool schemas. Capability-specific system guidance
+is included only for MCP servers and skills that are enabled for that run.
 
 ### Telegram MCP And Maton
 

@@ -8,6 +8,7 @@ import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
 const CURRENT_FILE = fileURLToPath(import.meta.url)
 const CONTROL_MCP_CONFIG_FILE = 'gateway-control.mcp.json'
 const PENTEST_MCP_CONFIG_FILE = 'gateway-pentest.mcp.json'
+const DISABLED_MCP_CONFIG_FILE = 'gateway-tools-disabled.mcp.json'
 const CONTROL_MCP_NAME = 'gateway-control'
 const PENTEST_MCP_ALLOWLIST = new Set(['pentest', 'codegraph'])
 
@@ -22,18 +23,20 @@ type McpConfig = {
  */
 export function prepareGatewayControlMcpConfig(
   projectRoot: string,
-  profile: 'default' | 'pentest' = 'default',
+  profile: 'default' | 'pentest' | 'disabled' = 'default',
 ): string | undefined {
   const scriptPath = resolveGatewayControlMcpScriptPath()
   const sourcePath = resolveEffectiveMcpConfigPath(projectRoot)
   const source = readMcpConfig(sourcePath)
   const sourceServers = source.mcpServers || {}
-  const mcpServers = profile === 'pentest'
-    ? Object.fromEntries(
-        Object.entries(sourceServers)
-          .filter(([name]) => PENTEST_MCP_ALLOWLIST.has(name)),
-      )
-    : { ...sourceServers }
+  const mcpServers = profile === 'disabled'
+    ? {}
+    : profile === 'pentest'
+      ? Object.fromEntries(
+          Object.entries(sourceServers)
+            .filter(([name]) => PENTEST_MCP_ALLOWLIST.has(name)),
+        )
+      : { ...sourceServers }
 
   if (profile === 'default' && scriptPath) {
     const gatewayApiKey =
@@ -59,7 +62,11 @@ export function prepareGatewayControlMcpConfig(
   const stateDir = getAgentGatewayStateDir()
   const outputPath = join(
     stateDir,
-    profile === 'pentest' ? PENTEST_MCP_CONFIG_FILE : CONTROL_MCP_CONFIG_FILE,
+    profile === 'pentest'
+      ? PENTEST_MCP_CONFIG_FILE
+      : profile === 'disabled'
+        ? DISABLED_MCP_CONFIG_FILE
+        : CONTROL_MCP_CONFIG_FILE,
   )
   mkdirSync(stateDir, { recursive: true })
   writeFileSync(outputPath, `${JSON.stringify({ mcpServers }, null, 2)}\n`, {

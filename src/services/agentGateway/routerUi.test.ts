@@ -19,6 +19,9 @@ describe('Tool Router UI', () => {
     expect(html).toContain("request('/api/android/devices')")
     expect(html).toContain('setAndroidState')
     expect(html).toContain('header { align-items:stretch; flex-direction:column;')
+    expect(html).toContain('id="builtin-tool-list"')
+    expect(html).toContain('data-toggle-builtin-tool')
+    expect(html).toContain("tool:input.dataset.toggleBuiltinTool")
 
     const script = html.match(/<script>([\s\S]+)<\/script>/u)?.[1]
     expect(script).toBeTruthy()

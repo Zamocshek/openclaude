@@ -89,6 +89,11 @@ import {
   setActiveAndroidDeviceProfile,
   setAndroidDeviceProfileEnabled,
 } from './androidDevices.js'
+import {
+  describeRouterBuiltinTools,
+  isRouterBuiltinToolName,
+  updateRouterBuiltinToolState,
+} from './toolRouterTools.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -544,6 +549,7 @@ export class AgentApiServer {
               enabled: !this.config.runner.disableTools,
               available: this.config.runner.availableTools,
               disallowed: this.config.runner.disallowedTools,
+              catalog: this.describeRouterTools(),
             },
             mcp: {
               total: servers.length,
@@ -604,6 +610,7 @@ export class AgentApiServer {
             enabled: !this.config.runner.disableTools,
             available: this.config.runner.availableTools,
             disallowed: this.config.runner.disallowedTools,
+            catalog: this.describeRouterTools(),
           },
         })
         return
@@ -611,6 +618,33 @@ export class AgentApiServer {
       if (method === 'PATCH') {
         try {
           const body = await this.readJson(request)
+          if (typeof body.tool === 'string') {
+            if (
+              typeof body.enabled !== 'boolean'
+              || !isRouterBuiltinToolName(body.tool)
+            ) {
+              this.writeJson(
+                response,
+                400,
+                openAiError('Expected a known built-in tool and boolean enabled'),
+              )
+              return
+            }
+            await this.setBuiltinToolEnabled(body.tool, body.enabled)
+            await recordToolRouterAudit({
+              action: body.enabled ? 'tool.enabled' : 'tool.disabled',
+              target: body.tool,
+            })
+            this.writeJson(response, 200, {
+              data: {
+                enabled: !this.config.runner.disableTools,
+                available: this.config.runner.availableTools,
+                disallowed: this.config.runner.disallowedTools,
+                catalog: this.describeRouterTools(),
+              },
+            })
+            return
+          }
           if (typeof body.enabled !== 'boolean') {
             this.writeJson(response, 400, openAiError("Missing boolean 'enabled'"))
             return
@@ -1993,6 +2027,40 @@ export class AgentApiServer {
       runner: { ...current.runner, disableTools: !enabled },
     }))
     this.config.runner.disableTools = !enabled
+  }
+
+  private describeRouterTools(): Array<{
+    name: string
+    group: string
+    enabled: boolean
+  }> {
+    return describeRouterBuiltinTools(this.config.runner)
+  }
+
+  private async setBuiltinToolEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<void> {
+    const {
+      availableTools: nextAvailable,
+      disallowedTools: nextDisallowed,
+    } = updateRouterBuiltinToolState(this.config.runner, name, enabled)
+    const updates = {
+      OPENCLAUDE_AGENT_RUNNER_TOOLS: nextAvailable.join(','),
+      OPENCLAUDE_AGENT_RUNNER_DISALLOWED_TOOLS: nextDisallowed.join(','),
+    }
+    await updateProjectEnvFile(this.config.runner.cwd || process.cwd(), updates)
+    applyRuntimeEnvUpdates(updates)
+    await updateAgentGatewayConfig(current => ({
+      ...current,
+      runner: {
+        ...current.runner,
+        availableTools: nextAvailable,
+        disallowedTools: nextDisallowed,
+      },
+    }))
+    this.config.runner.availableTools = nextAvailable
+    this.config.runner.disallowedTools = nextDisallowed
   }
 
   private async setDisabledSkills(

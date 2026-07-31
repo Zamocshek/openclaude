@@ -99,7 +99,9 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/android - manage Android devices')
     expect(help).toContain('/skills - browse the Skill Store')
     expect(help).toContain('/skill create <json> - create a persistent SKILL.md')
-    expect(help).toContain('/tools [on|off] - show, enable, or disable model tool calls')
+    expect(help).toContain(
+      '/tools [on|off|list|enable NAME|disable NAME] - toggle model tools',
+    )
     expect(help).toContain('/bg [start|stop|now|status] - control background consciousness')
     expect(help).toContain('/consciousness [start|stop|now|status] - alias for /bg')
     expect(help).toContain('/evolve [on|off|now|status] - control evolution or run one cycle')
