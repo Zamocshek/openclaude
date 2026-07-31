@@ -15,11 +15,13 @@ import {
   buildAgentChildEnv,
   buildPromptFromChatMessages,
   classifyAgentRunFailure,
+  extractVisualLocalPaths,
   extractCamofoxScreenshotArtifacts,
   extractStreamJsonResult,
   getAgentStallTimeoutMs,
   hasCodingMutationIntent,
   hasCodingTaskIntent,
+  injectGatewayVisionEvidence,
   isIgnorablePostSuccessStderr,
   normalizeMessageContent,
   runOpenClaudeAgent,
@@ -132,6 +134,38 @@ describe('agent gateway prompt builder', () => {
     const textSystemPrompt =
       textArgs[textArgs.indexOf('--append-system-prompt') + 1]
     expect(textSystemPrompt).not.toContain('Delegate the visual inspection exactly once')
+  })
+
+  test('replaces image paths with gateway-managed visual evidence before the text parent runs', () => {
+    const prompt = [
+      'Current request:',
+      'Read the screenshot.',
+      '[Vision input]',
+      'local_path: /workspace/vision-inputs/example.png',
+      'prompt_reference: @/workspace/vision-inputs/example.png',
+      'mime_type: image/png',
+      '- type: photo',
+    ].join('\n')
+
+    expect(extractVisualLocalPaths(prompt)).toEqual([
+      '/workspace/vision-inputs/example.png',
+    ])
+    const injected = injectGatewayVisionEvidence(
+      prompt,
+      'Heading: MCP Servers. Sidebar: MCP Servers, Skills, Tools & Runtime, Request Log.',
+    )
+
+    expect(injected).toContain('[Gateway vision evidence]')
+    expect(injected).toContain('Heading: MCP Servers')
+    expect(injected).not.toContain('/workspace/vision-inputs/example.png')
+    expect(injected).not.toContain('[Vision input]')
+    expect(injected).not.toContain('mime_type: image/')
+    expect(injected).not.toMatch(/-\s*type:\s*photo/iu)
+
+    const config = getDefaultAgentGatewayConfig()
+    const args = buildAgentArgs(config, { prompt: injected })
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+    expect(systemPrompt).not.toContain('Delegate the visual inspection exactly once')
   })
 
   test('can disable model tool calls and all MCP process startup', async () => {

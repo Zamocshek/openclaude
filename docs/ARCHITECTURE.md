@@ -220,11 +220,12 @@ interfaces to one multimodal model:
 - Chat Completions `image_url` and Responses `input_image` base64 data URLs are
   signature-checked, content-addressed, mode `0600`, and retained for follow-up
   turns for seven days by default.
-- The text-only coordinator delegates the path and question to
-  `gateway-vision`, a read-only Codex subagent that must inspect the image with
-  `Read`.
-- The parent receives only the grounded textual report, so DeepSeek never
-  receives an unsupported binary image tool result.
+- Before the text coordinator starts, the gateway runs an isolated
+  `gateway-vision` Codex preflight with the image and current user question.
+- The gateway then removes image paths, MIME markers, and attachment references
+  from the parent prompt and injects only the grounded textual report. DeepSeek
+  therefore cannot receive an unsupported direct image or binary `Read` result,
+  even if it would otherwise ignore a routing instruction.
 - HTTP(S) image URLs are left as references rather than fetched by the gateway,
   avoiding an SSRF path into the host or Docker network.
 

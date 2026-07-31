@@ -287,10 +287,11 @@ Advanced and source-build guides:
 - **Streaming responses**: Real-time token output and tool progress
 - **Tool calling**: Multi-step tool loops with model calls, tool execution, and follow-up responses
 - **Images**: Telegram photos and OpenAI `image_url`/Responses `input_image`
-  data URLs are saved as protected local files. A dedicated Codex
-  `gateway-vision` subagent inspects them, so text-only parent providers such as
-  DeepSeek receive grounded text evidence instead of unsupported image payloads.
-  Remote image URLs are not downloaded server-side to avoid SSRF.
+  data URLs are saved as protected local files. The gateway runs a dedicated
+  Codex `gateway-vision` preflight, strips visual paths from the parent request,
+  and injects grounded text evidence. Text-only providers such as DeepSeek never
+  receive direct image payloads or binary image tool results. Remote image URLs
+  are not downloaded server-side to avoid SSRF.
 - **Provider profiles**: Guided setup plus saved `.openclaude-profile.json` support
 - **Local and remote model backends**: Cloud APIs, local servers, and Apple Silicon local inference
 
