@@ -100,12 +100,107 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         additionalProperties: false,
       },
     },
+    {
+      name: 'android_list_devices',
+      description: 'List saved Android device profiles and optionally discover devices currently visible to ADB. Use this before routing Android work to a device alias.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          discover: { type: 'boolean', description: 'Also run adb devices -l without connecting to new devices.' },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'android_register_device',
+      description: 'Save an Android device alias and create a pinned Android-MCP server for subsequent agent runs.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          alias: { type: 'string', description: 'Stable lowercase alias, for example personal or lab-phone.' },
+          serial: { type: 'string', description: 'ADB USB serial or WiFi host[:port].' },
+          connection: { type: 'string', enum: ['auto', 'usb', 'wifi'] },
+          make_active: { type: 'boolean' },
+        },
+        required: ['alias', 'serial'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'android_select_device',
+      description: 'Select the saved Android alias used by the base android-mcp server on the next agent run.',
+      inputSchema: {
+        type: 'object',
+        properties: { alias: { type: 'string' } },
+        required: ['alias'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'android_connect_device',
+      description: 'Connect or validate a saved Android alias or explicit ADB serial. For WiFi this runs adb connect; for USB it validates authorization.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          identifier: { type: 'string', description: 'Saved alias, USB serial, or WiFi host:port.' },
+          make_active: { type: 'boolean' },
+        },
+        required: ['identifier'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'android_check_device',
+      description: 'Check ADB state and basic Android device properties for a saved alias or serial without performing UI actions.',
+      inputSchema: {
+        type: 'object',
+        properties: { identifier: { type: 'string' } },
+        required: ['identifier'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'android_pair_device',
+      description: 'Pair a WiFi ADB target with a short-lived pairing code supplied by the user. Pairing codes are never persisted.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          target: { type: 'string', description: 'WiFi pairing host:port shown by Android.' },
+          code: { type: 'string', description: '4-12 digit pairing code.' },
+        },
+        required: ['target', 'code'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'android_set_device_enabled',
+      description: 'Enable or disable a saved Android device profile and its pinned MCP server.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          alias: { type: 'string' },
+          enabled: { type: 'boolean' },
+        },
+        required: ['alias', 'enabled'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'android_remove_device',
+      description: 'Remove a saved Android profile and its generated MCP server. This does not modify the device itself.',
+      inputSchema: {
+        type: 'object',
+        properties: { alias: { type: 'string' } },
+        required: ['alias'],
+        additionalProperties: false,
+      },
+    },
   ],
 }))
 
 server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   try {
-    const result = handleToolCall(params.name, params.arguments || {})
+    const result = await handleToolCall(params.name, params.arguments || {})
     return { content: [{ type: 'text', text: JSON.stringify(result) }] }
   } catch (error) {
     return {
@@ -115,12 +210,102 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   }
 })
 
-function handleToolCall(name, args) {
+async function handleToolCall(name, args) {
   if (name === 'get_subagent_routing') return redactRouting(loadConfig().subagents)
   if (name === 'configure_subagent_route') return configureRoute(args)
   if (name === 'set_subagent_parallelism') return setParallelism(args)
   if (name === 'set_subagents_enabled') return setEnabled(args)
+  if (name === 'android_list_devices') return listAndroidDevices(args)
+  if (name === 'android_register_device') {
+    return gatewayRequest('/api/android/devices', {
+      method: 'POST',
+      body: {
+        alias: args.alias,
+        serial: args.serial,
+        connection: args.connection || 'auto',
+        make_active: args.make_active !== false,
+      },
+    })
+  }
+  if (name === 'android_select_device') {
+    return gatewayRequest(
+      `/api/android/devices/${encodeURIComponent(String(args.alias || ''))}`,
+      { method: 'PATCH', body: { active: true } },
+    )
+  }
+  if (name === 'android_connect_device') {
+    return gatewayRequest('/api/android/connect', {
+      method: 'POST',
+      body: {
+        alias: args.identifier,
+        make_active: args.make_active !== false,
+      },
+    })
+  }
+  if (name === 'android_check_device') {
+    return gatewayRequest(
+      `/api/android/devices/${encodeURIComponent(String(args.identifier || ''))}/check`,
+      { method: 'POST' },
+    )
+  }
+  if (name === 'android_pair_device') {
+    return gatewayRequest('/api/android/pair', {
+      method: 'POST',
+      body: { target: args.target, code: args.code },
+    })
+  }
+  if (name === 'android_set_device_enabled') {
+    return gatewayRequest(
+      `/api/android/devices/${encodeURIComponent(String(args.alias || ''))}`,
+      { method: 'PATCH', body: { enabled: args.enabled } },
+    )
+  }
+  if (name === 'android_remove_device') {
+    return gatewayRequest(
+      `/api/android/devices/${encodeURIComponent(String(args.alias || ''))}`,
+      { method: 'DELETE' },
+    )
+  }
   throw new Error(`Unknown gateway-control tool: ${name}`)
+}
+
+async function listAndroidDevices(args) {
+  const registry = await gatewayRequest('/api/android/devices')
+  if (args.discover !== true) return registry
+  const discovered = await gatewayRequest('/api/android/discover', {
+    method: 'POST',
+  })
+  return {
+    ...registry,
+    discovered: discovered.data || [],
+  }
+}
+
+async function gatewayRequest(path, options = {}) {
+  const baseUrl = String(
+    process.env.OPENCLAUDE_AGENT_GATEWAY_URL || 'http://127.0.0.1:8642',
+  ).replace(/\/+$/, '')
+  const headers = {}
+  const apiKey = String(process.env.OPENCLAUDE_AGENT_API_KEY || '').trim()
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json'
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: options.method || 'GET',
+    headers,
+    ...(options.body !== undefined
+      ? { body: JSON.stringify(options.body) }
+      : {}),
+    signal: AbortSignal.timeout(20_000),
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(
+      body?.error?.message
+      || body?.message
+      || `Gateway Android API returned HTTP ${response.status}`,
+    )
+  }
+  return body
 }
 
 function configureRoute(args) {

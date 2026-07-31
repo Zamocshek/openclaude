@@ -1,6 +1,7 @@
 import { feature } from 'bun:bundle'
 import { shouldAutoEnableClaudeInChrome } from 'src/utils/claudeInChrome/setup.js'
 import { registerBatchSkill } from './batch.js'
+import { registerAndroidDeviceSkill } from './androidDevice.js'
 import { registerClaudeInChromeSkill } from './claudeInChrome.js'
 import { registerCodeSkill } from './code.js'
 import { registerDebugSkill } from './debug.js'
@@ -25,6 +26,7 @@ export function initBundledSkills(): void {
   registerUpdateConfigSkill()
   registerKeybindingsSkill()
   registerCodeSkill()
+  registerAndroidDeviceSkill()
   registerPentestSkill()
   registerQwenCollaborationSkill()
   registerDebugSkill()

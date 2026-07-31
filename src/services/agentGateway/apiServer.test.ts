@@ -407,6 +407,90 @@ describe('AgentApiServer', () => {
     expect(removedBody.data.map(item => item.name)).toEqual(['core'])
   })
 
+  test('manages isolated Android device profiles through the protected API', async () => {
+    const projectRoot = join(tempGatewayStateDir!, 'project')
+    await mkdir(projectRoot, { recursive: true })
+    await writeFile(
+      join(projectRoot, '.mcp.json'),
+      JSON.stringify({ mcpServers: {} }),
+    )
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({
+        api: { apiKey: 'secret' } as never,
+        runner: { cwd: projectRoot } as never,
+      }),
+    })
+    await server.start()
+
+    expect((await fetch(`${server.url}/api/android/devices`)).status).toBe(401)
+
+    const headers = {
+      Authorization: 'Bearer secret',
+      'Content-Type': 'application/json',
+    }
+    const created = await fetch(`${server.url}/api/android/devices`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        alias: 'lab-phone',
+        serial: '192.168.1.8',
+        connection: 'wifi',
+        make_active: true,
+      }),
+    })
+    expect(created.status).toBe(201)
+    expect(await created.json()).toMatchObject({
+      data: {
+        active_alias: 'lab-phone',
+        profiles: [{
+          alias: 'lab-phone',
+          serial: '192.168.1.8:5555',
+          connection: 'wifi',
+          enabled: true,
+        }],
+      },
+    })
+
+    const listed = await fetch(`${server.url}/api/android/devices`, { headers })
+    expect(await listed.json()).toMatchObject({
+      data: {
+        active_alias: 'lab-phone',
+        profiles: [{ alias: 'lab-phone' }],
+      },
+    })
+
+    const disabled = await fetch(
+      `${server.url}/api/android/devices/lab-phone`,
+      {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ enabled: false }),
+      },
+    )
+    expect(disabled.status).toBe(200)
+    expect(await disabled.json()).toMatchObject({
+      data: {
+        active_alias: null,
+        profiles: [{ alias: 'lab-phone', enabled: false }],
+      },
+    })
+
+    const removed = await fetch(
+      `${server.url}/api/android/devices/lab-phone`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer secret' },
+      },
+    )
+    expect(removed.status).toBe(200)
+    expect(await removed.json()).toMatchObject({
+      deleted: 'lab-phone',
+      data: { active_alias: null, profiles: [] },
+    })
+  })
+
   test('serves the Tool Router shell and persists protected runtime controls', async () => {
     const projectRoot = join(tempGatewayStateDir!, 'project')
     await mkdir(projectRoot, { recursive: true })

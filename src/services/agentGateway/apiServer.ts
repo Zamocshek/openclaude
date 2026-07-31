@@ -77,6 +77,18 @@ import { buildFileManagerHtml } from './fileManagerUi.js'
 import { buildToolRouterHtml } from './routerUi.js'
 import { getAgentGatewayWebLinks } from './webLinks.js'
 import { describeGatewaySubagents } from './subagentRuntime.js'
+import {
+  checkAndroidDevice,
+  connectAndroidDevice,
+  discoverAndroidDevices,
+  disconnectAndroidDevice,
+  listAndroidDeviceProfiles,
+  pairAndroidDevice,
+  registerAndroidDeviceProfile,
+  removeAndroidDeviceProfile,
+  setActiveAndroidDeviceProfile,
+  setAndroidDeviceProfileEnabled,
+} from './androidDevices.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -697,6 +709,226 @@ export class AgentApiServer {
           this.writeJson(response, 200, {
             deleted: name,
             data: servers.map(describeManagedMcpServer),
+          })
+          return
+        }
+      } catch (error) {
+        this.writeJson(
+          response,
+          400,
+          openAiError(error instanceof Error ? error.message : String(error)),
+        )
+        return
+      }
+    }
+
+    if (url.pathname === '/api/android/devices') {
+      try {
+        if (method === 'GET') {
+          const registry = await listAndroidDeviceProfiles()
+          this.writeJson(response, 200, {
+            data: {
+              active_alias: registry.activeAlias || null,
+              profiles: Object.values(registry.profiles),
+            },
+          })
+          return
+        }
+        if (method === 'POST') {
+          const body = await this.readJson(request)
+          const registry = await registerAndroidDeviceProfile({
+            projectRoot: this.config.runner.cwd || process.cwd(),
+            alias: String(body.alias || ''),
+            serial: String(body.serial || body.target || ''),
+            connection: String(body.connection || 'auto'),
+            enabled: body.enabled !== false,
+            makeActive: body.make_active !== false,
+          })
+          await recordToolRouterAudit({
+            action: 'android.profile.registered',
+            target: String(body.alias || ''),
+          })
+          this.writeJson(response, 201, {
+            data: {
+              active_alias: registry.activeAlias || null,
+              profiles: Object.values(registry.profiles),
+            },
+          })
+          return
+        }
+      } catch (error) {
+        this.writeJson(
+          response,
+          400,
+          openAiError(error instanceof Error ? error.message : String(error)),
+        )
+        return
+      }
+    }
+
+    if (url.pathname === '/api/android/discover' && method === 'POST') {
+      try {
+        const devices = await discoverAndroidDevices()
+        await recordToolRouterAudit({
+          action: 'android.devices.discovered',
+          target: `${devices.length}`,
+        })
+        this.writeJson(response, 200, { data: devices })
+      } catch (error) {
+        this.writeJson(
+          response,
+          400,
+          openAiError(error instanceof Error ? error.message : String(error)),
+        )
+      }
+      return
+    }
+
+    if (url.pathname === '/api/android/connect' && method === 'POST') {
+      try {
+        const body = await this.readJson(request)
+        const identifier = String(body.alias || body.serial || body.target || '')
+        const result = await connectAndroidDevice(identifier)
+        if (body.make_active !== false && result.alias) {
+          await setActiveAndroidDeviceProfile(result.alias)
+        }
+        await recordToolRouterAudit({
+          action: 'android.device.connected',
+          target: result.alias || result.serial,
+        })
+        this.writeJson(response, 200, { data: result })
+      } catch (error) {
+        this.writeJson(
+          response,
+          400,
+          openAiError(error instanceof Error ? error.message : String(error)),
+        )
+      }
+      return
+    }
+
+    if (url.pathname === '/api/android/disconnect' && method === 'POST') {
+      try {
+        const body = await this.readJson(request)
+        const identifier = String(body.alias || body.serial || body.target || '')
+        const result = await disconnectAndroidDevice(identifier)
+        await recordToolRouterAudit({
+          action: 'android.device.disconnected',
+          target: result.serial,
+        })
+        this.writeJson(response, 200, { data: result })
+      } catch (error) {
+        this.writeJson(
+          response,
+          400,
+          openAiError(error instanceof Error ? error.message : String(error)),
+        )
+      }
+      return
+    }
+
+    if (url.pathname === '/api/android/pair' && method === 'POST') {
+      try {
+        const body = await this.readJson(request)
+        const result = await pairAndroidDevice(
+          String(body.target || body.serial || ''),
+          String(body.code || ''),
+        )
+        await recordToolRouterAudit({
+          action: 'android.device.paired',
+          target: result.target,
+        })
+        this.writeJson(response, 200, { data: result })
+      } catch (error) {
+        this.writeJson(
+          response,
+          400,
+          openAiError(error instanceof Error ? error.message : String(error)),
+        )
+      }
+      return
+    }
+
+    const androidCheckMatch = url.pathname.match(
+      /^\/api\/android\/devices\/([^/]+)\/check$/u,
+    )
+    if (androidCheckMatch && method === 'POST') {
+      try {
+        const identifier = decodeURIComponent(androidCheckMatch[1]!)
+        const result = await checkAndroidDevice(identifier)
+        await recordToolRouterAudit({
+          action: 'android.device.checked',
+          target: result.alias || result.serial,
+        })
+        this.writeJson(response, 200, { data: result })
+      } catch (error) {
+        this.writeJson(
+          response,
+          400,
+          openAiError(error instanceof Error ? error.message : String(error)),
+        )
+      }
+      return
+    }
+
+    const androidProfileMatch = url.pathname.match(
+      /^\/api\/android\/devices\/([^/]+)$/u,
+    )
+    if (androidProfileMatch) {
+      const alias = decodeURIComponent(androidProfileMatch[1]!)
+      try {
+        if (method === 'PATCH') {
+          const body = await this.readJson(request)
+          let registry
+          if (typeof body.enabled === 'boolean') {
+            registry = await setAndroidDeviceProfileEnabled(
+              this.config.runner.cwd || process.cwd(),
+              alias,
+              body.enabled,
+            )
+          }
+          if (body.active === true) {
+            registry = await setActiveAndroidDeviceProfile(alias)
+          }
+          if (!registry) {
+            this.writeJson(
+              response,
+              400,
+              openAiError("Expected boolean 'enabled' or active=true"),
+            )
+            return
+          }
+          await recordToolRouterAudit({
+            action: body.active === true
+              ? 'android.profile.selected'
+              : body.enabled
+                ? 'android.profile.enabled'
+                : 'android.profile.disabled',
+            target: alias,
+          })
+          this.writeJson(response, 200, {
+            data: {
+              active_alias: registry.activeAlias || null,
+              profiles: Object.values(registry.profiles),
+            },
+          })
+          return
+        }
+        if (method === 'DELETE') {
+          const registry = await removeAndroidDeviceProfile(
+            this.config.runner.cwd || process.cwd(),
+            alias,
+          )
+          await recordToolRouterAudit({
+            action: 'android.profile.removed',
+            target: alias,
+          })
+          this.writeJson(response, 200, {
+            deleted: alias,
+            data: {
+              active_alias: registry.activeAlias || null,
+              profiles: Object.values(registry.profiles),
+            },
           })
           return
         }

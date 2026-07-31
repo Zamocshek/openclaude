@@ -54,6 +54,7 @@
     "release:camofox:qwen:status": "node scripts/release/camofox-auth-profile.mjs status",
     "release:camofox:qwen:save": "node scripts/release/camofox-auth-profile.mjs save",
     "release:camofox:qwen:verify": "node scripts/release/camofox-auth-profile.mjs verify",
+    "release:android:test": "node scripts/release/test-android-mcp.cjs",
     "release:hindsight:install": "node scripts/release/hindsight-control.mjs install",
     "release:hindsight:docker:up": "node scripts/release/hindsight-control.mjs docker-up",
     "release:hindsight:docker:down": "node scripts/release/hindsight-control.mjs docker-down",

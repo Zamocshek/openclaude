@@ -61,6 +61,7 @@ COPY scripts/pentest-mcp.cjs scripts/pentest-mcp.cjs
 
 # Install git and ripgrep - many CLI tool operations depend on them
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      adb \
       ca-certificates \
       curl \
       dnsutils \
@@ -80,17 +81,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Keep runtime script edits after the expensive system-package layer so MCP
 # changes do not trigger a fresh apt install during every Docker rebuild.
 COPY scripts/gateway-control-mcp.mjs scripts/gateway-control-mcp.mjs
+COPY scripts/android-mcp-launcher.cjs scripts/android-mcp-launcher.cjs
 
 ARG UV_VERSION=0.11.32
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_TOOL_DIR=/opt/uv/tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
     && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
-    && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
+    && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx \
+    && uv python install 3.13 \
+    && uv tool install --python 3.13 "android-mcp==0.2.0"
 
 COPY --from=build /app/scripts/release/test-research-mcp.cjs scripts/release/test-research-mcp.cjs
 COPY scripts/release/test-pentest-mcp.cjs scripts/release/test-pentest-mcp.cjs
 COPY scripts/release/check-base-mcp.cjs scripts/release/check-base-mcp.cjs
+COPY scripts/release/test-android-mcp.cjs scripts/release/test-android-mcp.cjs
 
 RUN chmod +x scripts/docker-entrypoint.sh \
+    && chmod +x scripts/android-mcp-launcher.cjs \
     && ln -sf /app/node_modules/@colbymchenry/codegraph/npm-shim.js /usr/local/bin/codegraph \
     && ln -sf /app/node_modules/mcp-searxng/dist/cli.js /usr/local/bin/mcp-searxng \
     && ln -sf /app/node_modules/@upstash/context7-mcp/dist/index.js /usr/local/bin/context7-mcp \

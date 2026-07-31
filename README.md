@@ -98,6 +98,11 @@ Telegram:
 - `/mcp`, `/mcp add <json>`, `/mcp enable <name>`, `/mcp disable <name>`,
   `/mcp remove <name>` - import and manage MCP servers; a standalone JSON
   message with a top-level `mcpServers` object is imported automatically
+- `/android`, `/android discover`,
+  `/android add <alias> <usb|wifi|auto> <serial>`,
+  `/android pair <host:port> <code>`, `/android connect <alias>`,
+  `/android use <alias>`, and `/android check [alias]` - discover, pair,
+  save, select, and validate multiple Android-MCP device profiles
 - `/skills`, `/skill <name>`, `/skill create <name> | <description> |
   <instructions>`, `/skill delete <name>` - browse the button-driven Skill
   Store, inspect skills, and create or remove persistent user skills
@@ -318,6 +323,56 @@ Context7 is connected through the same project `.mcp.json`. The agent is directe
 to use `resolve-library-id` and `query-docs` for current library/API documentation,
 configuration, setup, and version-specific code. `CONTEXT7_API_KEY` is optional;
 set one in `.env` for higher upstream rate limits.
+
+### Android Devices
+
+The base tool set includes
+[CursorTouch Android-MCP](https://github.com/CursorTouch/Android-MCP), pinned to
+version `0.2.0`. Docker installs Android platform-tools, Python 3.13, and the MCP
+package in the image. Host-native Windows runs use the existing `adb` and `uvx`
+commands.
+
+Use Telegram `/android` for the device panel. Each saved alias creates a
+separate pinned MCP server named `android-<alias>`, so two different devices do
+not share Android-MCP's process-local active-device state. The bundled
+`android-device` skill resolves aliases through real Gateway control tools,
+checks ADB state, snapshots the screen, prefers selector-based interaction, and
+keeps retries bounded.
+
+Examples:
+
+```text
+/android discover
+/android add personal usb RFCN2013V8D
+/android pair 192.168.1.8:37123 123456
+/android add lab-phone wifi 192.168.1.8:5555
+/android connect lab-phone
+/android check lab-phone
+```
+
+Android 10+ and USB debugging or Wireless debugging are required. Accept the
+debugging authorization prompt on the target device. On Docker Desktop for
+Windows, direct WiFi ADB is the portable path. USB devices normally remain
+owned by the Windows host; either run the Gateway natively or expose a
+host-restricted ADB server and set
+`OPENCLAUDE_ANDROID_ADB_SERVER_SOCKET=tcp:host.docker.internal:5037`.
+Do not expose ADB port 5037 to an untrusted network.
+
+The authenticated Gateway API provides:
+
+- `GET /api/android/devices`
+- `POST /api/android/discover`
+- `POST /api/android/devices`
+- `PATCH|DELETE /api/android/devices/:alias`
+- `POST /api/android/devices/:alias/check`
+- `POST /api/android/connect`, `/api/android/disconnect`, `/api/android/pair`
+
+Run `bun run release:android:test` to verify the pinned package. With an
+authorized device attached it also performs the MCP handshake and checks the
+required tool inventory. Without a device it validates installation and reports
+that live tools were skipped. A generic Android MCP server is not started:
+upstream exits when no device is attached, so only registered aliases are added
+to agent runs.
 
 Additional MCP servers can be added at runtime from Telegram or the authenticated
 Agent Gateway API without editing the tracked `.mcp.json`:

@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 import { prepareGatewayControlMcpConfig } from './gatewayControlMcp.js'
 
 const temporaryPaths: string[] = []
+let mockGateway: ReturnType<typeof Bun.serve> | undefined
 
 afterEach(async () => {
+  mockGateway?.stop(true)
+  mockGateway = undefined
   delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
   await Promise.all(temporaryPaths.splice(0).map(path =>
     rm(path, { recursive: true, force: true })
@@ -61,5 +66,69 @@ describe('gateway control MCP configuration', () => {
     expect(generated.mcpServers['gateway-control']).toBeUndefined()
     expect(generated.mcpServers.camofox).toBeUndefined()
     expect(generated.mcpServers.context7).toBeUndefined()
+  })
+
+  test('exposes Android tools and calls the authenticated Gateway API', async () => {
+    const requests: Array<{ path: string; authorization: string | null }> = []
+    mockGateway = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url)
+        requests.push({
+          path: url.pathname,
+          authorization: request.headers.get('authorization'),
+        })
+        return Response.json({
+          data: { active_alias: null, profiles: [] },
+        })
+      },
+    })
+
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve('scripts/gateway-control-mcp.mjs')],
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        OPENCLAUDE_AGENT_GATEWAY_URL:
+          `http://127.0.0.1:${mockGateway.port}`,
+        OPENCLAUDE_AGENT_API_KEY: 'android-test-secret',
+      } as Record<string, string>,
+      stderr: 'pipe',
+    })
+    const client = new Client({
+      name: 'gateway-control-android-test',
+      version: '1.0.0',
+    })
+
+    try {
+      await client.connect(transport)
+      const tools = await client.listTools()
+      expect(tools.tools.map(tool => tool.name)).toContain(
+        'android_register_device',
+      )
+      expect(tools.tools.map(tool => tool.name)).toContain(
+        'android_check_device',
+      )
+
+      const result = await client.callTool({
+        name: 'android_list_devices',
+        arguments: { discover: false },
+      })
+      expect(result.isError).not.toBe(true)
+      expect(result.content).toEqual([{
+        type: 'text',
+        text: JSON.stringify({
+          data: { active_alias: null, profiles: [] },
+        }),
+      }])
+      expect(requests).toEqual([{
+        path: '/api/android/devices',
+        authorization: 'Bearer android-test-secret',
+      }])
+    } finally {
+      await client.close()
+    }
   })
 })
