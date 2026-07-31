@@ -118,8 +118,12 @@ async function main() {
 
 function findAuthorizedDevice() {
   const command = String(process.env.ANDROID_ADB_COMMAND || 'adb').trim()
+  const adbEnv = { ...process.env }
+  if (!String(adbEnv.ADB_SERVER_SOCKET || '').trim()) {
+    delete adbEnv.ADB_SERVER_SOCKET
+  }
   const result = spawnSync(command, ['devices', '-l'], {
-    env: process.env,
+    env: adbEnv,
     encoding: 'utf8',
     timeout: 15_000,
     windowsHide: true,
