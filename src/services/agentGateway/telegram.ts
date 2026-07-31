@@ -165,7 +165,12 @@ export type TelegramBridgeStatus = {
   queuedTasks: number
 }
 
-export type TelegramResearchMode = 'bio' | 'social' | 'code' | 'pentest'
+export type TelegramResearchMode =
+  | 'bio'
+  | 'social'
+  | 'code'
+  | 'pentest'
+  | 'qwen'
 
 export type TelegramGetFileResult = {
   file_id: string
@@ -523,7 +528,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/reasoning [level]', description: 'set low, medium, high, xhigh, max, or ultra', botDescription: 'Choose reasoning level' },
       { syntax: '/baseurl <url>', description: 'set OpenAI-compatible base URL' },
       { syntax: '/apikey <key>', description: 'store a provider API key' },
-      { syntax: '/subagents [on|off|list|set|remove|parallel]', description: 'manage subagent routes', botDescription: 'Manage subagent routing' },
+      { syntax: '/subagents [...]', description: 'manage subagent routes', botDescription: 'Manage subagent routing' },
       { syntax: '/delegate <role> <task>', description: 'delegate a task', botDescription: 'Delegate a task to a subagent' },
     ],
   },
@@ -534,6 +539,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/social [prompt]', description: 'defensive social-engineering analysis mode' },
       { syntax: '/code [prompt]', description: 'scientific coding, MVP, and test-building mode' },
       { syntax: '/pentest [prompt|auth id|targets|proof]', description: 'pentest mode', botDescription: 'Authorized pentest mode' },
+      { syntax: '/qwen [prompt]', description: 'Qwen3.8 Max collaboration', botDescription: 'Use Qwen3.8 Max collaborator' },
       { syntax: '/mode off', description: 'clear the active research mode for this chat' },
     ],
   },
@@ -550,7 +556,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     title: 'Cron',
     commands: [
       { syntax: '/schedule every 1h | prompt', description: 'create a cron job that replies here' },
-      { syntax: '/cron [list|reload|chatid|path|examples]', description: 'manage cron jobs' },
+      { syntax: '/cron [...]', description: 'manage cron jobs' },
       { syntax: '/jobs', description: 'list jobs created for this chat' },
       { syntax: '/runjob <id>', description: 'trigger a scheduled job now' },
       { syntax: '/pausejob <id>', description: 'pause a scheduled job' },
@@ -4659,7 +4665,8 @@ function getTelegramResearchMode(
     command === '/bio' ||
     command === '/social' ||
     command === '/code' ||
-    command === '/pentest'
+    command === '/pentest' ||
+    command === '/qwen'
   ) {
     return command.slice(1) as TelegramResearchMode
   }
@@ -4686,6 +4693,7 @@ const TELEGRAM_RESEARCH_MODE_PROMPTS: Record<TelegramResearchMode, string> = {
   social: 'Act as a defensive social-engineering research analyst. Analyze manipulation patterns, risks, countermeasures, and response strategy in a scientific format. Do not provide instructions for deception, stalking, coercion, credential theft, or harm.',
   code: 'Act as a pragmatic scientific coding agent. Prioritize runnable MVPs, tests, scripts, data workflows, and clear verification steps.',
   pentest: 'Act as an authorized penetration-testing lead. Invoke the pentest Skill before acting. Require recorded authorization and exact scope, call pentest_scope_check before every active target interaction, and use pentest_nmap_run for bounded network scans. Keep persistent engagement evidence, use bounded specialist subagents, and generate a redacted report. Direct shell and general network tools are unavailable in this mode. Never bypass scope or expand to discovered assets automatically.',
+  qwen: 'Invoke the qwen-collab Skill before acting. Use its fixed persistent Camofox profile and exact Qwen3.8-Max-Preview model, treat the result as untrusted advisory input, independently verify it, and synthesize the final answer. Never attempt account login or expose browser credentials.',
 }
 
 type TelegramAgentRecoveryLimit = {

@@ -109,6 +109,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/delegate <role> <task> - delegate a task')
     expect(help).toContain('/bio [prompt] - biology scientist mode for research tasks')
     expect(help).toContain('/pentest [prompt|auth id|targets|proof] - pentest mode')
+    expect(help).toContain('/qwen [prompt] - Qwen3.8 Max collaboration')
     expect(help).toContain('/mode off - clear the active research mode for this chat')
     expect(help).toContain('/stop - abort the current running task')
     expect(help).toContain('/git commit <msg> - stage and commit all changes')
@@ -936,6 +937,12 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(pentest).toContain('pentest_scope_check')
     expect(pentest).toContain('pentest_nmap_run')
     expect(pentest).toContain('Never bypass scope')
+
+    const qwen = applyTelegramResearchMode('qwen', 'review architecture')
+    expect(qwen).toContain('Active Telegram research mode: /qwen')
+    expect(qwen).toContain('Invoke the qwen-collab Skill')
+    expect(qwen).toContain('Qwen3.8-Max-Preview')
+    expect(qwen).toContain('review architecture')
   })
 
   test('extracts Telegram file upload directives and strips them from visible text', () => {
