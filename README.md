@@ -180,33 +180,39 @@ For local production-style runs, use the cross-platform wrappers in
   - `scripts\\release\\docker-up.bat`
   - `scripts\\release\\docker-down.bat`
 
-### Qwen browser collaborator
+### Browser model collaborators
 
-The bundled `/qwen-collab` skill uses Camofox and the exact
-`Qwen3.8-Max-Preview` model for an independent review of complex tasks.
-Authentication is a one-time local operation:
+The bundled `/qwen-collab` skill (aliases `/qwen`, `/browser-collab`,
+`/browser-model`, and `/web-model`) uses isolated persistent Camofox profiles
+for independent reviews by Qwen, ChatGPT, Claude, Gemini, DeepSeek,
+Perplexity, or a custom browser AI. List the profile registry with:
 
 ```bash
-bun run release:camofox:qwen:login
+bun run release:camofox:profiles
+bun run release:camofox:auth -- status qwen
+bun run release:camofox:auth -- login qwen
 ```
 
 Complete login yourself in the visible Camoufox window. OpenClaude never reads
-the Google/Qwen password or MFA response. The helper stores only browser
-cookies and localStorage under `~/.camofox/profiles`, outside Git. Inspect or
+passwords, account choices, CAPTCHA, OAuth, or MFA responses. The helper stores
+only browser cookies and localStorage under `~/.camofox/profiles`, outside Git.
+Inspect or
 explicitly finish the running helper with:
 
 ```bash
-bun run release:camofox:qwen:status
-bun run release:camofox:qwen:save
-bun run release:camofox:qwen:verify
+bun run release:camofox:auth -- status <profile>
+bun run release:camofox:auth -- save <profile>
+bun run release:camofox:auth -- verify <profile>
 ```
 
-NOVA reuses the fixed `nova-qwen-max` browser identity and a long-lived
-navigator tab. It searches visible Qwen conversation history for a clearly
-matching project/topic, starts a new chat when no strong match exists, selects
-`Qwen3.8-Max-Preview`, and treats the answer as untrusted advisory content.
-Normal runs checkpoint refreshed browser state without closing the healthy
-tab, session, or browser.
+The old `release:camofox:qwen:*` commands remain compatible. NOVA can add or
+edit non-secret routing profiles through MCP tools, select an explicitly
+requested model, reuse a clearly matching conversation, and checkpoint the
+session without closing a healthy browser. If login is required, it leaves the
+session open and asks the user to complete the profile-specific command.
+Profile metadata is stored in
+`~/.openclaude/camofox-auth/browser-model-profiles.json`; authentication
+material is never stored there or committed.
 
 ### Fastest OpenAI setup
 

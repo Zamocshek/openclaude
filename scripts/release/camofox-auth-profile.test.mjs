@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import path from 'node:path'
 import {
   QWEN_PROFILE,
+  isProfileUrl,
   isQwenChatUrl,
   resolveAuthPaths,
+  snapshotShowsModel,
   snapshotShowsQwenModel,
   summarizeStorageState,
 } from './camofox-auth-profile.mjs'
@@ -30,6 +32,16 @@ describe('Camofox Qwen auth profile', () => {
     expect(snapshotShowsQwenModel('Qwen3.5-Plus')).toBe(false)
     expect(isQwenChatUrl('https://chat.qwen.ai/c/123')).toBe(true)
     expect(isQwenChatUrl('https://accounts.google.com/signin')).toBe(false)
+    expect(
+      isProfileUrl('https://chatgpt.com/c/123', {
+        url: 'https://chatgpt.com/',
+      }),
+    ).toBe(true)
+    expect(
+      snapshotShowsModel('Model: Claude Opus', {
+        defaultModel: 'Claude Opus',
+      }),
+    ).toBe(true)
     expect(
       summarizeStorageState({
         cookies: [{ name: 'secret', value: 'never-return-this' }],

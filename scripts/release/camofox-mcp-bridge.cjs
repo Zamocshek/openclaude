@@ -4,6 +4,12 @@ const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('node:fs'
 const { createRequire } = require('node:module')
 const { dirname, resolve } = require('node:path')
 const { pathToFileURL } = require('node:url')
+const {
+  getBrowserModelProfile,
+  listBrowserModelProfiles,
+  removeBrowserModelProfile,
+  upsertBrowserModelProfile,
+} = require('./browser-model-profiles.cjs')
 
 function runtimeRequire() {
   return existsSync('/app/package.json') ? createRequire('/app/package.json') : require
@@ -107,6 +113,15 @@ function jsonBody(value) {
 function compactJson(value) {
   if (typeof value === 'string') return value
   return JSON.stringify(value, null, 2)
+}
+
+function parseCompactJson(value) {
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return value
+  }
 }
 
 function tabPayload(args = {}) {
@@ -289,6 +304,72 @@ async function health() {
   return compactJson(await camofoxRequest('/health'))
 }
 
+function listModelProfiles() {
+  return compactJson({
+    version: 1,
+    profiles: listBrowserModelProfiles(),
+    security:
+      'Credentials, cookies, and browser storage are never returned by this tool.',
+  })
+}
+
+function setModelProfile(args) {
+  return compactJson(
+    upsertBrowserModelProfile({
+      id: args?.id,
+      label: args?.label,
+      url: args?.url,
+      userId: args?.userId || args?.user_id,
+      sessionKey: args?.sessionKey || args?.session_key,
+      defaultModel: args?.defaultModel || args?.default_model,
+      enabled: args?.enabled,
+    }),
+  )
+}
+
+function removeModelProfile(args) {
+  return compactJson(removeBrowserModelProfile(args?.id))
+}
+
+async function openModelProfile(args) {
+  const profile = getBrowserModelProfile(args?.id)
+  if (!profile.enabled) {
+    throw new Error(`Browser model profile is disabled: ${profile.id}`)
+  }
+  const tab = await createTab({
+    url: profile.url,
+    userId: profile.userId,
+    sessionKey: profile.sessionKey,
+    trace: args?.trace,
+  })
+  return compactJson({
+    profile: {
+      id: profile.id,
+      label: profile.label,
+      url: profile.url,
+      userId: profile.userId,
+      sessionKey: profile.sessionKey,
+      requestedModel: String(
+        args?.model || args?.requestedModel || profile.defaultModel || '',
+      ).trim(),
+      status: profile.status,
+      loginCommand: profile.loginCommand,
+    },
+    tab: parseCompactJson(tab),
+    note:
+      'If the page requests authentication, leave the tab open and ask the user to run the login command. Never enter or inspect credentials.',
+  })
+}
+
+async function checkpointModelProfile(args) {
+  const profile = getBrowserModelProfile(args?.id)
+  const result = await checkpointSession({ userId: profile.userId })
+  return compactJson({
+    profile: profile.id,
+    checkpoint: parseCompactJson(result),
+  })
+}
+
 const tools = [
   {
     name: 'camofox_health',
@@ -451,6 +532,68 @@ const tools = [
       required: ['userId'],
     },
   },
+  {
+    name: 'camofox_list_model_profiles',
+    description:
+      'List configured browser AI profiles, persistent Camofox identities, non-secret authentication status, and the command the user can run to log in.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'camofox_set_model_profile',
+    description:
+      'Create or update a browser AI profile. Stores only routing metadata; credentials and cookies are never accepted.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,47}$' },
+        label: { type: 'string' },
+        url: { type: 'string' },
+        userId: { type: 'string' },
+        sessionKey: { type: 'string' },
+        defaultModel: { type: 'string' },
+        enabled: { type: 'boolean' },
+      },
+      required: ['id', 'url'],
+    },
+  },
+  {
+    name: 'camofox_remove_model_profile',
+    description:
+      'Remove a custom browser AI profile override. Built-in profiles revert to their defaults.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'camofox_open_model_profile',
+    description:
+      'Open a browser AI service with its isolated persistent Camofox identity. Returns the tab and login handoff instructions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        model: { type: 'string' },
+        trace: { type: 'boolean', default: false },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'camofox_checkpoint_model_profile',
+    description:
+      'Persist refreshed cookies and localStorage for a browser AI profile without exposing or closing its session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+      },
+      required: ['id'],
+    },
+  },
 ]
 
 async function main() {
@@ -491,6 +634,11 @@ async function main() {
       else if (name === 'camofox_close_tab') text = await closeTab(args)
       else if (name === 'camofox_checkpoint_session') text = await checkpointSession(args)
       else if (name === 'camofox_close_session') text = await closeSession(args)
+      else if (name === 'camofox_list_model_profiles') text = listModelProfiles()
+      else if (name === 'camofox_set_model_profile') text = setModelProfile(args)
+      else if (name === 'camofox_remove_model_profile') text = removeModelProfile(args)
+      else if (name === 'camofox_open_model_profile') text = await openModelProfile(args)
+      else if (name === 'camofox_checkpoint_model_profile') text = await checkpointModelProfile(args)
       else throw new Error(`Unknown tool: ${name}`)
       return { content: [{ type: 'text', text }] }
     } catch (error) {
@@ -504,7 +652,18 @@ async function main() {
   await server.connect(new StdioServerTransport())
 }
 
-main().catch(error => {
-  console.error(`[camofox-mcp-bridge] ${error?.stack || error?.message || error}`)
-  process.exit(1)
-})
+if (require.main === module) {
+  main().catch(error => {
+    console.error(`[camofox-mcp-bridge] ${error?.stack || error?.message || error}`)
+    process.exit(1)
+  })
+}
+
+module.exports = {
+  checkpointModelProfile,
+  listModelProfiles,
+  openModelProfile,
+  removeModelProfile,
+  setModelProfile,
+  tools,
+}

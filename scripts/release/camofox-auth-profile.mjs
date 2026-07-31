@@ -12,12 +12,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+const require = createRequire(import.meta.url)
+const {
+  getBrowserModelProfile,
+  listBrowserModelProfiles,
+} = require('./browser-model-profiles.cjs')
+
+const qwenProfile = getBrowserModelProfile('qwen')
 export const QWEN_PROFILE = Object.freeze({
-  id: 'qwen',
-  userId: 'nova-qwen-max',
-  sessionKey: 'qwen-collaboration',
-  url: 'https://chat.qwen.ai/',
-  model: 'Qwen3.8-Max-Preview',
+  ...qwenProfile,
+  model: qwenProfile.defaultModel,
 })
 
 const POLL_INTERVAL_MS = 2_000
@@ -26,6 +30,7 @@ const DEFAULT_LOGIN_TIMEOUT_MS = 15 * 60_000
 export function resolveAuthPaths(
   env = process.env,
   homeDir = os.homedir(),
+  profile = QWEN_PROFILE,
 ) {
   const camofoxRoot =
     env.OPENCLAUDE_CAMOFOX_HOME ||
@@ -46,11 +51,11 @@ export function resolveAuthPaths(
     ),
     authDir,
     profileDir,
-    statusPath: path.join(authDir, `${QWEN_PROFILE.id}-status.json`),
-    controlPath: path.join(authDir, `${QWEN_PROFILE.id}-control.json`),
+    statusPath: path.join(authDir, `${profile.id}-status.json`),
+    controlPath: path.join(authDir, `${profile.id}-control.json`),
     screenshotPath: path.join(
       authDir,
-      `${QWEN_PROFILE.id}-authenticated.png`,
+      `${profile.id}-authenticated.png`,
     ),
   }
 }
@@ -66,18 +71,30 @@ export function summarizeStorageState(storageState) {
   }
 }
 
-export function snapshotShowsQwenModel(text) {
-  return String(text || '')
-    .toLowerCase()
-    .includes(QWEN_PROFILE.model.toLowerCase())
+export function snapshotShowsModel(text, profile = QWEN_PROFILE) {
+  const model = String(profile.defaultModel || profile.model || '').trim()
+  return Boolean(
+    model &&
+      String(text || '').toLowerCase().includes(model.toLowerCase()),
+  )
 }
 
-export function isQwenChatUrl(value) {
+export function snapshotShowsQwenModel(text) {
+  return snapshotShowsModel(text, QWEN_PROFILE)
+}
+
+export function isProfileUrl(value, profile = QWEN_PROFILE) {
   try {
-    return new URL(String(value)).hostname === 'chat.qwen.ai'
+    return (
+      new URL(String(value)).hostname === new URL(profile.url).hostname
+    )
   } catch {
     return false
   }
+}
+
+export function isQwenChatUrl(value) {
+  return isProfileUrl(value, QWEN_PROFILE)
 }
 
 function hostOs() {
@@ -109,12 +126,12 @@ async function writeJsonAtomic(filePath, value) {
   await rename(tempPath, filePath)
 }
 
-async function writeStatus(paths, phase, extra = {}) {
+async function writeStatus(paths, profile, phase, extra = {}) {
   await writeJsonAtomic(paths.statusPath, {
     version: 1,
-    profile: QWEN_PROFILE.id,
-    userId: QWEN_PROFILE.userId,
-    model: QWEN_PROFILE.model,
+    profile: profile.id,
+    userId: profile.userId,
+    model: profile.defaultModel || '',
     phase,
     pid: process.pid,
     updatedAt: new Date().toISOString(),
@@ -162,110 +179,130 @@ async function loadRuntime(paths) {
   }
 }
 
-async function isQwenAuthenticated(page) {
-  if (!isQwenChatUrl(page.url())) return false
-  const loginVisible = await page
-    .getByRole('button', { name: /(log in|sign in|sign up)/i })
-    .first()
-    .isVisible({ timeout: 1_000 })
-    .catch(() => false)
-  const composerVisible = await page
-    .getByRole('textbox')
-    .first()
-    .isVisible({ timeout: 1_000 })
-    .catch(() => false)
-  const modelSelectorVisible = await page
-    .getByRole('button', { name: /select model/i })
-    .first()
-    .isVisible({ timeout: 1_000 })
-    .catch(() => false)
-  return composerVisible && modelSelectorVisible && !loginVisible
+async function hasVisibleLoginControl(page) {
+  const candidates = [
+    page.getByRole('button', {
+      name: /(log in|login|sign in|sign up|continue with)/i,
+    }),
+    page.getByRole('link', {
+      name: /(log in|login|sign in|sign up)/i,
+    }),
+  ]
+  for (const candidate of candidates) {
+    if (
+      await candidate
+        .first()
+        .isVisible({ timeout: 750 })
+        .catch(() => false)
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
-async function findAuthenticatedQwenPage(context) {
+async function hasVisibleComposer(page) {
+  const candidates = [
+    page.getByRole('textbox').first(),
+    page.locator('textarea').first(),
+    page.locator('[contenteditable="true"]').first(),
+  ]
+  for (const candidate of candidates) {
+    if (
+      await candidate.isVisible({ timeout: 750 }).catch(() => false)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+export async function isProfileAuthenticated(page, profile) {
+  if (!isProfileUrl(page.url(), profile)) return false
+  const [loginVisible, composerVisible] = await Promise.all([
+    hasVisibleLoginControl(page),
+    hasVisibleComposer(page),
+  ])
+  return composerVisible && !loginVisible
+}
+
+async function findAuthenticatedPage(context, profile) {
   const pages = context.pages()
   for (let index = pages.length - 1; index >= 0; index -= 1) {
-    if (await isQwenAuthenticated(pages[index]).catch(() => false)) {
+    if (
+      await isProfileAuthenticated(pages[index], profile).catch(
+        () => false,
+      )
+    ) {
       return pages[index]
     }
   }
   return null
 }
 
-async function selectRequiredModel(page, diagnostics = {}) {
-  const selector = page
-    .getByRole('button', { name: /select model/i })
-    .first()
-  if (
-    !(await selector.isVisible({ timeout: 3_000 }).catch(() => false))
-  ) {
+async function selectPreferredModel(page, profile, diagnostics = {}) {
+  const model = String(profile.defaultModel || '').trim()
+  if (!model) {
+    diagnostics.reason = 'no-default-model'
+    return null
+  }
+
+  const modelPattern = new RegExp(
+    model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    'i',
+  )
+  const selectorCandidates = [
+    page.getByRole('button', { name: /select model/i }).first(),
+    page.getByRole('button', { name: modelPattern }).first(),
+  ]
+  let selector = null
+  for (const candidate of selectorCandidates) {
+    if (
+      await candidate.isVisible({ timeout: 1_500 }).catch(() => false)
+    ) {
+      selector = candidate
+      break
+    }
+  }
+  if (!selector) {
     diagnostics.reason = 'model-selector-not-visible'
     return false
   }
 
-  const selectedText = await selector
-    .textContent({ timeout: 2_000 })
-    .catch(() => '')
-  diagnostics.initialLabel = String(selectedText || '').trim().slice(0, 120)
-  if (snapshotShowsQwenModel(selectedText)) {
+  const selectedText = String(
+    await selector.textContent({ timeout: 1_000 }).catch(() => ''),
+  )
+    .trim()
+    .slice(0, 160)
+  diagnostics.initialLabel = selectedText
+  if (snapshotShowsModel(selectedText, profile)) {
     diagnostics.reason = 'already-selected'
     return true
   }
 
   await selector.click()
-  const modelPattern = new RegExp(
-    QWEN_PROFILE.model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-    'i',
-  )
   const candidates = [
     page.getByRole('option', { name: modelPattern }).first(),
     page.getByText(modelPattern, { exact: false }).first(),
   ]
-  const option = await Promise.any(
-    candidates.map(async candidate => {
-      if (
-        !(await candidate
-          .isVisible({ timeout: 5_000 })
-          .catch(() => false))
-      ) {
-        throw new Error('Qwen model candidate is not visible')
-      }
-      return candidate
-    }),
-  ).catch(() => null)
-  if (!option) {
-    diagnostics.reason = 'required-model-option-not-visible'
-    return false
-  }
-  diagnostics.optionVisible = true
-  await option.click()
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    await page.waitForTimeout(500)
-    const currentSelector = page
-      .getByRole('button', { name: /select model/i })
-      .first()
-    const finalLabel = String(
-      await currentSelector
-        .textContent({ timeout: 1_000 })
-        .catch(() => ''),
-    )
-      .trim()
-      .slice(0, 120)
-    diagnostics.finalLabel = finalLabel
-    if (snapshotShowsQwenModel(finalLabel)) {
+  for (const candidate of candidates) {
+    if (
+      await candidate.isVisible({ timeout: 3_000 }).catch(() => false)
+    ) {
+      await candidate.click()
       diagnostics.reason = 'selected'
       return true
     }
   }
-  diagnostics.reason = 'selection-did-not-stick'
+  diagnostics.reason = 'preferred-model-option-not-visible'
   return false
 }
 
-async function openBrowserContext(paths, { headless }) {
+async function openBrowserContext(paths, profile, { headless }) {
   const runtime = await loadRuntime(paths)
   const storageStatePath = await runtime.loadPersistedStorageState(
     paths.profileDir,
-    QWEN_PROFILE.userId,
+    profile.userId,
   )
   const browser = await runtime.Camoufox({
     headless,
@@ -284,22 +321,31 @@ async function openBrowserContext(paths, { headless }) {
   }
 }
 
-async function persistAuthenticatedContext(paths, runtime, context, page) {
-  const selectedModel = await selectRequiredModel(page).catch(() => false)
-  if (!selectedModel) {
-    throw new Error(
-      `Authenticated Qwen page did not expose the required ${QWEN_PROFILE.model} model.`,
-    )
-  }
-  await delay(1_000)
+async function persistAuthenticatedContext(
+  paths,
+  profile,
+  runtime,
+  context,
+  page,
+) {
+  const modelSelection = {}
+  const selectedModel = await selectPreferredModel(
+    page,
+    profile,
+    modelSelection,
+  ).catch(error => {
+    modelSelection.reason =
+      error instanceof Error ? error.message : String(error)
+    return false
+  })
   const persisted = await runtime.persistStorageState({
     profileDir: paths.profileDir,
-    userId: QWEN_PROFILE.userId,
+    userId: profile.userId,
     context,
   })
   if (!persisted.persisted) {
     throw new Error(
-      `Failed to persist Qwen storage state: ${persisted.reason || 'unknown error'}`,
+      `Failed to persist ${profile.label} browser storage: ${persisted.reason || 'unknown error'}`,
     )
   }
   await page
@@ -307,11 +353,14 @@ async function persistAuthenticatedContext(paths, runtime, context, page) {
     .catch(() => {})
   return {
     selectedModel,
+    ...(!selectedModel && profile.defaultModel
+      ? { modelSelection }
+      : {}),
     ...summarizeStorageState(await context.storageState()),
   }
 }
 
-async function login(paths) {
+async function login(paths, profile) {
   const previous = await readJson(paths.statusPath)
   if (
     previous?.phase === 'awaiting-login' &&
@@ -320,35 +369,39 @@ async function login(paths) {
     console.log(
       JSON.stringify({
         ok: true,
+        profile: profile.id,
         phase: previous.phase,
         pid: previous.pid,
-        message: 'A Qwen login window is already running.',
+        message: `A ${profile.label} login window is already running.`,
       }),
     )
     return
   }
 
   await mkdir(paths.authDir, { recursive: true })
-  await writeStatus(paths, 'launching', {
+  await writeStatus(paths, profile, 'launching', {
     startedAt: new Date().toISOString(),
   })
 
   let browser
   let context
   try {
-    const opened = await openBrowserContext(paths, { headless: false })
+    const opened = await openBrowserContext(paths, profile, {
+      headless: false,
+    })
     browser = opened.browser
     context = opened.context
     const page = await context.newPage()
     page.setDefaultTimeout(10_000)
-    await page.goto(QWEN_PROFILE.url, {
+    await page.goto(profile.url, {
       waitUntil: 'domcontentloaded',
       timeout: 45_000,
     })
-    await writeStatus(paths, 'awaiting-login', {
+    await writeStatus(paths, profile, 'awaiting-login', {
       startedAt: previous?.startedAt || new Date().toISOString(),
       message:
-        'Complete Qwen login in the visible Camoufox window. Credentials are never read by OpenClaude.',
+        `Complete ${profile.label} login in the visible Camofox window. ` +
+        'Credentials are never read by OpenClaude.',
     })
 
     const timeoutMs = Math.max(
@@ -364,19 +417,23 @@ async function login(paths) {
     while (Date.now() < deadline) {
       const control = await consumeControl(paths)
       if (control?.action === 'cancel') {
-        await writeStatus(paths, 'cancelled')
+        await writeStatus(paths, profile, 'cancelled')
         return
       }
 
-      const authenticatedPage = await findAuthenticatedQwenPage(context)
+      const authenticatedPage = await findAuthenticatedPage(
+        context,
+        profile,
+      )
       authenticatedStreak = authenticatedPage
         ? authenticatedStreak + 1
         : 0
 
       if (control?.action === 'save' && !authenticatedPage) {
-        await writeStatus(paths, 'awaiting-login', {
+        await writeStatus(paths, profile, 'awaiting-login', {
           message:
-            'Qwen still shows a login control. Finish login, then request save again.',
+            `${profile.label} still shows a login control or no chat composer. ` +
+            'Finish login, then request save again.',
         })
       }
 
@@ -386,11 +443,13 @@ async function login(paths) {
       ) {
         const summary = await persistAuthenticatedContext(
           paths,
+          profile,
           opened.runtime,
           context,
           authenticatedPage,
         )
-        await writeStatus(paths, 'authenticated', {
+        await writeStatus(paths, profile, 'authenticated', {
+          authenticated: true,
           finishedAt: new Date().toISOString(),
           persisted: true,
           ...summary,
@@ -398,8 +457,9 @@ async function login(paths) {
         console.log(
           JSON.stringify({
             ok: true,
+            profile: profile.id,
             phase: 'authenticated',
-            model: QWEN_PROFILE.model,
+            model: profile.defaultModel || '',
             ...summary,
           }),
         )
@@ -409,13 +469,16 @@ async function login(paths) {
       await delay(POLL_INTERVAL_MS)
     }
 
-    await writeStatus(paths, 'timed-out', {
-      message: 'Login window timed out without a verified Qwen session.',
+    await writeStatus(paths, profile, 'timed-out', {
+      authenticated: false,
+      message:
+        `Login window timed out without a verified ${profile.label} session.`,
     })
     process.exitCode = 1
   } catch (error) {
-    await writeStatus(paths, 'failed', {
-      error: error instanceof Error ? error.message : String(error),
+    await writeStatus(paths, profile, 'failed', {
+      authenticated: false,
+      message: error instanceof Error ? error.message : String(error),
     })
     throw error
   } finally {
@@ -424,30 +487,36 @@ async function login(paths) {
   }
 }
 
-async function verify(paths) {
+async function verify(paths, profile) {
   let browser
   let context
   try {
-    const opened = await openBrowserContext(paths, { headless: true })
+    const opened = await openBrowserContext(paths, profile, {
+      headless: true,
+    })
     browser = opened.browser
     context = opened.context
     if (!opened.storageStatePath) {
       throw new Error(
-        'No persisted Qwen profile found. Start the interactive login first.',
+        `No persisted ${profile.label} profile found. Start the interactive login first.`,
       )
     }
     const page = await context.newPage()
-    await page.goto(QWEN_PROFILE.url, {
+    await page.goto(profile.url, {
       waitUntil: 'domcontentloaded',
       timeout: 45_000,
     })
     await delay(5_000)
-    const authenticatedPage = await findAuthenticatedQwenPage(context)
+    const authenticatedPage = await findAuthenticatedPage(
+      context,
+      profile,
+    )
     const authenticated = Boolean(authenticatedPage)
     const modelSelection = {}
     const selectedModel = authenticated
-      ? await selectRequiredModel(
+      ? await selectPreferredModel(
           authenticatedPage,
+          profile,
           modelSelection,
         ).catch(error => {
           modelSelection.reason =
@@ -458,18 +527,33 @@ async function verify(paths) {
     if (authenticated) {
       await opened.runtime.persistStorageState({
         profileDir: paths.profileDir,
-        userId: QWEN_PROFILE.userId,
+        userId: profile.userId,
         context,
       })
     }
     const result = {
-      ok: authenticated && selectedModel,
+      ok: authenticated,
+      profile: profile.id,
       authenticated,
       selectedModel,
-      model: QWEN_PROFILE.model,
-      ...(!selectedModel ? { modelSelection } : {}),
+      model: profile.defaultModel || '',
+      ...(!selectedModel && profile.defaultModel
+        ? { modelSelection }
+        : {}),
       ...summarizeStorageState(await context.storageState()),
     }
+    await writeStatus(
+      paths,
+      profile,
+      authenticated ? 'authenticated' : 'authentication-required',
+      {
+        authenticated,
+        verifiedAt: new Date().toISOString(),
+        ...(!selectedModel && profile.defaultModel
+          ? { modelSelection }
+          : {}),
+      },
+    )
     console.log(JSON.stringify(result))
     if (!result.ok) process.exitCode = 1
   } finally {
@@ -478,30 +562,50 @@ async function verify(paths) {
   }
 }
 
-async function requestControl(paths, action) {
+async function requestControl(paths, profile, action) {
   const status = await readJson(paths.statusPath)
   if (
     !status ||
     status.phase !== 'awaiting-login' ||
     !pidIsRunning(status.pid)
   ) {
-    throw new Error('No active Qwen login helper is waiting for input.')
+    throw new Error(
+      `No active ${profile.label} login helper is waiting for input.`,
+    )
   }
   await writeJsonAtomic(paths.controlPath, {
     action,
     requestedAt: new Date().toISOString(),
   })
-  console.log(JSON.stringify({ ok: true, requested: action }))
+  console.log(
+    JSON.stringify({ ok: true, profile: profile.id, requested: action }),
+  )
 }
 
-async function showStatus(paths) {
+async function showStatus(paths, profile) {
   const status = await readJson(paths.statusPath)
   console.log(
     JSON.stringify(
       status || {
         version: 1,
-        profile: QWEN_PROFILE.id,
+        profile: profile.id,
+        model: profile.defaultModel || '',
         phase: 'not-started',
+      },
+      null,
+      2,
+    ),
+  )
+}
+
+function showProfiles() {
+  console.log(
+    JSON.stringify(
+      {
+        version: 1,
+        profiles: listBrowserModelProfiles(),
+        security:
+          'The registry contains routing metadata only. Credentials and cookies remain outside the repository.',
       },
       null,
       2,
@@ -511,15 +615,22 @@ async function showStatus(paths) {
 
 async function main() {
   const action = process.argv[2] || 'status'
-  const paths = resolveAuthPaths()
-  if (action === 'login') await login(paths)
-  else if (action === 'status') await showStatus(paths)
-  else if (action === 'save') await requestControl(paths, 'save')
-  else if (action === 'cancel') await requestControl(paths, 'cancel')
-  else if (action === 'verify') await verify(paths)
+  if (action === 'list') {
+    showProfiles()
+    return
+  }
+  const profile = getBrowserModelProfile(process.argv[3] || 'qwen')
+  const paths = resolveAuthPaths(process.env, os.homedir(), profile)
+  if (action === 'login') await login(paths, profile)
+  else if (action === 'status') await showStatus(paths, profile)
+  else if (action === 'save') {
+    await requestControl(paths, profile, 'save')
+  } else if (action === 'cancel') {
+    await requestControl(paths, profile, 'cancel')
+  } else if (action === 'verify') await verify(paths, profile)
   else {
     throw new Error(
-      'Usage: camofox-auth-profile.mjs login|status|save|cancel|verify',
+      'Usage: camofox-auth-profile.mjs list|login|status|save|cancel|verify [profile-id]',
     )
   }
 }
