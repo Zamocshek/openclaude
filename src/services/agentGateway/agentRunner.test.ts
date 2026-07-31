@@ -72,6 +72,18 @@ describe('agent gateway prompt builder', () => {
     )).toBe(true)
   })
 
+  test('does not infer coding intent from Telegram bridge instructions', () => {
+    const prompt = [
+      'Use code tools to write files when the task requires it.',
+      'A successful camofox_screenshot tool result is uploaded automatically.',
+      'User message:',
+      'какие ощущения от употребления мемантина',
+    ].join('\n')
+
+    expect(hasCodingTaskIntent(prompt)).toBe(false)
+    expect(hasCodingMutationIntent(prompt)).toBe(false)
+  })
+
   test('keeps prompts out of CLI argv so variadic options cannot swallow them', () => {
     const config = getDefaultAgentGatewayConfig()
     config.runner.availableTools = ['Bash', 'Read', 'Write']
@@ -846,14 +858,14 @@ describe('agent gateway prompt builder', () => {
     expect(providerUnauthorized.kind).toBe('auth')
   })
 
-  test('does not hide late fetch failures after stream-json success', () => {
+  test('delivers a completed stream result despite plain late fetch stderr', () => {
     expect(isIgnorablePostSuccessStderr({
       text: 'Saved.',
       streamResultText: 'Saved.',
       stderr: 'API Error: fetch failed',
       timedOut: false,
       activity: ['assistant response', 'result: success'],
-    })).toBe(false)
+    })).toBe(true)
 
     expect(isIgnorablePostSuccessStderr({
       text: '',
@@ -868,6 +880,14 @@ describe('agent gateway prompt builder', () => {
       streamResultText: 'Saved.',
       stderr: 'API Error: fetch failed',
       timedOut: true,
+      activity: ['result: success'],
+    })).toBe(false)
+
+    expect(isIgnorablePostSuccessStderr({
+      text: 'Saved.',
+      streamResultText: 'Saved.',
+      stderr: 'API Error: fetch failed\ncause: ECONNRESET',
+      timedOut: false,
       activity: ['result: success'],
     })).toBe(false)
   })

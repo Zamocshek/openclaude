@@ -79,6 +79,21 @@ describe('task-aware MCP routing', () => {
     expect([...route.servers]).toEqual(['hindsight'])
   })
 
+  test('ignores bridge instructions before a Telegram User message marker', () => {
+    const route = selectMcpServersForPrompt(
+      [
+        'Use codegraph for coding and camofox for screenshots.',
+        'User message:',
+        'какие ощущения от употребления мемантина',
+      ].join('\n'),
+      { codingIntent: false },
+    )
+
+    expect(route.mode).toBe('auto')
+    expect([...route.servers]).toEqual(['hindsight'])
+    expect(route.reasons).toEqual(['durable-memory'])
+  })
+
   test('enables automatic routing by default with an opt-out', () => {
     expect(isAutoMcpRoutingEnabled({})).toBe(true)
     expect(isAutoMcpRoutingEnabled({
