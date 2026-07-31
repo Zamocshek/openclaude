@@ -108,6 +108,8 @@ Telegram:
   Store, inspect skills, and create or remove persistent user skills
 - `/tools [on|off|list|enable NAME|disable NAME]` - inspect or toggle all
   model tools, or enable/disable one built-in tool for subsequent runs
+- `/harness [minimal|adaptive|strict|status]` - choose minimal model steering,
+  task-aware adaptive routing (default), or the full strict coding workflow
 - `/chatid` - show the current chat ID
 - `/status` - show gateway, worker, cron, budget, and Ouroboros status
 - `/provider`, `/models`, `/provider models`,
@@ -418,15 +420,19 @@ The Tool Router has three independent reduction layers: MCP server switches,
 Skill Store switches, and per-tool switches under **Tools & Runtime**. The
 global model-tools switch starts subsequent runs with an empty strict MCP
 configuration and no built-in tool schemas. Capability-specific system guidance
-is included only for MCP servers and skills that are enabled for that run.
+is included only for MCP servers and skills that are enabled for that run. The
+same page exposes the persisted harness mode: `adaptive` is task-aware,
+`minimal` leaves maximum room for the provider model, and `strict` adds the
+complete coding workflow and a second bounded verifier pass.
 
 An enabled MCP server is **eligible**, not automatically loaded into every
 request. With `OPENCLAUDE_AGENT_AUTO_MCP_ROUTING=1` (the production default),
 each run receives its own isolated, task-scoped strict MCP profile containing
-only the eligible servers relevant to the current request. Enabled Hindsight is
-kept as the durable-memory baseline. A dynamically imported server is selected
-when the request names it, and an explicit request to use `all tools` or
-`all MCP` includes every eligible server for that run.
+only the eligible servers relevant to the current request. Hindsight is selected
+for explicit memory and prior-context requests instead of adding its tool
+schemas to every conversational turn. A dynamically imported server is selected
+when the request names it, and an explicit request to use `all tools` or `all
+MCP` includes every eligible server for that run.
 Set the variable to `0` only when every enabled MCP server must be exposed to
 every normal run.
 

@@ -4,7 +4,12 @@ import { randomUUID } from 'crypto'
 import { readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { parseHumanLimit } from '../../utils/limitParsing.js'
-import { updateAgentGatewayConfig, type AgentGatewayConfig } from './config.js'
+import {
+  normalizeAgentGatewayHarnessMode,
+  updateAgentGatewayConfig,
+  type AgentGatewayConfig,
+  type AgentGatewayHarnessMode,
+} from './config.js'
 import {
   buildPromptFromChatMessages,
   hasCodingMutationIntent,
@@ -556,6 +561,7 @@ export class AgentApiServer {
               disallowed: this.config.runner.disallowedTools,
               catalog: this.describeRouterTools(),
             },
+            harness: { mode: this.config.runner.harnessMode },
             mcp: {
               total: servers.length,
               enabled: servers.filter(server => server.enabled).length,
@@ -606,6 +612,37 @@ export class AgentApiServer {
         data: await listToolRouterAudit(parseLimit(url.searchParams.get('limit'), 50)),
       })
       return
+    }
+
+    if (url.pathname === '/api/router/harness') {
+      if (method === 'GET') {
+        this.writeJson(response, 200, {
+          data: { mode: this.config.runner.harnessMode },
+        })
+        return
+      }
+      if (method === 'PATCH') {
+        try {
+          const body = await this.readJson(request)
+          if (!isAgentGatewayHarnessMode(body.mode)) {
+            this.writeJson(
+              response,
+              400,
+              openAiError("Expected 'mode' to be minimal, adaptive, or strict"),
+            )
+            return
+          }
+          await this.setHarnessMode(body.mode)
+          await recordToolRouterAudit({
+            action: 'harness.updated',
+            target: body.mode,
+          })
+          this.writeJson(response, 200, { data: { mode: body.mode } })
+        } catch (error) {
+          this.writeApiError(response, error)
+        }
+        return
+      }
     }
 
     if (url.pathname === '/api/router/tools') {
@@ -2081,6 +2118,18 @@ export class AgentApiServer {
     this.config.runner.disableTools = !enabled
   }
 
+  private async setHarnessMode(mode: AgentGatewayHarnessMode): Promise<void> {
+    const normalized = normalizeAgentGatewayHarnessMode(mode)
+    const updates = { OPENCLAUDE_AGENT_HARNESS_MODE: normalized }
+    await updateProjectEnvFile(this.config.runner.cwd || process.cwd(), updates)
+    applyRuntimeEnvUpdates(updates)
+    await updateAgentGatewayConfig(current => ({
+      ...current,
+      runner: { ...current.runner, harnessMode: normalized },
+    }))
+    this.config.runner.harnessMode = normalized
+  }
+
   private describeRouterTools(): Array<{
     name: string
     group: string
@@ -2943,6 +2992,12 @@ function buildChatPromptMessages(input: {
     })),
     { role: input.currentUser.role, content: input.currentUser.content },
   ]
+}
+
+function isAgentGatewayHarnessMode(
+  value: unknown,
+): value is AgentGatewayHarnessMode {
+  return value === 'minimal' || value === 'adaptive' || value === 'strict'
 }
 
 function findLastIndex<T>(

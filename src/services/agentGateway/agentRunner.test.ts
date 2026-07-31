@@ -27,6 +27,7 @@ import {
   isIgnorablePostSuccessStderr,
   normalizeMessageContent,
   runOpenClaudeAgent,
+  shouldUseGatewaySubagents,
   summarizeStreamJsonProgress,
   type StreamProgressContext,
 } from './agentRunner.js'
@@ -223,7 +224,7 @@ describe('agent gateway prompt builder', () => {
       expect(args).toContain('--strict-mcp-config')
       expect(prepared.mcpServers.codegraph).toBeTruthy()
       expect(prepared.mcpServers.context7).toBeUndefined()
-      expect(systemPrompt).toContain('codegraph_explore')
+      expect(systemPrompt).toContain('Use CodeGraph')
       expect(systemPrompt).not.toContain('resolve-library-id')
       expect(systemPrompt).not.toContain('query-docs')
     } finally {
@@ -317,7 +318,7 @@ describe('agent gateway prompt builder', () => {
     expect(denied).toContain('PowerShell')
     expect(denied).toContain('WebFetch')
     const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
-    expect(systemPrompt).toContain('perform a private capability-routing pass')
+    expect(systemPrompt).toContain('Privately choose only the skills')
   })
 
   test('adds OpenRAG usage guidance when RAG integration is configured', () => {
@@ -329,37 +330,34 @@ describe('agent gateway prompt builder', () => {
     const args = buildAgentArgs(config)
     const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
 
-    expect(systemPrompt).toContain('OpenRAG RAG may be available')
+    expect(systemPrompt).toContain('For this document or knowledge-base request')
     expect(systemPrompt).toContain('openrag_search')
     expect(systemPrompt).toContain('openrag_ingest_file')
-    expect(systemPrompt).toContain('openrag_chat')
   })
 
   test('adds CodeGraph guidance for code exploration and impact analysis', () => {
     const args = buildAgentArgs(getDefaultAgentGatewayConfig())
     const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
 
-    expect(systemPrompt).toContain('codegraph_explore')
+    expect(systemPrompt).toContain('Use CodeGraph')
     expect(systemPrompt).toContain('change impact')
-    expect(systemPrompt).toContain('watcher updates the index automatically')
   })
 
   test('adds default SearXNG research guidance with a built-in fallback', () => {
     const args = buildAgentArgs(getDefaultAgentGatewayConfig())
     const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
 
-    expect(systemPrompt).toContain('searxng_web_search')
-    expect(systemPrompt).toContain('searxng_instance_info')
-    expect(systemPrompt).toContain('built-in WebSearch or WebFetch')
+    expect(systemPrompt).toContain('use SearXNG for discovery')
+    expect(systemPrompt).toContain('fall back to available web tools')
   })
 
   test('requires Context7 for current library and API documentation', () => {
     const args = buildAgentArgs(getDefaultAgentGatewayConfig())
     const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
 
-    expect(systemPrompt).toContain('resolve-library-id')
-    expect(systemPrompt).toContain('query-docs')
-    expect(systemPrompt).toContain('without waiting for an explicit user request')
+    expect(systemPrompt).toContain('Use Context7')
+    expect(systemPrompt).toContain('resolve the library ID')
+    expect(systemPrompt).toContain('query the relevant docs')
   })
 
   test('requires live account discovery before Telegram MCP account actions', () => {
@@ -367,8 +365,8 @@ describe('agent gateway prompt builder', () => {
     const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
 
     expect(systemPrompt).toContain('call list_accounts')
-    expect(systemPrompt).toContain('no Telegram user accounts are configured')
-    expect(systemPrompt).toContain('delete_all_sessions with confirm=true')
+    expect(systemPrompt).toContain('If no session exists')
+    expect(systemPrompt).toContain('confirm=true')
   })
 
   test('enables verifier-first terminal execution only when requested', () => {
@@ -395,7 +393,9 @@ describe('agent gateway prompt builder', () => {
   })
 
   test('routes personal RPG and life-management requests through the system index', () => {
-    const args = buildAgentArgs(getDefaultAgentGatewayConfig())
+    const args = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+      prompt: 'Update my life RPG habit tracker and planner.',
+    })
     const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
 
     expect(systemPrompt).toContain('Vladimir_Kuplevatskyi/SYSTEM_INDEX.md')
@@ -418,42 +418,47 @@ describe('agent gateway prompt builder', () => {
       join(cwd, 'Vladimir_Kuplevatskyi', 'SYSTEM_INDEX.md'),
       '# SYSTEM INDEX\n',
     )
-    const presentArgs = buildAgentArgs(config)
+    const presentArgs = buildAgentArgs(config, {
+      prompt: 'Update my RPG habit tracker.',
+    })
     const presentPrompt = presentArgs[presentArgs.indexOf('--append-system-prompt') + 1]
     expect(presentPrompt).toContain('Vladimir_Kuplevatskyi/SYSTEM_INDEX.md')
   })
 
-  test('requires a private skill, MCP, and tool routing pass before every task', () => {
-    const args = buildAgentArgs(getDefaultAgentGatewayConfig())
-    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
-
-    expect(systemPrompt).toContain('Before executing every user request')
-    expect(systemPrompt).toContain('available Skill descriptions')
-    expect(systemPrompt).toContain('connected MCP servers')
-    expect(systemPrompt).toContain('invoke the most specific Skill tool')
-    expect(systemPrompt).toContain('privately select none')
-    expect(systemPrompt).toContain('Do not reveal chain-of-thought')
+  test('keeps ordinary dialogue lean and routes substantial tasks adaptively', () => {
+    const simpleArgs = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+      prompt: 'Hello, how are you?',
+      preparedMcpConfigPath: '.mcp.json',
+      preparedMcpServerNames: new Set(),
+    })
+    const simplePrompt = simpleArgs[simpleArgs.indexOf('--append-system-prompt') + 1]
+    expect(simplePrompt.length).toBeLessThan(1_000)
+    expect(simplePrompt).not.toContain('capability-routing')
+    expect(shouldUseGatewaySubagents('Hello, how are you?')).toBe(false)
+    expect(shouldUseGatewaySubagents('Fix the TypeScript service.')).toBe(true)
+    expect(shouldUseGatewaySubagents('Fix the TypeScript service.', 'minimal')).toBe(false)
+    expect(shouldUseGatewaySubagents('Hello', 'strict')).toBe(true)
   })
 
-  test('requires the production coding workflow before repository edits', () => {
-    const args = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+  test('uses concise adaptive coding guidance and preserves a strict workflow mode', () => {
+    const adaptiveArgs = buildAgentArgs(getDefaultAgentGatewayConfig(), {
       prompt: 'Fix the bug in calculator.py and run its test.',
     })
-    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+    const adaptivePrompt = adaptiveArgs[adaptiveArgs.indexOf('--append-system-prompt') + 1]
+    expect(adaptivePrompt).toContain('This request changes code or configuration')
+    expect(adaptivePrompt).not.toContain('# Production Coding Workflow')
 
-    expect(systemPrompt).toContain('invoke the code Skill before editing')
-    expect(systemPrompt).toContain('each existing target file before Edit or Write')
-    expect(systemPrompt).toContain('Before every individual Edit, re-read that exact target file immediately beforehand')
-    expect(systemPrompt).toContain('nearest unique heading or adjacent lines')
-    expect(systemPrompt).toContain('treat Write as absent unless it is visibly listed')
-    expect(systemPrompt).toContain('If Write is absent, never call it')
-    expect(systemPrompt).toContain('avoid shell redirection')
-    expect(systemPrompt).toContain('Keep a TodoWrite checklist')
-    expect(systemPrompt).toContain('final evaluator phase after the last file mutation')
-    expect(systemPrompt).toContain('A check run before the last edit does not count')
-    expect(systemPrompt).toContain('Never put credentials in command arguments')
+    const strictConfig = getDefaultAgentGatewayConfig()
+    strictConfig.runner.harnessMode = 'strict'
+    const strictArgs = buildAgentArgs(strictConfig, {
+      prompt: 'Fix the bug in calculator.py and run its test.',
+    })
+    const systemPrompt = strictArgs[strictArgs.indexOf('--append-system-prompt') + 1]
+
     expect(systemPrompt).toContain('# Production Coding Workflow')
     expect(systemPrompt).toContain('## 4. Definition of done')
+    expect(systemPrompt).toContain('TodoWrite')
+    expect(systemPrompt).toContain('after the final mutation')
     expect(hasCodingTaskIntent('Исправь баг в TypeScript проекте')).toBe(true)
     expect(hasCodingTaskIntent('Какая сегодня погода?')).toBe(false)
   })
@@ -1180,8 +1185,8 @@ describe('agent gateway prompt builder', () => {
         servers: string[]
       }
 
-      expect(coding.servers).toEqual(['codegraph', 'context7', 'hindsight'])
-      expect(browser.servers).toEqual(['camofox', 'hindsight'])
+      expect(coding.servers).toEqual(['codegraph', 'context7'])
+      expect(browser.servers).toEqual(['camofox'])
       expect(all.servers).toEqual([
         'camofox',
         'codegraph',

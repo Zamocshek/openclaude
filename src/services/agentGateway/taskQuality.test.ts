@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildCodingVerificationPrompt,
   getCodingCompletionGap,
+  getCodingVerificationAttemptLimit,
   isCodingCompletionGateEnabled,
   runOpenClaudeAgentWithCompletionGate,
 } from './taskQuality.js'
@@ -10,6 +11,7 @@ import {
   type AgentRunOptions,
   type AgentRunResult,
 } from './agentRunner.js'
+import { getDefaultAgentGatewayConfig } from './config.js'
 
 describe('coding completion gate', () => {
   test('requests a verifier after a successful edit without checks', () => {
@@ -131,6 +133,25 @@ describe('coding completion gate', () => {
     )).toBeUndefined()
   })
 
+  test('does not gate read-only coding questions or minimal harness runs', () => {
+    const result: AgentRunResult = {
+      text: 'Explanation only.',
+      stderr: '',
+      exitCode: 0,
+      timedOut: false,
+      activity: ['assistant response'],
+    }
+    expect(getCodingCompletionGap('Explain this TypeScript code', result)).toBeUndefined()
+    expect(getCodingCompletionGap(
+      'Fix this TypeScript code',
+      result,
+      process.env,
+      'minimal',
+    )).toBeUndefined()
+    expect(getCodingVerificationAttemptLimit('adaptive')).toBe(1)
+    expect(getCodingVerificationAttemptLimit('strict')).toBe(2)
+  })
+
   test('can be disabled and builds a bounded continuation prompt', () => {
     expect(isCodingCompletionGateEnabled({
       OPENCLAUDE_AGENT_CODING_COMPLETION_GATE: '0',
@@ -178,7 +199,7 @@ describe('coding completion gate', () => {
     const stdout: string[] = []
     const result = await runOpenClaudeAgentWithCompletionGate({
       prompt: 'Fix the TypeScript implementation and test it.',
-      config: {} as AgentRunOptions['config'],
+      config: getDefaultAgentGatewayConfig(),
       suppressObservers: true,
       onProgress: event => progress.push(event),
       onStdout: chunk => stdout.push(chunk),
@@ -187,7 +208,7 @@ describe('coding completion gate', () => {
     expect(result.exitCode).toBe(0)
     expect(result.text).toBe('Verified.')
     expect(callCount).toBe(2)
-    expect(progress).toContain('coding completion gate: verifier pass 1/2')
+    expect(progress).toContain('coding completion gate: verifier pass 1/1')
     expect(progress.filter(event => (
       event === 'tool result success (Edit: "src/index.ts")'
     ))).toHaveLength(2)
@@ -217,9 +238,11 @@ describe('coding completion gate', () => {
         activity,
       }
     }
+    const config = getDefaultAgentGatewayConfig()
+    config.runner.harnessMode = 'strict'
     const result = await runOpenClaudeAgentWithCompletionGate({
       prompt: 'Fix the TypeScript implementation.',
-      config: {} as AgentRunOptions['config'],
+      config,
     }, runner)
 
     expect(callCount).toBe(3)
@@ -241,9 +264,11 @@ describe('coding completion gate', () => {
           : ['assistant response'],
       }
     }
+    const config = getDefaultAgentGatewayConfig()
+    config.runner.harnessMode = 'strict'
     const result = await runOpenClaudeAgentWithCompletionGate({
       prompt: 'Fix the TypeScript implementation.',
-      config: {} as AgentRunOptions['config'],
+      config,
     }, runner)
 
     expect(callCount).toBe(3)

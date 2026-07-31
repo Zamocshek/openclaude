@@ -2,7 +2,11 @@ import { appendFile, mkdir, readFile, stat, writeFile } from 'fs/promises'
 import { basename, extname, join } from 'path'
 import { randomUUID } from 'crypto'
 import { spawn } from 'child_process'
-import type { AgentGatewayConfig, AgentGatewaySubagentRoute } from './config.js'
+import type {
+  AgentGatewayConfig,
+  AgentGatewayHarnessMode,
+  AgentGatewaySubagentRoute,
+} from './config.js'
 import {
   getAgentGatewayStateDir,
   getDefaultAgentGatewayConfig,
@@ -18,6 +22,7 @@ import {
   buildCodingCompletionFailure,
   buildCodingVerificationPrompt,
   getCodingCompletionGap,
+  getCodingVerificationAttemptLimit,
   mergeAgentRunResults,
 } from './taskQuality.js'
 import { redactAgentText } from './redaction.js'
@@ -609,6 +614,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/evolution [on|off|status]', description: 'control scheduled evolution cycles' },
       { syntax: '/evolve [on|off|now|status]', description: 'control evolution or run one cycle' },
       { syntax: '/tools [on|off|list|enable NAME|disable NAME]', description: 'toggle model tools', botDescription: 'Control model tools' },
+      { syntax: '/harness [minimal|adaptive|strict|status]', description: 'set gateway steering level', botDescription: 'Set agent harness mode' },
       { syntax: '/review', description: 'run a deep architecture review cycle' },
       { syntax: '/infinite <goal>', description: 'run a persistent task loop' },
     ],
@@ -1161,6 +1167,8 @@ export class TelegramAgentBridge {
     let verificationAttempts = 0
     let verificationPending = false
     const completionPasses: AgentRunResult[] = []
+    const harnessMode = this.config.runner.harnessMode ?? 'adaptive'
+    const maxVerificationAttempts = getCodingVerificationAttemptLimit(harnessMode)
 
     while (true) {
       const isRecovery = recoveryAttempt > 0
@@ -1199,9 +1207,14 @@ export class TelegramAgentBridge {
       if (result.exitCode === 0) {
         completionPasses.push(result)
         result = mergeAgentRunResults(completionPasses)
-        const completionGap = getCodingCompletionGap(input.prompt, result)
+        const completionGap = getCodingCompletionGap(
+          input.prompt,
+          result,
+          process.env,
+          harnessMode,
+        )
         if (completionGap) {
-          if (verificationAttempts < 2) {
+          if (verificationAttempts < maxVerificationAttempts) {
             verificationAttempts += 1
             verificationPending = true
             currentPrompt = buildCodingVerificationPrompt({
@@ -1658,6 +1671,14 @@ export class TelegramAgentBridge {
 
     if (commandText === '/tools' || commandText.startsWith('/tools ')) {
       await this.handleToolsCommand(chatId, commandText.slice('/tools'.length).trim())
+      return
+    }
+
+    if (commandText === '/harness' || commandText.startsWith('/harness ')) {
+      await this.handleHarnessCommand(
+        chatId,
+        commandText.slice('/harness'.length).trim(),
+      )
       return
     }
 
@@ -2183,6 +2204,7 @@ export class TelegramAgentBridge {
         mcpTotal: servers.length,
         skillManaged: skills.filter(skill => skill.managed).length,
         skillTotal: skills.length,
+        harnessMode: this.config.runner.harnessMode,
         toolsEnabled: !this.config.runner.disableTools,
         cronEnabled: this.config.cron.enabled,
         consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
@@ -2569,6 +2591,7 @@ export class TelegramAgentBridge {
           `Built-in tools: ${catalog.filter(tool => tool.enabled).length}/${catalog.length} enabled`,
         ].join('\n'),
         buildTelegramRuntimeKeyboard({
+          harnessMode: this.config.runner.harnessMode,
           toolsEnabled: !this.config.runner.disableTools,
           cronEnabled: this.config.cron.enabled,
           consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
@@ -2649,17 +2672,57 @@ export class TelegramAgentBridge {
     await this.sendMessage(chatId, `Model tool calls: ${enabled ? 'ON' : 'OFF'}`)
   }
 
+  private async handleHarnessCommand(
+    chatId: string,
+    commandBody: string,
+  ): Promise<void> {
+    const action = commandBody.trim().toLowerCase() || 'status'
+    if (action === 'status') {
+      await this.sendMessageWithKeyboard(
+        chatId,
+        `Harness mode: ${this.config.runner.harnessMode}`,
+        buildTelegramRuntimeKeyboard({
+          harnessMode: this.config.runner.harnessMode,
+          toolsEnabled: !this.config.runner.disableTools,
+          cronEnabled: this.config.cron.enabled,
+          consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
+          evolutionEnabled: (await loadEvolutionState()).enabled,
+        }),
+      )
+      return
+    }
+    if (!isTelegramHarnessMode(action)) {
+      await this.sendMessage(
+        chatId,
+        'Usage: /harness [minimal|adaptive|strict|status]',
+      )
+      return
+    }
+
+    const updates = { OPENCLAUDE_AGENT_HARNESS_MODE: action }
+    await updateProjectEnvFile(updates)
+    applyRuntimeEnvUpdates(updates)
+    await updateAgentGatewayConfig(current => ({
+      ...current,
+      runner: { ...current.runner, harnessMode: action },
+    }))
+    this.config.runner.harnessMode = action
+    await this.sendMessage(chatId, `Harness mode: ${action}`)
+  }
+
   private async editRuntimeMenu(query: TelegramCallbackQuery): Promise<void> {
     const evolution = await loadEvolutionState()
     await this.editCallbackMessage(
       query,
       formatTelegramRuntimePanel({
+        harnessMode: this.config.runner.harnessMode,
         toolsEnabled: !this.config.runner.disableTools,
         cronEnabled: this.config.cron.enabled,
         consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
         evolutionEnabled: evolution.enabled,
       }),
       buildTelegramRuntimeKeyboard({
+        harnessMode: this.config.runner.harnessMode,
         toolsEnabled: !this.config.runner.disableTools,
         cronEnabled: this.config.cron.enabled,
         consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
@@ -3984,6 +4047,7 @@ export class TelegramAgentBridge {
             mcpTotal: servers.length,
             skillManaged: skills.filter(skill => skill.managed).length,
             skillTotal: skills.length,
+            harnessMode: this.config.runner.harnessMode,
             toolsEnabled: !this.config.runner.disableTools,
             cronEnabled: this.config.cron.enabled,
             consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
@@ -4278,6 +4342,15 @@ export class TelegramAgentBridge {
         await this.handleToolsCommand(
           chatId,
           this.config.runner.disableTools ? 'on' : 'off',
+        )
+        await this.editRuntimeMenu(query)
+        return
+      }
+
+      if (data === 'runtime:harness') {
+        await this.handleHarnessCommand(
+          chatId,
+          nextTelegramHarnessMode(this.config.runner.harnessMode),
         )
         await this.editRuntimeMenu(query)
         return
@@ -5687,6 +5760,7 @@ export type AgentProviderProfile = {
 type TelegramProgressProviderProfile = Pick<AgentProviderProfile, 'provider' | 'model'>
 
 type TelegramRuntimePanelState = {
+  harnessMode: AgentGatewayHarnessMode
   toolsEnabled: boolean
   cronEnabled: boolean
   consciousnessEnabled: boolean
@@ -5898,6 +5972,7 @@ function formatTelegramControlPanel(state: TelegramControlPanelState): string {
     `Model: ${state.profile.model || 'not set'}`,
     `MCP servers: ${state.mcpEnabled}/${state.mcpTotal} enabled`,
     `Skills: ${state.skillTotal} available (${state.skillManaged} Store-created)`,
+    `Harness: ${state.harnessMode}`,
     `Model tools: ${state.toolsEnabled ? 'ON' : 'OFF'}`,
     `Cron: ${state.cronEnabled ? 'ON' : 'OFF'}`,
     `Consciousness: ${state.consciousnessEnabled ? 'ON' : 'OFF'}`,
@@ -6136,10 +6211,22 @@ export function parseTelegramSkillCreateInput(
   }
 }
 
+function isTelegramHarnessMode(value: string): value is AgentGatewayHarnessMode {
+  return value === 'minimal' || value === 'adaptive' || value === 'strict'
+}
+
+function nextTelegramHarnessMode(
+  current: AgentGatewayHarnessMode,
+): AgentGatewayHarnessMode {
+  if (current === 'adaptive') return 'minimal'
+  return current === 'minimal' ? 'strict' : 'adaptive'
+}
+
 function formatTelegramRuntimePanel(state: TelegramRuntimePanelState): string {
   return [
     'Runtime controls',
     '',
+    `Harness: ${state.harnessMode}`,
     `Model tools: ${state.toolsEnabled ? 'ON' : 'OFF'}`,
     `Cron scheduler: ${state.cronEnabled ? 'ON' : 'OFF'}`,
     `Background consciousness: ${state.consciousnessEnabled ? 'ON' : 'OFF'}`,
@@ -6151,6 +6238,9 @@ export function buildTelegramRuntimeKeyboard(
   state: TelegramRuntimePanelState,
 ): TelegramInlineKeyboard {
   return [
+    [
+      { text: `Harness ${state.harnessMode}`, callback_data: 'runtime:harness' },
+    ],
     [
       { text: `Tools ${state.toolsEnabled ? 'ON' : 'OFF'}`, callback_data: 'runtime:tools' },
       { text: `Cron ${state.cronEnabled ? 'ON' : 'OFF'}`, callback_data: 'runtime:cron' },

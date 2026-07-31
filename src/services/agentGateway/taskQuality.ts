@@ -1,10 +1,11 @@
 import {
   hasCodingMutationIntent,
-  hasCodingTaskIntent,
   runOpenClaudeAgent,
   type AgentRunOptions,
   type AgentRunResult,
 } from './agentRunner.js'
+import { extractCurrentUserRequest } from './capabilityRouting.js'
+import type { AgentGatewayHarnessMode } from './config.js'
 
 const SUCCESSFUL_NATIVE_MUTATION_RE =
   /^tool result success \((?:Edit|Write|NotebookEdit|ApplyPatch|apply_patch|mcp[^:)]*(?:write|edit|patch|create[_-]?file|delete[_-]?file|move[_-]?file|rename[_-]?file))\b/iu
@@ -12,8 +13,6 @@ const SUCCESSFUL_SHELL_MUTATION_RE =
   /^tool result success \((?:Bash|PowerShell):[\s\S]*(?:\b(?:sed|perl)\s+-[^\s]*i\b|\b(?:tee|Set-Content|Add-Content|Out-File|Copy-Item|Move-Item|Remove-Item|git\s+apply|patch|cp|mv)\b|(?:write_text|writeFileSync|writeFile|appendFileSync|appendFile)\s*\(|open\s*\([^)]*,\s*["'][wa]|(?:^|[\s"'`])(?:>>?|2>)\s*[^\s&|])/iu
 const SUCCESSFUL_VERIFIER_RE =
   /^tool result success \((?:Bash|PowerShell|TaskOutput|Agent):[\s\S]*(?:\btest\b|tests|typecheck|lint|build|compile|check|pytest|vitest|jest|tsc|cargo test|go test|ruff|mypy|playwright|docker compose config|\/health)\b/iu
-const MAX_CODING_VERIFICATION_ATTEMPTS = 2
-
 function isSuccessfulMutation(event: string): boolean {
   return SUCCESSFUL_NATIVE_MUTATION_RE.test(event)
     || SUCCESSFUL_SHELL_MUTATION_RE.test(event)
@@ -31,11 +30,13 @@ export function getCodingCompletionGap(
   prompt: string,
   result: AgentRunResult,
   env: NodeJS.ProcessEnv = process.env,
+  harnessMode: AgentGatewayHarnessMode = 'adaptive',
 ): string | undefined {
   if (
     result.exitCode !== 0
     || !isCodingCompletionGateEnabled(env)
-    || !hasCodingTaskIntent(prompt)
+    || harnessMode === 'minimal'
+    || !hasCodingMutationIntent(prompt)
   ) {
     return undefined
   }
@@ -49,7 +50,7 @@ export function getCodingCompletionGap(
     if (isSuccessfulMutation(activity[index]!)) lastMutation = index
   }
   if (lastMutation < 0) {
-    return hasCodingMutationIntent(prompt) && !hasSuccessfulVerifier
+    return !hasSuccessfulVerifier
       ? 'The coding task reported success without an observable file mutation or a successful verifier.'
       : undefined
   }
@@ -62,13 +63,20 @@ export function getCodingCompletionGap(
   return 'Code or configuration changed without a successful post-edit verifier.'
 }
 
+export function getCodingVerificationAttemptLimit(
+  harnessMode: AgentGatewayHarnessMode = 'adaptive',
+): number {
+  if (harnessMode === 'minimal') return 0
+  return harnessMode === 'strict' ? 2 : 1
+}
+
 export function buildCodingVerificationPrompt(input: {
   originalPrompt: string
   previousResult: AgentRunResult
   gap: string
 }): string {
   const recentActivity = (input.previousResult.activity || [])
-    .slice(-20)
+    .slice(-12)
     .map(event => `- ${event}`)
     .join('\n')
   return [
@@ -89,10 +97,10 @@ export function buildCodingVerificationPrompt(input: {
     recentActivity || '- no structured activity captured',
     '',
     'Previous pass response:',
-    input.previousResult.text.slice(0, 4_000) || '(empty)',
+    input.previousResult.text.slice(0, 2_000) || '(empty)',
     '',
     'Original task:',
-    input.originalPrompt.slice(0, 40_000),
+    extractCurrentUserRequest(input.originalPrompt).slice(0, 24_000),
   ].join('\n')
 }
 
@@ -108,15 +116,22 @@ export async function runOpenClaudeAgentWithCompletionGate(
   })
   const passes = [firstResult]
   let combined = mergeAgentRunResults(passes)
-  let gap = getCodingCompletionGap(options.prompt, combined)
+  const harnessMode = options.config.runner?.harnessMode ?? 'adaptive'
+  const maxAttempts = getCodingVerificationAttemptLimit(harnessMode)
+  let gap = getCodingCompletionGap(
+    options.prompt,
+    combined,
+    process.env,
+    harnessMode,
+  )
 
   for (
     let attempt = 1;
-    gap && !options.signal?.aborted && attempt <= MAX_CODING_VERIFICATION_ATTEMPTS;
+    gap && !options.signal?.aborted && attempt <= maxAttempts;
     attempt += 1
   ) {
     options.onProgress?.(
-      `coding completion gate: verifier pass ${attempt}/${MAX_CODING_VERIFICATION_ATTEMPTS}`,
+      `coding completion gate: verifier pass ${attempt}/${maxAttempts}`,
     )
     const verificationResult = await runner({
       ...options,
@@ -131,7 +146,12 @@ export async function runOpenClaudeAgentWithCompletionGate(
     passes.push(verificationResult)
     combined = mergeAgentRunResults(passes)
     if (verificationResult.exitCode !== 0) break
-    gap = getCodingCompletionGap(options.prompt, combined)
+    gap = getCodingCompletionGap(
+      options.prompt,
+      combined,
+      process.env,
+      harnessMode,
+    )
   }
 
   if (gap && combined.exitCode === 0 && !options.signal?.aborted) {
