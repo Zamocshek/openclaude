@@ -192,26 +192,73 @@ async function findAuthenticatedQwenPage(context) {
   return null
 }
 
-async function selectRequiredModel(page) {
+async function selectRequiredModel(page, diagnostics = {}) {
   const selector = page
     .getByRole('button', { name: /select model/i })
     .first()
   if (
     !(await selector.isVisible({ timeout: 3_000 }).catch(() => false))
   ) {
+    diagnostics.reason = 'model-selector-not-visible'
     return false
   }
+
+  const selectedText = await selector
+    .textContent({ timeout: 2_000 })
+    .catch(() => '')
+  diagnostics.initialLabel = String(selectedText || '').trim().slice(0, 120)
+  if (snapshotShowsQwenModel(selectedText)) {
+    diagnostics.reason = 'already-selected'
+    return true
+  }
+
   await selector.click()
-  const option = page
-    .getByRole('option', {
-      name: new RegExp(QWEN_PROFILE.model.replaceAll('.', '\\.'), 'i'),
-    })
-    .first()
-  if (!(await option.isVisible({ timeout: 5_000 }).catch(() => false))) {
+  const modelPattern = new RegExp(
+    QWEN_PROFILE.model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    'i',
+  )
+  const candidates = [
+    page.getByRole('option', { name: modelPattern }).first(),
+    page.getByText(modelPattern, { exact: false }).first(),
+  ]
+  const option = await Promise.any(
+    candidates.map(async candidate => {
+      if (
+        !(await candidate
+          .isVisible({ timeout: 5_000 })
+          .catch(() => false))
+      ) {
+        throw new Error('Qwen model candidate is not visible')
+      }
+      return candidate
+    }),
+  ).catch(() => null)
+  if (!option) {
+    diagnostics.reason = 'required-model-option-not-visible'
     return false
   }
+  diagnostics.optionVisible = true
   await option.click()
-  return true
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await page.waitForTimeout(500)
+    const currentSelector = page
+      .getByRole('button', { name: /select model/i })
+      .first()
+    const finalLabel = String(
+      await currentSelector
+        .textContent({ timeout: 1_000 })
+        .catch(() => ''),
+    )
+      .trim()
+      .slice(0, 120)
+    diagnostics.finalLabel = finalLabel
+    if (snapshotShowsQwenModel(finalLabel)) {
+      diagnostics.reason = 'selected'
+      return true
+    }
+  }
+  diagnostics.reason = 'selection-did-not-stick'
+  return false
 }
 
 async function openBrowserContext(paths, { headless }) {
@@ -397,8 +444,16 @@ async function verify(paths) {
     await delay(5_000)
     const authenticatedPage = await findAuthenticatedQwenPage(context)
     const authenticated = Boolean(authenticatedPage)
+    const modelSelection = {}
     const selectedModel = authenticated
-      ? await selectRequiredModel(authenticatedPage).catch(() => false)
+      ? await selectRequiredModel(
+          authenticatedPage,
+          modelSelection,
+        ).catch(error => {
+          modelSelection.reason =
+            error instanceof Error ? error.message : String(error)
+          return false
+        })
       : false
     if (authenticated) {
       await opened.runtime.persistStorageState({
@@ -412,6 +467,7 @@ async function verify(paths) {
       authenticated,
       selectedModel,
       model: QWEN_PROFILE.model,
+      ...(!selectedModel ? { modelSelection } : {}),
       ...summarizeStorageState(await context.storageState()),
     }
     console.log(JSON.stringify(result))
