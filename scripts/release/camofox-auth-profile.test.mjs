@@ -26,6 +26,8 @@ describe('Camofox Qwen auth profile', () => {
     expect(
       snapshotShowsQwenModel('option "Qwen3.8-Max-Preview"'),
     ).toBe(true)
+    expect(snapshotShowsQwenModel(' Qwen3.8-Max-Preview ')).toBe(true)
+    expect(snapshotShowsQwenModel('Qwen3.5-Plus')).toBe(false)
     expect(isQwenChatUrl('https://chat.qwen.ai/c/123')).toBe(true)
     expect(isQwenChatUrl('https://accounts.google.com/signin')).toBe(false)
     expect(
