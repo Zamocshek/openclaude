@@ -17,6 +17,7 @@ import {
   classifyAgentRunFailure,
   extractVisualLocalPaths,
   extractCamofoxScreenshotArtifacts,
+  extractStreamJsonAssistantText,
   extractStreamJsonResult,
   getAgentStallTimeoutMs,
   hasCodingMutationIntent,
@@ -511,6 +512,27 @@ describe('agent gateway prompt builder', () => {
       text: 'done',
       error: '',
       costUsd: 0.0123,
+    })
+  })
+
+  test('extracts the latest assistant text when a success result is empty', () => {
+    expect(extractStreamJsonAssistantText({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'thinking', thinking: 'private reasoning' },
+          { type: 'text', text: 'Final DeepSeek response.' },
+        ],
+      },
+    })).toBe('Final DeepSeek response.')
+
+    expect(extractStreamJsonResult({
+      type: 'result',
+      subtype: 'success',
+      result: '',
+    })).toEqual({
+      text: '',
+      error: '',
     })
   })
 

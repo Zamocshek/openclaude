@@ -1088,6 +1088,7 @@ function runOpenClaudeAgentProcess(
     }
     let textStdout = ''
     let streamLineBuffer = ''
+    let streamAssistantText = ''
     let streamResultText = ''
     let streamResultError = ''
     let streamResultCostUsd: number | undefined
@@ -1183,6 +1184,11 @@ function runOpenClaudeAgentProcess(
         recordProgress(event)
       }
 
+      const assistantText = extractStreamJsonAssistantText(message)
+      if (assistantText) {
+        streamAssistantText = assistantText
+      }
+
       const result = extractStreamJsonResult(message)
       if (result) {
         streamResultText = result.text
@@ -1238,8 +1244,9 @@ function runOpenClaudeAgentProcess(
         streamLineBuffer = ''
       }
       const durationMs = Date.now() - observerContext.startedAt
+      const completedStreamText = streamResultText || streamAssistantText
       const normalizedText = redactAgentText(
-        stripAnsi(streamResultText || textStdout).trim(),
+        stripAnsi(completedStreamText || textStdout).trim(),
       )
       const timeoutMessage = timedOut
         ? buildTimeoutMessage(
@@ -1267,7 +1274,7 @@ function runOpenClaudeAgentProcess(
         && isIgnorablePostSuccessStderr({
           text: normalizedText,
           stderr: normalizedStderr,
-          streamResultText,
+          streamResultText: completedStreamText,
           timedOut,
           activity,
         })
@@ -1699,6 +1706,22 @@ export function extractStreamJsonResult(
     error: errors || `Agent result error: ${String(message.subtype || 'unknown')}`,
     ...(costUsd === undefined ? {} : { costUsd }),
   }
+}
+
+export function extractStreamJsonAssistantText(
+  message: Record<string, unknown>,
+): string {
+  if (message.type !== 'assistant') return ''
+  return getMessageContentBlocks(message)
+    .map(block => {
+      if (!block || typeof block !== 'object') return ''
+      const record = block as Record<string, unknown>
+      return record.type === 'text' && typeof record.text === 'string'
+        ? record.text.trim()
+        : ''
+    })
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 function buildTimeoutMessage(
