@@ -57,10 +57,31 @@ async function main() {
       'camofox_health',
       'camofox_list_tabs',
       'camofox_checkpoint_session',
+      'camofox_list_model_profiles',
+      'camofox_open_model_profile',
+      'camofox_checkpoint_model_profile',
     ]) {
       if (!names.includes(expected)) {
         throw new Error(`Camofox MCP is missing ${expected}`)
       }
+    }
+
+    const profiles = await withTimeout(
+      client.callTool({
+        name: 'camofox_list_model_profiles',
+        arguments: {},
+      }),
+      'Camofox list browser model profiles',
+    )
+    const profilesText = textContent(profiles)
+    if (
+      profiles.isError ||
+      !profilesText.includes('"qwen"') ||
+      !profilesText.includes('"chatgpt"')
+    ) {
+      throw new Error(
+        `Camofox browser model profiles failed: ${profilesText}`,
+      )
     }
 
     const health = await withTimeout(
@@ -102,7 +123,7 @@ async function main() {
       )
     }
 
-    console.log('CAMOFOX_QWEN_MCP_SMOKE_OK')
+    console.log('CAMOFOX_BROWSER_MODELS_MCP_SMOKE_OK')
   } finally {
     await client.close().catch(() => {})
   }

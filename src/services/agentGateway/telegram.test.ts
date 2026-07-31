@@ -115,7 +115,8 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/delegate <role> <task> - delegate a task')
     expect(help).toContain('/bio [prompt] - biology scientist mode for research tasks')
     expect(help).toContain('/pentest [prompt|auth id|targets|proof] - pentest mode')
-    expect(help).toContain('/qwen [prompt] - Qwen3.8 Max collaboration')
+    expect(help).toContain('/browser - browser AI')
+    expect(help).toContain('/qwen - Qwen')
     expect(help).toContain('/mode off - clear the active research mode for this chat')
     expect(help).toContain('/stop - abort the current running task')
     expect(help).toContain('/git commit <msg> - stage and commit all changes')
@@ -1023,6 +1024,15 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(qwen).toContain('Active Telegram research mode: /qwen')
     expect(qwen).toContain('Invoke the qwen-collab Skill')
     expect(qwen).toContain('Qwen3.8-Max-Preview')
+    const browser = applyTelegramResearchMode(
+      'browser',
+      'Use Claude Opus to review architecture',
+    )
+    expect(browser).toContain(
+      'Active Telegram research mode: /browser',
+    )
+    expect(browser).toContain('persistent Camofox profile tools')
+    expect(browser).toContain('leave the session open')
     expect(qwen).toContain('review architecture')
   })
 

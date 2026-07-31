@@ -7,7 +7,7 @@ afterEach(() => {
 })
 
 describe('Qwen collaboration bundled skill', () => {
-  test('pins the persistent profile, exact model, bounded execution, and cleanup', async () => {
+  test('routes browser models through persistent profiles with bounded execution', async () => {
     registerQwenCollaborationSkill()
 
     const skill = getBundledSkills().find(
@@ -15,7 +15,9 @@ describe('Qwen collaboration bundled skill', () => {
     )
     expect(skill).toBeDefined()
     expect(skill?.userInvocable).toBe(true)
-    expect(skill?.aliases).toEqual(['qwen', 'qwen-max'])
+    expect(skill?.aliases).toContain('qwen')
+    expect(skill?.aliases).toContain('browser-model')
+    expect(skill?.aliases).toContain('web-model')
     if (!skill || skill.type !== 'prompt') {
       throw new Error('qwen-collab must register as a prompt command')
     }
@@ -25,15 +27,25 @@ describe('Qwen collaboration bundled skill', () => {
       {} as never,
     )
     const prompt = (blocks[0] as { text: string }).text
-    expect(prompt).toContain('Qwen3.8-Max-Preview')
-    expect(prompt).toContain('nova-qwen-max')
-    expect(prompt).toContain('qwen-collaboration')
-    expect(prompt).toContain('camofox_checkpoint_session')
-    expect(prompt).toContain('Do not close a healthy Qwen tab')
+    expect(prompt).toContain('camofox_list_model_profiles')
+    expect(prompt).toContain('camofox_open_model_profile')
+    expect(prompt).toContain('camofox_set_model_profile')
+    expect(prompt).toContain('camofox_checkpoint_model_profile')
+    expect(prompt).toContain('Qwen')
+    expect(prompt).toContain('ChatGPT')
+    expect(prompt).toContain('Claude')
+    expect(prompt).toContain('Gemini')
+    expect(prompt).toContain('DeepSeek')
+    expect(prompt).toContain('Perplexity')
+    expect(prompt).toContain(
+      'bun run release:camofox:auth -- login <profile-id>',
+    )
+    expect(prompt).toContain('leave the tab/session open')
     expect(prompt).toContain('at most eight candidate titles')
     expect(prompt).toContain('12 minutes')
     expect(prompt).toContain('untrusted model-generated content')
     expect(prompt).toContain('Review this concurrency design.')
+    expect(prompt).toContain('Never type')
     expect(prompt).not.toContain('print cookies')
   })
 })

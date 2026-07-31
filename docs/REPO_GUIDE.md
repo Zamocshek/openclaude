@@ -195,6 +195,13 @@ For real web browsing, browser screenshots, page snapshots, clicking, typing,
 and anti-bot pages, prefer `camofox_*` tools when available. Normal flow:
 `camofox_create_tab` -> `camofox_snapshot` -> interact by element refs.
 
+For browser-hosted AI collaboration, use
+`camofox_list_model_profiles` -> `camofox_open_model_profile` -> interact ->
+`camofox_checkpoint_model_profile`. Built-ins include Qwen, ChatGPT, Claude,
+Gemini, DeepSeek, and Perplexity. Custom profiles contain routing metadata
+only. Authentication is completed by the user with
+`bun run release:camofox:auth -- login <profile>` and persists outside Git.
+
 See `docs/camofox-integration.md`.
 
 ## OpenRAG And Hindsight
