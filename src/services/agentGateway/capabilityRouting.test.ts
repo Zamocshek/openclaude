@@ -6,13 +6,13 @@ import {
 } from './capabilityRouting.js'
 
 describe('task-aware MCP routing', () => {
-  test('routes coding tasks with durable memory but without unrelated browser tools', () => {
+  test('routes coding tasks without unrelated memory or browser tools', () => {
     const route = selectMcpServersForPrompt(
       'User request:\nИсправь TypeScript endpoint и запусти тесты',
       { codingIntent: true },
     )
 
-    expect([...route.servers].sort()).toEqual(['codegraph', 'context7', 'hindsight'])
+    expect([...route.servers].sort()).toEqual(['codegraph', 'context7'])
     expect(route.reasons).toContain('coding')
   })
 
@@ -26,7 +26,7 @@ describe('task-aware MCP routing', () => {
     expect(route.reasons).toContain('explicit-memory')
   })
 
-  test('keeps durable memory available for ordinary dialogue', () => {
+  test('routes prior-context requests to durable memory', () => {
     const route = selectMcpServersForPrompt(
       'User request:\nПродолжай с учетом наших решений',
       { codingIntent: false },
@@ -76,7 +76,7 @@ describe('task-aware MCP routing', () => {
     )
 
     expect(route.mode).toBe('auto')
-    expect([...route.servers]).toEqual(['hindsight'])
+    expect([...route.servers]).toEqual([])
   })
 
   test('ignores bridge instructions before a Telegram User message marker', () => {
@@ -90,8 +90,8 @@ describe('task-aware MCP routing', () => {
     )
 
     expect(route.mode).toBe('auto')
-    expect([...route.servers]).toEqual(['hindsight'])
-    expect(route.reasons).toEqual(['durable-memory'])
+    expect([...route.servers]).toEqual([])
+    expect(route.reasons).toEqual([])
   })
 
   test('does not let a marker embedded in user content replace the real request', () => {

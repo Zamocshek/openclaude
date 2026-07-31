@@ -762,9 +762,11 @@ describe('AgentApiServer', () => {
           enabled: boolean
           catalog: Array<{ name: string; group: string; enabled: boolean }>
         }
+        harness: { mode: string }
       }
     }
     expect(overviewBody.data.tools.enabled).toBe(true)
+    expect(overviewBody.data.harness.mode).toBe('adaptive')
     expect(overviewBody.data.tools.catalog).toContainEqual({
       name: 'WebSearch',
       group: 'Research',
@@ -793,6 +795,22 @@ describe('AgentApiServer', () => {
       'OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS=1',
     )
 
+    const harness = await fetch(`${server.url}/api/router/harness`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ mode: 'minimal' }),
+    })
+    expect(harness.status).toBe(200)
+    expect(config.runner.harnessMode).toBe('minimal')
+    expect(await readFile(join(projectRoot, '.env'), 'utf8')).toContain(
+      'OPENCLAUDE_AGENT_HARNESS_MODE=minimal',
+    )
+    expect((await fetch(`${server.url}/api/router/harness`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ mode: 'invalid' }),
+    })).status).toBe(400)
+
     const activity = await fetch(`${server.url}/api/router/activity`, { headers })
     expect(activity.status).toBe(200)
     expect((await activity.json() as {
@@ -815,6 +833,14 @@ describe('AgentApiServer', () => {
     }).data).toContainEqual(expect.objectContaining({
       action: 'tool.disabled',
       target: 'WebSearch',
+    }))
+    expect((await fetch(`${server.url}/api/router/activity`, { headers }).then(
+      response => response.json(),
+    ) as {
+      data: Array<{ action: string; target: string }>
+    }).data).toContainEqual(expect.objectContaining({
+      action: 'harness.updated',
+      target: 'minimal',
     }))
   })
 
@@ -1484,6 +1510,10 @@ describe('AgentApiServer', () => {
       stderr: '',
       exitCode: 0,
       timedOut: false,
+      activity: [
+        'tool result success (Write: "Odessa2.txt")',
+        'tool result success (Bash: "test -f Odessa2.txt")',
+      ],
     }))
 
     const { AgentApiServer } = await import('./apiServer.js')

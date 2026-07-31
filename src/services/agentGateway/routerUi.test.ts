@@ -22,6 +22,8 @@ describe('Tool Router UI', () => {
     expect(html).toContain('id="builtin-tool-list"')
     expect(html).toContain('data-toggle-builtin-tool')
     expect(html).toContain("tool:input.dataset.toggleBuiltinTool")
+    expect(html).toContain('data-harness-mode="adaptive"')
+    expect(html).toContain("request('/api/router/harness'")
 
     const script = html.match(/<script>([\s\S]+)<\/script>/u)?.[1]
     expect(script).toBeTruthy()

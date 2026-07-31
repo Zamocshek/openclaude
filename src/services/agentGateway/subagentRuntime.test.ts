@@ -57,7 +57,7 @@ describe('gateway subagent runtime', () => {
     expect(settings.agentRouting['gateway-explore']).toBe('deepseek-v4-flash')
 
     const prompt = buildGatewaySubagentAppendPrompt(runtime, config.subagents.maxParallel)
-    expect(prompt).toContain('at most 2 independent read-only delegates')
+    expect(prompt).toContain('at most 2 independent delegates')
     expect(prompt).toContain('gateway-explore: deepseek/deepseek-v4-flash')
   })
 
@@ -104,9 +104,8 @@ describe('gateway subagent runtime', () => {
     })
     const prompt = buildGatewaySubagentAppendPrompt(runtime, config.subagents.maxParallel)
 
-    expect(prompt).toContain('gateway-control MCP tools are authoritative')
-    expect(prompt).toContain('configure_subagent_route')
-    expect(prompt).toContain('persisted for the next top-level Gateway run')
+    expect(prompt).toContain('Use gateway-control for requested route changes')
+    expect(prompt).toContain('applies to the next top-level run')
   })
 
   test('defines a read-only Codex vision specialist', async () => {
@@ -145,6 +144,6 @@ describe('gateway subagent runtime', () => {
     expect(agents['gateway-vision'].disallowedTools).toContain('Agent')
     expect(
       buildGatewaySubagentAppendPrompt(runtime, config.subagents.maxParallel),
-    ).toContain('Use gateway-vision for local image inspection')
+    ).toContain('gateway-vision: codex/gpt-5.6-sol?reasoning=medium')
   })
 })

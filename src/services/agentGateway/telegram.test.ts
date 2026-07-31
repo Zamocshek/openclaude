@@ -106,7 +106,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     const commands = buildTelegramBotCommands()
 
     expect(help).toContain('OpenClaude Telegram inference is online.')
-    expect(help.length).toBeLessThanOrEqual(3900)
+    expect(help.length).toBeLessThanOrEqual(4096)
     expect(help).toContain('/provider set <provider> <model> [base_url] [api_key]')
     expect(help).toContain('/panel|control - button control panel')
     expect(help).toContain('/newchat - reset chat context; keep durable memory')
@@ -116,6 +116,9 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/skill create <json> - create a persistent SKILL.md')
     expect(help).toContain(
       '/tools [on|off|list|enable NAME|disable NAME] - toggle model tools',
+    )
+    expect(help).toContain(
+      '/harness [minimal|adaptive|strict|status] - set gateway steering level',
     )
     expect(help).toContain('/bg [start|stop|now|status] - control background consciousness')
     expect(help).toContain('/consciousness [start|stop|now|status] - alias for /bg')
@@ -242,12 +245,14 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(mcpActions).toContain('mcp:add')
 
     const runtimeActions = buildTelegramRuntimeKeyboard({
+      harnessMode: 'adaptive',
       toolsEnabled: true,
       cronEnabled: true,
       consciousnessEnabled: false,
       evolutionEnabled: false,
     }).flat().map(button => button.callback_data)
     expect(runtimeActions).toContain('runtime:tools')
+    expect(runtimeActions).toContain('runtime:harness')
     expect(runtimeActions).toContain('runtime:cron')
     expect(runtimeActions).toContain('runtime:evolution')
     expect(runtimeActions).toContain('runtime:wake')

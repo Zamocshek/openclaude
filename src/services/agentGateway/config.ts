@@ -4,6 +4,7 @@ import { resolve, join } from 'path'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 export type AgentGatewayPermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions'
+export type AgentGatewayHarnessMode = 'minimal' | 'adaptive' | 'strict'
 
 export type AgentGatewaySubagentRoute = {
   provider: string
@@ -92,6 +93,7 @@ export type AgentGatewayConfig = {
     maxTurns: number
     timeoutMs: number
     permissionMode: AgentGatewayPermissionMode
+    harnessMode: AgentGatewayHarnessMode
     disableTools: boolean
     availableTools: string[]
     disallowedTools: string[]
@@ -188,6 +190,7 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
       maxTurns: 120,
       timeoutMs: 30 * 60 * 1000,
       permissionMode: 'default',
+      harnessMode: 'adaptive',
       disableTools: false,
       availableTools: [],
       disallowedTools: [],
@@ -255,6 +258,14 @@ function normalizePermissionMode(value: unknown): AgentGatewayPermissionMode {
     return value
   }
   return 'default'
+}
+
+export function normalizeAgentGatewayHarnessMode(
+  value: unknown,
+): AgentGatewayHarnessMode {
+  return value === 'minimal' || value === 'strict' || value === 'adaptive'
+    ? value
+    : 'adaptive'
 }
 
 function normalizeFiniteNumber(
@@ -445,6 +456,7 @@ export function normalizeAgentGatewayConfig(
         { min: MIN_RUNNER_TIMEOUT_MS, max: MAX_RUNNER_TIMEOUT_MS },
       ),
       permissionMode: normalizePermissionMode(runner.permissionMode),
+      harnessMode: normalizeAgentGatewayHarnessMode(runner.harnessMode),
       disableTools: Boolean(runner.disableTools),
       availableTools: Array.isArray(runner.availableTools)
         ? normalizeStringArray(runner.availableTools)
@@ -723,6 +735,8 @@ export function applyAgentGatewayEnvOverrides(
       permissionMode:
         env.OPENCLAUDE_AGENT_RUNNER_PERMISSION_MODE ??
         config.runner.permissionMode,
+      harnessMode:
+        env.OPENCLAUDE_AGENT_HARNESS_MODE ?? config.runner.harnessMode,
       disableTools:
         parseEnvBoolean(env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS) ??
         config.runner.disableTools,

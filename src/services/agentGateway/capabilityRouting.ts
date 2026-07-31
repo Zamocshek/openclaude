@@ -11,7 +11,7 @@ const RESEARCH_RE =
 const BROWSER_RE =
   /(?:\b(?:browser|camofox|website|web page|screenshot|click|log in|sign in|open the page)\b|(?:браузер|камоуфокс|сайт|веб-?страниц|скриншот|нажми|авториз|залогин|открой страницу))/iu
 const MEMORY_RE =
-  /(?:\b(?:remember|memory|recall|forget|prior decision|preference|hindsight)\b|(?:запомни|памят|вспомни|забудь|предыдущ(?:ее|ий)|предпочтени))/iu
+  /(?:\b(?:remember|memory|recall|forget|prior decision|our decisions|earlier context|preference|hindsight)\b|(?:запомни|памят|вспомни|забудь|предыдущ(?:ее|ий)|предпочтени|наш(?:и|их)\s+решени|что\s+мы\s+решили|раньше))/iu
 const RAG_RE =
   /(?:\b(?:openrag|rag|knowledge base|ingest(?:ion)?|retrieval|document corpus)\b|(?:опенраг|база знаний|индексац|загрузи документ|по документам|корпус документ))/iu
 const TELEGRAM_ACCOUNT_RE =
@@ -52,11 +52,10 @@ export function selectMcpServersForPrompt(
     for (const name of names) servers.add(name)
   }
 
-  add('durable-memory', 'hindsight')
   if (options.codingIntent) add('coding', 'codegraph', 'context7')
   if (RESEARCH_RE.test(request)) add('research', 'searxng')
   if (BROWSER_RE.test(request)) add('browser', 'camofox')
-  if (MEMORY_RE.test(request)) reasons.push('explicit-memory')
+  if (MEMORY_RE.test(request)) add('explicit-memory', 'hindsight')
   if (RAG_RE.test(request)) add('rag', 'openrag')
   if (TELEGRAM_ACCOUNT_RE.test(request)) add('telegram-account', 'telegram-mcp')
   if (CONTROL_RE.test(request)) add('agent-control', 'gateway-control')

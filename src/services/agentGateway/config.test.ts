@@ -42,6 +42,22 @@ describe('agent gateway config normalization', () => {
     expect(config.runner.timeoutMs).toBe(4 * 60 * 60 * 1000)
   })
 
+  test('normalizes and overrides the harness mode', () => {
+    expect(getDefaultAgentGatewayConfig().runner.harnessMode).toBe('adaptive')
+    expect(normalizeAgentGatewayConfig({
+      runner: { harnessMode: 'strict' },
+    }).runner.harnessMode).toBe('strict')
+    expect(normalizeAgentGatewayConfig({
+      runner: { harnessMode: 'unknown' },
+    }).runner.harnessMode).toBe('adaptive')
+
+    const next = applyAgentGatewayEnvOverrides(
+      getDefaultAgentGatewayConfig(),
+      { OPENCLAUDE_AGENT_HARNESS_MODE: 'minimal' } as NodeJS.ProcessEnv,
+    )
+    expect(next.runner.harnessMode).toBe('minimal')
+  })
+
   test('allows env to disable Telegram mirroring for API responses', () => {
     const config = normalizeAgentGatewayConfig({
       telegram: {

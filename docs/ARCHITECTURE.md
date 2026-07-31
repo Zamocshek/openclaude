@@ -116,9 +116,12 @@ Spawns OpenClaude CLI subprocess:
 - Selects relevant eligible MCP servers automatically by default; an explicit
   `all tools` or `all MCP` request selects every eligible server, including
   dynamically imported servers
-- Keeps enabled Hindsight in the baseline route for durable memory
+- Selects Hindsight for explicit memory and prior-context requests
+- Supports `minimal`, `adaptive` (default), and `strict` harness modes so
+  optional orchestration is proportional to task complexity
 - Requires a successful verifier after the last coding mutation by default,
-  with two bounded evaluator correction passes and fail-closed completion
+  with one adaptive or two strict bounded correction passes and fail-closed
+  completion; minimal mode skips the extra evaluator
 - Merges implementation and evaluator artifacts, activity, duration, and cost
 - Buffers streaming coding answers until verification while sending SSE
   keepalive comments
@@ -278,11 +281,15 @@ behavior applies to Telegram, Agent API, cron, Ouroboros, and OpenWebUI runs:
 - `OPENCLAUDE_AGENT_AUTO_MCP_ROUTING=1` (default): enabled MCP servers are
   eligible, while every run receives an isolated task-scoped profile containing
   only relevant servers. An explicit `all tools`/`all MCP` request includes all
-  eligible servers, including JSON-imported servers. Enabled Hindsight remains
-  available as the durable-memory baseline.
+  eligible servers, including JSON-imported servers. Hindsight is selected for
+  explicit memory and prior-context requests.
+- `OPENCLAUDE_AGENT_HARNESS_MODE=adaptive` (default): injects only relevant
+  routing guidance. `minimal` minimizes gateway steering; `strict` enables the
+  full coding workflow and an additional verifier pass.
 - `OPENCLAUDE_AGENT_CODING_COMPLETION_GATE=1` (default): any successful coding
   mutation requires a relevant verifier to succeed after the final edit. The
-  gate allows two bounded correction passes and then fails closed.
+  adaptive gate allows one bounded correction pass, strict allows two, and then
+  fails closed.
 - `OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS=900000` (default): aborts a child
   run after 15 minutes without output. Set `0` to disable this watchdog.
 - `OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MS=1000` and
