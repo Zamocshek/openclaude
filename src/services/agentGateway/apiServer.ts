@@ -98,6 +98,7 @@ import {
 import {
   runOpenClaudeAgentWithCompletionGate,
 } from './taskQuality.js'
+import { materializeVisionInput } from './vision.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -1194,7 +1195,12 @@ export class AgentApiServer {
       return
     }
 
-    const chatInput = buildChatCompletionInput(messages)
+    const materializedMessages = await materializeVisionInput(messages)
+    const chatInput = buildChatCompletionInput(
+      Array.isArray(materializedMessages.value)
+        ? materializedMessages.value
+        : messages,
+    )
     if (!chatInput.currentUser.content.trim()) {
       this.writeJson(response, 400, openAiError('No user message found'))
       return
@@ -1531,7 +1537,8 @@ export class AgentApiServer {
       return
     }
 
-    const prompt = normalizeResponsesInput(input)
+    const materializedInput = await materializeVisionInput(input)
+    const prompt = normalizeResponsesInput(materializedInput.value)
     if (!prompt.trim()) {
       this.writeJson(response, 400, openAiError('No user message found'))
       return
@@ -1685,7 +1692,8 @@ export class AgentApiServer {
     const runId = `run_${randomUUID().replace(/-/g, '')}`
     const queue = new SseQueue()
     this.runs.set(runId, { queue })
-    const prompt = normalizeResponsesInput(input)
+    const materializedInput = await materializeVisionInput(input)
+    const prompt = normalizeResponsesInput(materializedInput.value)
     const instructions =
       typeof body.instructions === 'string' ? body.instructions.trim() : ''
     const model = String(body.model || this.config.api.modelName)
@@ -2965,8 +2973,10 @@ function normalizeResponsesInput(input: unknown): string {
       if (typeof item === 'string') return item
       if (!item || typeof item !== 'object') return ''
       const record = item as Record<string, unknown>
-      const role = String(record.role || 'user')
-      return `${role}: ${normalizeMessageContent(record.content)}`
+      if (record.role) {
+        return `${String(record.role)}: ${normalizeMessageContent(record.content)}`
+      }
+      return normalizeMessageContent([record])
     })
     .filter(Boolean)
     .join('\n\n')

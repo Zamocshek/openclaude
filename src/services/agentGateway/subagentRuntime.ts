@@ -115,6 +115,7 @@ export function buildGatewaySubagentAppendPrompt(
     roleList,
     `Launch at most ${maxParallel} independent read-only delegates in parallel in one tool message. Never run multiple writer/implementation agents against the same files concurrently.`,
     'Use gateway-explore for codebase or evidence discovery, gateway-plan for an implementation plan, gateway-implement for a bounded implementation, and gateway-review for independent verification. Integrate and verify their reports yourself before answering.',
+    'Use gateway-vision for local image inspection. Pass the exact absolute image path and the user question; never infer visual contents from the filename.',
     'A routing change is persisted for the next top-level Gateway run; do not claim it retroactively changes delegates already initialized in this run. Confirm the applied route, then use it on the user\'s next task or ask them to resend the task when they want the new model to execute it.',
     'Do not delegate trivial requests and do not claim a delegated action occurred unless the Agent tool result confirms it.',
   ].join('\n')
@@ -197,6 +198,15 @@ function gatewayAgentDefinition(
   maxTurns: number,
 ): { description: string; prompt: string; model: string; maxTurns: number; disallowedTools?: string[] } {
   const readOnlyTools = ['Agent', 'Edit', 'Write', 'NotebookEdit']
+  if (name === 'gateway-vision') {
+    return {
+      description: 'Read-only visual inspection through a multimodal Codex model.',
+      prompt: 'You are the Gateway Vision subagent. Inspect the exact local image paths in the assignment with the Read tool before answering. Report only observable visual evidence needed for the parent request, including relevant text, layout, objects, colors, and uncertainty. Never infer contents from filenames or captions. Do not modify files, run unrelated tools, or spawn agents. If an image cannot be read, report the exact failure.',
+      model: 'inherit',
+      maxTurns,
+      disallowedTools: readOnlyTools,
+    }
+  }
   if (name === 'gateway-explore') {
     return {
       description: 'Fast read-only project and evidence exploration.',

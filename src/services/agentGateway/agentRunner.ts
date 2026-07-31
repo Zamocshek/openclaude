@@ -32,6 +32,7 @@ import {
   selectMcpServersForPrompt,
 } from './capabilityRouting.js'
 import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
+import { hasVisionInputReference } from './vision.js'
 
 export { redactAgentText } from './redaction.js'
 
@@ -220,6 +221,14 @@ const DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT = [
   'Preferred exposed container ports are 3000-3010, 5173, 8000, and 8080.',
   'The default host mappings are container 3000-3010 to http://localhost:13000-13010, container 5173 to http://localhost:15173, container 8000 to http://localhost:18000, and container 8080 to http://localhost:18080.',
   'After starting a server, report the host URL the user can open.',
+].join(' ')
+const VISION_ROUTING_APPEND_SYSTEM_PROMPT = [
+  'A visual input is attached to the current request.',
+  'Delegate the visual inspection exactly once to the gateway-vision subagent and pass it every relevant absolute local_path plus the user question.',
+  'Do not call Read on image files in the parent run: the active parent provider may be text-only and can reject binary image tool results.',
+  'Do not infer image contents from filenames, captions, or earlier messages.',
+  'Use only observable facts returned by gateway-vision, then continue the task normally with the parent model.',
+  'If gateway-vision fails or cannot read the file, report that limitation instead of fabricating a visual description.',
 ].join(' ')
 const IGNORABLE_STDERR_PATTERNS = [
   WINDOWS_SHUTDOWN_ASSERT_RE,
@@ -480,6 +489,13 @@ function getApiGatewayAppendSystemPrompt(
     config.subagents.maxParallel,
   )
   if (subagentPrompt) parts.push(subagentPrompt)
+  if (
+    hasVisionInputReference(prompt)
+    && hasRunnerTool('Agent')
+    && subagentRuntime?.roles.some(role => role.name === 'gateway-vision')
+  ) {
+    parts.push(VISION_ROUTING_APPEND_SYSTEM_PROMPT)
+  }
   if (hasRunnerTool('Bash') || hasRunnerTool('PowerShell')) {
     parts.push(DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT)
   }

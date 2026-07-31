@@ -286,7 +286,11 @@ Advanced and source-build guides:
 - **Current library documentation**: Context7 resolves packages and retrieves version-aware API and setup documentation
 - **Streaming responses**: Real-time token output and tool progress
 - **Tool calling**: Multi-step tool loops with model calls, tool execution, and follow-up responses
-- **Images**: URL and base64 image inputs for providers that support vision
+- **Images**: Telegram photos and OpenAI `image_url`/Responses `input_image`
+  data URLs are saved as protected local files. A dedicated Codex
+  `gateway-vision` subagent inspects them, so text-only parent providers such as
+  DeepSeek receive grounded text evidence instead of unsupported image payloads.
+  Remote image URLs are not downloaded server-side to avoid SSRF.
 - **Provider profiles**: Guided setup plus saved `.openclaude-profile.json` support
 - **Local and remote model backends**: Cloud APIs, local servers, and Apple Silicon local inference
 

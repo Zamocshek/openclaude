@@ -2755,7 +2755,7 @@ export class TelegramAgentBridge {
 
     await this.sendMessage(
       chatId,
-      'Usage:\n/subagents [status|on|off|list]\n/subagents parallel <1-8>\n/subagents set <role> <provider> <model> [base_url] [api_key]\n/subagents remove <role>\n/delegate <plan|code|review|explore> <task>',
+      'Usage:\n/subagents [status|on|off|list]\n/subagents parallel <1-8>\n/subagents set <role> <provider> <model> [base_url] [api_key]\n/subagents remove <role>\n/delegate <plan|code|review|explore|vision> <task>',
     )
   }
 
@@ -2768,7 +2768,7 @@ export class TelegramAgentBridge {
     const role = normalizeSubagentRole(rawRole || '')
     const task = taskParts.join(' ').trim()
     if (!role || !task) {
-      await this.sendMessage(chatId, 'Usage: /delegate <plan|code|review|explore> <task>')
+      await this.sendMessage(chatId, 'Usage: /delegate <plan|code|review|explore|vision> <task>')
       return
     }
     if (!this.config.subagents.enabled || !this.config.subagents.routes[role]) {
@@ -6646,9 +6646,9 @@ function formatTelegramSubagentStatus(config: AgentGatewayConfig): string {
   }
   lines.push(
     '',
-    'Roles: gateway-explore, gateway-plan, gateway-implement, gateway-review.',
+    'Roles: gateway-explore, gateway-plan, gateway-implement, gateway-review, gateway-vision.',
     'Use /subagents set <role> <provider> <model> [base_url] [api_key] to change a route.',
-    'Direct task: /delegate <plan|code|review|explore> <task>.',
+    'Direct task: /delegate <plan|code|review|explore|vision> <task>.',
   )
   return lines.join('\n').slice(0, 3900)
 }
@@ -6665,6 +6665,8 @@ function normalizeSubagentRole(value: string): string | undefined {
     implement: 'gateway-implement',
     review: 'gateway-review',
     audit: 'gateway-review',
+    vision: 'gateway-vision',
+    image: 'gateway-vision',
   }
   if (aliases[name]) return aliases[name]
   return /^gateway-[a-z][a-z0-9-]{2,44}$/u.test(name) ? name : undefined
@@ -7217,6 +7219,11 @@ export function buildTelegramAgentPrompt(input: {
       '',
       'Use the local_path values above when you need to inspect attached files.',
     )
+    if (input.attachments.some(isVisualTelegramAttachment)) {
+      lines.push(
+        'At least one attachment is visual. Inspect the actual local image through gateway-vision when that route is available; do not infer its contents from the filename or caption.',
+      )
+    }
   }
 
   return lines.join('\n')
@@ -8037,6 +8044,12 @@ function isTelegramPhotoFile(filePath: string): boolean {
   return ['.jpg', '.jpeg', '.png', '.webp'].includes(
     extname(filePath).toLowerCase(),
   )
+}
+
+function isVisualTelegramAttachment(attachment: TelegramAttachment): boolean {
+  return attachment.type === 'photo'
+    || Boolean(attachment.mimeType?.toLowerCase().startsWith('image/'))
+    || Boolean(attachment.localPath && isTelegramPhotoFile(attachment.localPath))
 }
 
 function isAudioMime(mimeType: string | undefined): boolean {

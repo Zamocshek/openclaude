@@ -157,6 +157,15 @@ describe('gateway control MCP configuration', () => {
       expect(tools.tools.map(tool => tool.name)).toContain(
         'android_check_device',
       )
+      const configureTool = tools.tools.find(
+        tool => tool.name === 'configure_subagent_route',
+      )
+      const configureSchema = configureTool?.inputSchema as {
+        properties?: { role?: { description?: string } }
+      }
+      expect(configureSchema.properties?.role?.description).toContain(
+        'gateway-vision',
+      )
 
       const result = await client.callTool({
         name: 'android_list_devices',
