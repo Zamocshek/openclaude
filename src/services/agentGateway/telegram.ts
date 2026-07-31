@@ -93,6 +93,11 @@ import {
   type AndroidDeviceRegistry,
   type AndroidDiscoveredDevice,
 } from './androidDevices.js'
+import {
+  describeRouterBuiltinTools,
+  ROUTER_BUILTIN_TOOLS,
+  updateRouterBuiltinToolState,
+} from './toolRouterTools.js'
 
 export type TelegramFileRef = {
   file_id: string
@@ -594,7 +599,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/consciousness [start|stop|now|status]', description: 'alias for /bg' },
       { syntax: '/evolution [on|off|status]', description: 'control scheduled evolution cycles' },
       { syntax: '/evolve [on|off|now|status]', description: 'control evolution or run one cycle' },
-      { syntax: '/tools [on|off]', description: 'show, enable, or disable model tool calls', botDescription: 'Control model tools' },
+      { syntax: '/tools [on|off|list|enable NAME|disable NAME]', description: 'toggle model tools', botDescription: 'Control model tools' },
       { syntax: '/review', description: 'run a deep architecture review cycle' },
       { syntax: '/infinite <goal>', description: 'run a persistent task loop' },
     ],
@@ -2409,11 +2414,16 @@ export class TelegramAgentBridge {
   }
 
   private async handleToolsCommand(chatId: string, commandBody: string): Promise<void> {
-    const action = commandBody.trim().toLowerCase() || 'status'
+    const [rawAction = 'status', rawTool = ''] = commandBody.trim().split(/\s+/, 2)
+    const action = rawAction.toLowerCase() || 'status'
     if (action === 'status') {
+      const catalog = describeRouterBuiltinTools(this.config.runner)
       await this.sendMessageWithKeyboard(
         chatId,
-        `Model tool calls: ${this.config.runner.disableTools ? 'OFF' : 'ON'}`,
+        [
+          `Model tool calls: ${this.config.runner.disableTools ? 'OFF' : 'ON'}`,
+          `Built-in tools: ${catalog.filter(tool => tool.enabled).length}/${catalog.length} enabled`,
+        ].join('\n'),
         buildTelegramRuntimeKeyboard({
           toolsEnabled: !this.config.runner.disableTools,
           cronEnabled: this.config.cron.enabled,
@@ -2423,8 +2433,63 @@ export class TelegramAgentBridge {
       )
       return
     }
+    if (action === 'list') {
+      const catalog = describeRouterBuiltinTools(this.config.runner)
+      await this.sendMessage(
+        chatId,
+        [
+          `Model tool calls: ${this.config.runner.disableTools ? 'OFF' : 'ON'}`,
+          ...catalog.map(tool =>
+            `${tool.enabled ? 'ON ' : 'OFF'} ${tool.name} (${tool.group})`,
+          ),
+          '',
+          'Use /tools enable NAME or /tools disable NAME.',
+        ].join('\n'),
+      )
+      return
+    }
+    if ((action === 'enable' || action === 'disable') && rawTool) {
+      const selected = ROUTER_BUILTIN_TOOLS.find(
+        tool => tool.name.toLowerCase() === rawTool.toLowerCase(),
+      )
+      if (!selected) {
+        await this.sendMessage(chatId, `Unknown built-in tool: ${rawTool}`)
+        return
+      }
+      const enabled = action === 'enable'
+      const next = updateRouterBuiltinToolState(
+        this.config.runner,
+        selected.name,
+        enabled,
+      )
+      const updates = {
+        OPENCLAUDE_AGENT_RUNNER_TOOLS: next.availableTools.join(','),
+        OPENCLAUDE_AGENT_RUNNER_DISALLOWED_TOOLS:
+          next.disallowedTools.join(','),
+      }
+      await updateProjectEnvFile(updates)
+      applyRuntimeEnvUpdates(updates)
+      await updateAgentGatewayConfig(current => ({
+        ...current,
+        runner: {
+          ...current.runner,
+          availableTools: next.availableTools,
+          disallowedTools: next.disallowedTools,
+        },
+      }))
+      this.config.runner.availableTools = next.availableTools
+      this.config.runner.disallowedTools = next.disallowedTools
+      await this.sendMessage(
+        chatId,
+        `${selected.name}: ${enabled ? 'ON' : 'OFF'} for subsequent runs`,
+      )
+      return
+    }
     if (!['on', 'off', '1', '0', 'enable', 'disable'].includes(action)) {
-      await this.sendMessage(chatId, 'Usage: /tools [on|off]')
+      await this.sendMessage(
+        chatId,
+        'Usage: /tools [on|off|list|enable NAME|disable NAME]',
+      )
       return
     }
 

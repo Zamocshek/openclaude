@@ -68,6 +68,24 @@ describe('gateway control MCP configuration', () => {
     expect(generated.mcpServers.context7).toBeUndefined()
   })
 
+  test('builds an empty MCP profile when model tools are disabled', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'openclaude-disabled-mcp-project-'))
+    const state = await mkdtemp(join(tmpdir(), 'openclaude-disabled-mcp-state-'))
+    temporaryPaths.push(project, state)
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = state
+    await writeFile(join(project, '.mcp.json'), JSON.stringify({
+      mcpServers: {
+        codegraph: { command: 'node', args: ['codegraph.mjs'] },
+        context7: { command: 'node', args: ['context7.mjs'] },
+      },
+    }))
+
+    const generatedPath = prepareGatewayControlMcpConfig(project, 'disabled')
+    expect(generatedPath).toBe(join(state, 'gateway-tools-disabled.mcp.json'))
+    const generated = JSON.parse(await readFile(generatedPath!, 'utf8'))
+    expect(generated.mcpServers).toEqual({})
+  })
+
   test('exposes Android tools and calls the authenticated Gateway API', async () => {
     const requests: Array<{ path: string; authorization: string | null }> = []
     mockGateway = Bun.serve({

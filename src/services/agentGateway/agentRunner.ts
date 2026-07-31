@@ -301,27 +301,34 @@ export function buildAgentArgs(
   } = {},
 ): string[] {
   const pentestPolicy = options.toolPolicy === 'pentest'
+  const toolsEnabled = pentestPolicy || !config.runner.disableTools
+  const mcpProjectRoot = config.runner.cwd || process.cwd()
+  const mcpConfigPath = prepareGatewayControlMcpConfig(
+    mcpProjectRoot,
+    pentestPolicy
+      ? 'pentest'
+      : toolsEnabled
+        ? 'default'
+        : 'disabled',
+  )
+  const enabledMcpServers = readPreparedMcpServerNames(mcpConfigPath)
   const args = [
     '--print',
     ...(options.streamEvents ? ['--verbose'] : []),
     '--output-format',
     options.streamEvents ? 'stream-json' : 'text',
     '--append-system-prompt',
-    getApiGatewayAppendSystemPrompt(config, options.prompt, options.subagentRuntime),
+    getApiGatewayAppendSystemPrompt(
+      config,
+      options.prompt,
+      options.subagentRuntime,
+      { enabledMcpServers, toolsEnabled, projectRoot: mcpProjectRoot },
+    ),
     '--max-turns',
     String(config.runner.maxTurns),
   ]
-  const mcpProjectRoot = config.runner.cwd || (pentestPolicy ? process.cwd() : undefined)
-  const mcpConfigPath = mcpProjectRoot
-    ? prepareGatewayControlMcpConfig(
-        mcpProjectRoot,
-        pentestPolicy ? 'pentest' : 'default',
-      )
-    : undefined
   if (mcpConfigPath) {
     args.push('--mcp-config', mcpConfigPath)
-  }
-  if (pentestPolicy) {
     args.push('--strict-mcp-config')
   }
 
@@ -391,41 +398,101 @@ function getApiGatewayAppendSystemPrompt(
   config: AgentGatewayConfig,
   prompt = '',
   subagentRuntime?: GatewaySubagentRuntime,
+  capabilities: {
+    enabledMcpServers: Set<string>
+    toolsEnabled: boolean
+    projectRoot: string
+  } = {
+    enabledMcpServers: new Set(),
+    toolsEnabled: !config.runner.disableTools,
+    projectRoot: getAgentGatewayProjectRoot(config),
+  },
 ): string {
-  const hasOpenRAG =
-    config.openRAG.enabled ||
-    config.openRAG.mcpEnabled ||
-    Boolean(config.openRAG.apiKey)
-  const parts = [
-    API_GATEWAY_APPEND_SYSTEM_PROMPT,
-    CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT,
-    CODING_EXECUTION_APPEND_SYSTEM_PROMPT,
-  ]
-  if (hasCodingTaskIntent(prompt)) parts.push(CODE_SKILL_PROMPT)
+  const parts = [API_GATEWAY_APPEND_SYSTEM_PROMPT]
+  if (!capabilities.toolsEnabled) return parts.join('\n\n')
+
+  const disabledSkills = getDisabledSkillsForRun(capabilities.projectRoot)
+  const hasRunnerTool = (name: string) =>
+    isRunnerToolAvailable(config, name, capabilities.toolsEnabled, subagentRuntime)
+  const hasMcp = (name: string) => capabilities.enabledMcpServers.has(name)
+  const codingIntent = hasCodingTaskIntent(prompt)
+  const codeSkillEnabled =
+    hasRunnerTool('Skill') && !disabledSkills.has('code')
+
+  parts.push(CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT)
+  if (codingIntent && codeSkillEnabled) {
+    parts.push(CODING_EXECUTION_APPEND_SYSTEM_PROMPT)
+    parts.push(CODE_SKILL_PROMPT)
+  }
   const configuredModel =
     process.env.OPENCLAUDE_MODEL || process.env.OPENAI_MODEL || ''
-  if (getReasoningEffortForModel(configuredModel) === 'ultra') {
+  if (
+    getReasoningEffortForModel(configuredModel) === 'ultra'
+    && hasRunnerTool('Agent')
+  ) {
     parts.push(CODEX_ULTRA_APPEND_SYSTEM_PROMPT)
   }
-  parts.push(CODEGRAPH_APPEND_SYSTEM_PROMPT)
-  parts.push(SEARXNG_APPEND_SYSTEM_PROMPT)
-  parts.push(CONTEXT7_APPEND_SYSTEM_PROMPT)
-  if (hasOpenRAG) parts.push(OPENRAG_APPEND_SYSTEM_PROMPT)
-  parts.push(CAMOFOX_APPEND_SYSTEM_PROMPT)
-  parts.push(QWEN_COLLABORATION_APPEND_SYSTEM_PROMPT)
-  parts.push(TELEGRAM_MCP_APPEND_SYSTEM_PROMPT)
-  parts.push(HINDSIGHT_APPEND_SYSTEM_PROMPT)
+  if (hasMcp('codegraph')) parts.push(CODEGRAPH_APPEND_SYSTEM_PROMPT)
+  if (hasMcp('searxng')) parts.push(SEARXNG_APPEND_SYSTEM_PROMPT)
+  if (hasMcp('context7')) parts.push(CONTEXT7_APPEND_SYSTEM_PROMPT)
+  if (hasMcp('openrag')) parts.push(OPENRAG_APPEND_SYSTEM_PROMPT)
+  if (hasMcp('camofox')) parts.push(CAMOFOX_APPEND_SYSTEM_PROMPT)
+  if (hasRunnerTool('Skill') && !disabledSkills.has('qwen-collab')) {
+    parts.push(QWEN_COLLABORATION_APPEND_SYSTEM_PROMPT)
+  }
+  if (hasMcp('telegram-mcp')) parts.push(TELEGRAM_MCP_APPEND_SYSTEM_PROMPT)
+  if (hasMcp('hindsight')) parts.push(HINDSIGHT_APPEND_SYSTEM_PROMPT)
   if (isEnvTruthy(process.env.OPENCLAUDE_TERMINAL_BENCH)) {
     parts.push(TERMINAL_BENCH_APPEND_SYSTEM_PROMPT)
   }
   if (hasLifeRpgSystem(config)) parts.push(LIFE_RPG_APPEND_SYSTEM_PROMPT)
   const subagentPrompt = buildGatewaySubagentAppendPrompt(
-    subagentRuntime,
+    hasRunnerTool('Agent') ? subagentRuntime : undefined,
     config.subagents.maxParallel,
   )
   if (subagentPrompt) parts.push(subagentPrompt)
-  parts.push(DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT)
+  if (hasRunnerTool('Bash') || hasRunnerTool('PowerShell')) {
+    parts.push(DOCKER_WEB_APP_APPEND_SYSTEM_PROMPT)
+  }
   return parts.join('\n\n')
+}
+
+function readPreparedMcpServerNames(path: string | undefined): Set<string> {
+  if (!path || !existsSync(path)) return new Set()
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+      mcpServers?: Record<string, unknown>
+    }
+    return new Set(Object.keys(parsed.mcpServers || {}))
+  } catch {
+    return new Set()
+  }
+}
+
+function getDisabledSkillsForRun(projectRoot: string): Set<string> {
+  const dotEnv = parseDotEnvFile(projectRoot)
+  const raw = dotEnv.OPENCLAUDE_DISABLED_SKILLS !== undefined
+    ? dotEnv.OPENCLAUDE_DISABLED_SKILLS
+    : process.env.OPENCLAUDE_DISABLED_SKILLS
+  return new Set(
+    String(raw || '')
+      .split(/[\s,]+/u)
+      .map(name => name.trim())
+      .filter(Boolean),
+  )
+}
+
+function isRunnerToolAvailable(
+  config: AgentGatewayConfig,
+  name: string,
+  toolsEnabled: boolean,
+  subagentRuntime?: GatewaySubagentRuntime,
+): boolean {
+  if (!toolsEnabled) return false
+  if (config.runner.disallowedTools.includes(name)) return false
+  if (config.runner.availableTools.length === 0) return true
+  if (name === 'Agent' && subagentRuntime) return true
+  return config.runner.availableTools.includes(name)
 }
 
 function hasLifeRpgSystem(config: AgentGatewayConfig): boolean {
