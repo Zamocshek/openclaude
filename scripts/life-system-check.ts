@@ -12,7 +12,7 @@ export type LifeSystemCheckResult = {
   issues: LifeSystemCheckIssue[]
 }
 
-const REQUIRED_FILES: Array<{
+export const REQUIRED_FILES: Array<{
   path: string
   mustContain: string[]
 }> = [

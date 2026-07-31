@@ -218,6 +218,8 @@ describe('AgentApiServer', () => {
     })
 
     expect(response.status).toBe(200)
+    expect(response.headers.get('content-type'))
+      .toBe('application/json; charset=utf-8')
     const body = await response.json() as {
       choices: Array<{ message: { content: string } }>
     }
@@ -232,6 +234,139 @@ describe('AgentApiServer', () => {
         prompt: expect.stringContaining('Persistent memory tool protocol'),
       }),
     )
+  })
+
+  test('reports streaming runner failures and never stores a partial assistant turn', async () => {
+    let invocation = 0
+    runOpenClaudeAgent.mockImplementation(async options => {
+      invocation += 1
+      if (invocation === 1) {
+        options.onStdout?.('partial answer')
+        return {
+          text: 'partial answer',
+          stderr: 'provider disconnected',
+          exitCode: 1,
+          timedOut: false,
+        }
+      }
+      options.onStdout?.('recovered')
+      return successfulAgentResult('recovered')
+    })
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Hermes-Session-Id': 'stream-failure-session',
+    }
+
+    const failed = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        stream: true,
+        messages: [{ role: 'user', content: 'first turn' }],
+      }),
+    })
+    const failedBody = await failed.text()
+    expect(failedBody).toContain('event: error')
+    expect(failedBody).not.toContain('"finish_reason":"stop"')
+
+    const recovered = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'second turn' }],
+      }),
+    })
+    expect(recovered.status).toBe(200)
+    const secondPrompt = runOpenClaudeAgent.mock.calls[1]?.[0]?.prompt || ''
+    expect(secondPrompt).not.toContain('Assistant: partial answer')
+  })
+
+  test('persists a successful streaming turn before sending DONE', async () => {
+    runOpenClaudeAgent.mockImplementation(async options => {
+      const answer = options.prompt.includes('second turn')
+        ? 'second response'
+        : 'first response'
+      options.onStdout?.(answer)
+      return successfulAgentResult(answer)
+    })
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig(),
+      onAgentResponse: async () => {
+        await new Promise(resolve => setTimeout(resolve, 75))
+      },
+    })
+    await server.start()
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Hermes-Session-Id': 'stream-order-session',
+    }
+    const startedAt = Date.now()
+
+    const first = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        stream: true,
+        messages: [{ role: 'user', content: 'first turn' }],
+      }),
+    })
+    expect(await first.text()).toContain('data: [DONE]')
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(60)
+
+    await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'second turn' }],
+      }),
+    })
+    const secondPrompt = runOpenClaudeAgent.mock.calls[1]?.[0]?.prompt || ''
+    expect(secondPrompt).toContain('assistant: first response')
+  })
+
+  test('holds a split frontmatter prefix until it can be removed', async () => {
+    runOpenClaudeAgent.mockImplementation(async options => {
+      options.onStdout?.('-')
+      options.onStdout?.('--\nsecret: value\n---\nvisible')
+      return successfulAgentResult('---\nsecret: value\n---\nvisible')
+    })
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const response = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        stream: true,
+        messages: [{ role: 'user', content: 'show the result' }],
+      }),
+    })
+    const body = await response.text()
+    expect(body).toContain('visible')
+    expect(body).not.toContain('secret: value')
+  })
+
+  test('rejects unsupported Responses API streaming explicitly', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const response = await fetch(`${server.url}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        stream: true,
+        input: 'hello',
+      }),
+    })
+    expect(response.status).toBe(400)
+    expect(await response.text()).toContain('Streaming is not supported')
+    expect(runOpenClaudeAgent).not.toHaveBeenCalled()
   })
 
   test('materializes Chat Completions image_url input for vision routing', async () => {
@@ -331,6 +466,8 @@ describe('AgentApiServer', () => {
     if (earlyResponse === 'timeout') return
     expect(earlyResponse.status).toBe(200)
     expect(earlyResponse.headers.get('x-hermes-keepalive-json')).toBe('1')
+    expect(earlyResponse.headers.get('content-type'))
+      .toBe('application/json; charset=utf-8')
 
     let bodyFinished = false
     const bodyPromise = earlyResponse.text().then(text => {

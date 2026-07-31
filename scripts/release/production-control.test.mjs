@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   REQUIRED_BASE_MCP_SERVERS,
   PRODUCTION_BUILD_SERVICES,
+  buildComposeEnv,
   getOpenRagVerificationUrls,
   parseEnv,
   validateRequiredBaseMcpServers,
@@ -56,6 +57,21 @@ describe('production control', () => {
       OPENCLAUDE_DOCKER_TELEGRAM_ALLOWED_USER_IDS: '5117562403',
       OPENCLAUDE_OPEN_WEBUI_BIND_ADDRESS: '127.0.0.1',
     })).toEqual([])
+  })
+
+  test('builds stable cross-platform host paths and a Compose project name', () => {
+    const env = buildComposeEnv({
+      OPENCLAUDE_HOST_HOME: './tmp/production-home',
+      OPENCLAUDE_HOST_WORKSPACE_DIR: './tmp/production-workspace',
+    })
+    expect(env.OPENCLAUDE_COMPOSE_PROJECT_NAME).toBe('openclaude-agent')
+    expect(env.OPENCLAUDE_HOST_HOME).toMatch(/tmp[\\/]production-home$/u)
+    expect(env.OPENCLAUDE_HOST_WORKSPACE_DIR)
+      .toMatch(/tmp[\\/]production-workspace$/u)
+    expect(env.OPENCLAUDE_HOST_CONFIG_DIR)
+      .toMatch(/tmp[\\/]production-home[\\/]\.openclaude$/u)
+    expect(env.OPENCLAUDE_HOST_TELEGRAM_MCP_DIR)
+      .toMatch(/tmp[\\/]production-home[\\/]\.openclaude[\\/]telegram-mcp$/u)
   })
 
   test('requires the Telegram MCP image in every production build', () => {

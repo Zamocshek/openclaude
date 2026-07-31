@@ -158,6 +158,44 @@ describe('agent gateway cron job storage', () => {
     expect(updated?.repeat?.completed).toBe(1)
   })
 
+  test('retries a failed Telegram delivery without rerunning or consuming the job', async () => {
+    const job = await createCronJob({
+      name: 'retry reminder delivery',
+      prompt: 'Deliver this exact reminder once.',
+      schedule: '30m',
+      mode: 'message',
+      deliver: 'telegram',
+      origin: { platform: 'telegram', chatId: '42' },
+    })
+
+    const failed = await runCronJobNow(
+      job.id,
+      { cron: { tickIntervalSeconds: 3600 } } as AgentGatewayConfig,
+      async () => {
+        throw new Error('Telegram timeout')
+      },
+    )
+    expect(failed?.state).toBe('scheduled')
+    expect(failed?.enabled).toBe(true)
+    expect(failed?.repeat?.completed).toBe(0)
+    expect(failed?.pendingDelivery?.content)
+      .toBe('Deliver this exact reminder once.')
+    expect(failed?.pendingDelivery?.attempts).toBe(1)
+
+    const delivered: string[] = []
+    const recovered = await runCronJobNow(
+      job.id,
+      { cron: { tickIntervalSeconds: 3600 } } as AgentGatewayConfig,
+      async content => {
+        delivered.push(content)
+      },
+    )
+    expect(delivered).toEqual(['Deliver this exact reminder once.'])
+    expect(recovered?.state).toBe('completed')
+    expect(recovered?.repeat?.completed).toBe(1)
+    expect(recovered?.pendingDelivery).toBeUndefined()
+  })
+
   test('recomputes the next run when only timezone changes', async () => {
     const job = await createCronJob({
       name: 'local morning',

@@ -75,7 +75,7 @@ function Ensure-OllamaEmbeddings {
   $hasModel = @($tags.models).Where({ $_.name -eq $model }, 'First').Count -gt 0
   if (-not $hasModel) {
     Write-StackLog "Pulling Ollama embedding model $model."
-    & docker exec openclaude-ollama ollama pull $model
+    & docker compose -f docker-compose.agent-gateway.yml exec -T openclaude-ollama ollama pull $model
     if ($LASTEXITCODE -ne 0) { throw "Ollama model pull failed with exit code $LASTEXITCODE." }
   }
 }

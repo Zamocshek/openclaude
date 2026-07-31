@@ -1092,6 +1092,8 @@ function runOpenClaudeAgentProcess(
     let streamResultText = ''
     let streamResultError = ''
     let streamResultCostUsd: number | undefined
+    let sawTerminalStreamResult = false
+    let sawSuccessfulStreamResult = false
     let stderr = ''
     let timedOut = false
     let stalled = false
@@ -1185,12 +1187,17 @@ function runOpenClaudeAgentProcess(
       }
 
       const assistantText = extractStreamJsonAssistantText(message)
-      if (assistantText) {
+      if (hasStreamJsonToolUse(message)) {
+        streamAssistantText = ''
+      } else if (assistantText) {
         streamAssistantText = assistantText
       }
 
       const result = extractStreamJsonResult(message)
       if (result) {
+        sawTerminalStreamResult = true
+        sawSuccessfulStreamResult =
+          message.subtype === 'success' && message.is_error !== true
         streamResultText = result.text
         streamResultError = result.error
         streamResultCostUsd = result.costUsd
@@ -1243,8 +1250,15 @@ function runOpenClaudeAgentProcess(
         handleStreamLine(streamLineBuffer)
         streamLineBuffer = ''
       }
+      if (options.streamEvents && !sawTerminalStreamResult) {
+        streamResultError = [
+          streamResultError,
+          'Agent stream ended without a terminal result event.',
+        ].filter(Boolean).join('\n')
+      }
       const durationMs = Date.now() - observerContext.startedAt
-      const completedStreamText = streamResultText || streamAssistantText
+      const completedStreamText = streamResultText
+        || (sawSuccessfulStreamResult ? streamAssistantText : '')
       const normalizedText = redactAgentText(
         stripAnsi(completedStreamText || textStdout).trim(),
       )
@@ -1334,19 +1348,22 @@ function runOpenClaudeAgentProcess(
     }
     options.signal?.addEventListener('abort', onAbort, { once: true })
 
+    proc.stdout.setEncoding('utf8')
+    proc.stderr.setEncoding('utf8')
+
     proc.stdout.on('data', data => {
       resetStallWatchdog()
       if (firstOutputTimer) {
         clearTimeout(firstOutputTimer)
         firstOutputTimer = undefined
       }
-      handleStdoutChunk(data.toString())
+      handleStdoutChunk(data)
     })
 
     proc.stderr.on('data', data => {
       stderr = appendTailText(
         stderr,
-        data.toString(),
+        data,
         MAX_AGENT_STDERR_BUFFER_CHARS,
       )
     })
@@ -1361,6 +1378,17 @@ function runOpenClaudeAgentProcess(
     })
 
     proc.on('close', code => finish(code))
+
+    proc.stdin.on('error', error => {
+      if (settled) return
+      stderr = appendTailText(
+        stderr,
+        `Failed to send the prompt to the agent process: ${error.message}`,
+        MAX_AGENT_STDERR_BUFFER_CHARS,
+      )
+      killProcessTree(proc)
+      finish(1)
+    })
 
     timeoutTimer = setTimeout(() => {
       timedOut = true
@@ -1722,6 +1750,17 @@ export function extractStreamJsonAssistantText(
     })
     .filter(Boolean)
     .join('\n\n')
+}
+
+export function hasStreamJsonToolUse(
+  message: Record<string, unknown>,
+): boolean {
+  if (message.type !== 'assistant') return false
+  return getMessageContentBlocks(message).some(block => {
+    if (!block || typeof block !== 'object') return false
+    const type = String((block as Record<string, unknown>).type || '')
+    return type === 'tool_use' || type === 'server_tool_use'
+  })
 }
 
 function buildTimeoutMessage(

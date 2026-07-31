@@ -34,6 +34,10 @@ export function redactAgentText(text: string): string {
     )
     .replace(/\bsk-[A-Za-z0-9_\-]{8,}\b/g, '[REDACTED_API_KEY]')
     .replace(/\bs2_[A-Za-z0-9]{16,}\b/g, '[REDACTED_API_KEY]')
+    .replace(
+      /(\bbot)\d{6,14}:AA[A-Za-z0-9_-]{20,}\b/giu,
+      '$1[REDACTED_TELEGRAM_TOKEN]',
+    )
     .replace(/\b\d{6,14}:AA[A-Za-z0-9_-]{20,}\b/g, '[REDACTED_TELEGRAM_TOKEN]')
     .replace(/\b(api[_-]?key|token|authorization)\s*[:=]\s*["']?[^"',\s]{8,}/gi, '$1=[REDACTED]')
 }

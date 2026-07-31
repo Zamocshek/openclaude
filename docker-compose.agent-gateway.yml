@@ -4,6 +4,8 @@ x-default-logging: &default-logging
     max-size: "${OPENCLAUDE_DOCKER_LOG_MAX_SIZE:-20m}"
     max-file: "${OPENCLAUDE_DOCKER_LOG_MAX_FILES:-5}"
 
+name: "${OPENCLAUDE_COMPOSE_PROJECT_NAME:-openclaude-agent}"
+
 services:
   openclaude-agent:
     build:
@@ -212,10 +214,10 @@ services:
       - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_8080_PORT:-18080}:8080"
     volumes:
       - type: bind
-        source: "${OPENCLAUDE_HOST_CONFIG_DIR:-${USERPROFILE}/.openclaude}"
+        source: "${OPENCLAUDE_HOST_CONFIG_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude}"
         target: /home/node/.openclaude
       - type: bind
-        source: "${OPENCLAUDE_HOST_CODEX_DIR:-${USERPROFILE}/.codex}"
+        source: "${OPENCLAUDE_HOST_CODEX_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.codex}"
         target: /run/codex
       - ./:/workspace
       # Keep the running Gateway aligned with the checked-out, compiled build.
@@ -593,7 +595,7 @@ services:
     logging: *default-logging
     command: ["python", "main.py"]
     env_file:
-      - path: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}/.env"
+      - path: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude/telegram-mcp}/.env"
         required: false
     environment:
       TELEGRAM_MCP_CONFIG_DIR: "/app"
@@ -607,7 +609,7 @@ services:
       TELEGRAM_MCP_PORT: "8766"
     volumes:
       - type: bind
-        source: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}"
+        source: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude/telegram-mcp}"
         target: /data
     healthcheck:
       test:
@@ -631,7 +633,7 @@ services:
         condition: service_healthy
     command: ["python", "web_app.py"]
     env_file:
-      - path: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}/.env"
+      - path: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude/telegram-mcp}/.env"
         required: false
     environment:
       TELEGRAM_MCP_CONFIG_DIR: "/app"
@@ -646,7 +648,7 @@ services:
       - "${TELEGRAM_MCP_WEB_BIND_ADDRESS:-127.0.0.1}:${TELEGRAM_MCP_WEB_HOST_PORT:-18765}:8765"
     volumes:
       - type: bind
-        source: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${USERPROFILE}/.openclaude/telegram-mcp}"
+        source: "${OPENCLAUDE_HOST_TELEGRAM_MCP_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude/telegram-mcp}"
         target: /data
     healthcheck:
       test:
@@ -747,7 +749,6 @@ services:
 
   openclaude-ollama:
     image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee
-    container_name: openclaude-ollama
     restart: unless-stopped
     logging: *default-logging
     ports:
