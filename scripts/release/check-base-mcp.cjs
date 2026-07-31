@@ -241,6 +241,28 @@ async function checkPentestMcp(server, projectRoot) {
   }
 }
 
+async function checkAndroidMcp(projectRoot) {
+  const script = [
+    resolve('/app/scripts/release/test-android-mcp.cjs'),
+    resolve(projectRoot, 'scripts/release/test-android-mcp.cjs'),
+  ].find(candidate => existsSync(candidate))
+  if (!script) throw new Error('Android MCP preflight script is missing.')
+  const result = spawnSync(process.execPath, [script, projectRoot], {
+    cwd: projectRoot,
+    env: process.env,
+    encoding: 'utf8',
+    timeout: 180_000,
+    windowsHide: true,
+  })
+  if (result.status !== 0) {
+    throw new Error(
+      `Android MCP check failed: ${
+        result.stderr || result.error?.message || result.status
+      }`,
+    )
+  }
+}
+
 async function main() {
   const projectRoot = resolve(
     process.env.OPENCLAUDE_AGENT_RUNNER_CWD || process.cwd(),
@@ -272,6 +294,7 @@ async function main() {
   }
 
   await checkSearxng()
+  await checkAndroidMcp(projectRoot)
   await checkPentestMcp(config.mcpServers.pentest, projectRoot)
   await checkTelegramMcp(config.mcpServers['telegram-mcp'])
   console.log(`BASE_MCP_PREFLIGHT_OK ${REQUIRED_SERVERS.join(',')}`)

@@ -10,6 +10,7 @@ import {
   buildTelegramDownloadFileName,
   buildTelegramHelpText,
   buildTelegramControlKeyboard,
+  buildTelegramAndroidKeyboard,
   buildTelegramMcpKeyboard,
   buildTelegramModelKeyboard,
   buildTelegramProviderKeyboard,
@@ -24,6 +25,7 @@ import {
   formatTelegramReplyContext,
   formatTelegramProgressText,
   formatTelegramQueueNotice,
+  formatTelegramAndroidMenu,
   formatTelegramMcpMenu,
   formatTelegramSkillDetails,
   formatTelegramSkillStoreMenu,
@@ -94,6 +96,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/panel|control - button control panel')
     expect(help).toContain('/newchat - reset chat context; keep durable memory')
     expect(help).toContain('/mcp add <json> - import mcpServers JSON')
+    expect(help).toContain('/android - manage Android devices')
     expect(help).toContain('/skills - browse the Skill Store')
     expect(help).toContain('/skill create <json> - create a persistent SKILL.md')
     expect(help).toContain('/tools [on|off] - show, enable, or disable model tool calls')
@@ -147,6 +150,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands).toContainEqual({
       command: 'mcp',
       description: 'Manage MCP servers',
+    })
+    expect(commands).toContainEqual({
+      command: 'android',
+      description: 'Manage Android MCP devices',
     })
     expect(commands).toContainEqual({
       command: 'skills',
@@ -205,6 +212,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     const controlActions = buildTelegramControlKeyboard().flat().map(button => button.callback_data)
     expect(controlActions).toContain('menu:providers')
     expect(controlActions).toContain('menu:mcp')
+    expect(controlActions).toContain('menu:android')
     expect(controlActions).toContain('menu:skills')
     expect(controlActions).toContain('menu:runtime')
     expect(controlActions).toContain('menu:schedule')
@@ -226,6 +234,46 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(runtimeActions).toContain('runtime:evolution')
     expect(runtimeActions).toContain('runtime:wake')
     expect(runtimeActions).toContain('runtime:restart')
+  })
+
+  test('builds Android device menus with active and discovered devices', () => {
+    const registry = {
+      version: 1 as const,
+      activeAlias: 'personal',
+      profiles: {
+        personal: {
+          alias: 'personal',
+          serial: 'RFCN2013V8D',
+          connection: 'usb' as const,
+          enabled: true,
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(0).toISOString(),
+        },
+        lab: {
+          alias: 'lab',
+          serial: '192.168.1.8:5555',
+          connection: 'wifi' as const,
+          enabled: false,
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(0).toISOString(),
+        },
+      },
+    }
+    const text = formatTelegramAndroidMenu(registry, [{
+      serial: 'emulator-5554',
+      state: 'device',
+      connection: 'emulator',
+      details: { model: 'sdk_gphone64_x86_64' },
+    }])
+    const actions = buildTelegramAndroidKeyboard(registry)
+      .flat()
+      .map(button => button.callback_data)
+
+    expect(text).toContain('ACTIVE personal')
+    expect(text).toContain('OFF lab')
+    expect(text).toContain('DEVICE emulator-5554 [emulator]')
+    expect(actions).toContain('android:view:personal')
+    expect(actions).toContain('android:discover')
   })
 
   test('builds a paged Skill Store and validates compact or JSON creation', () => {

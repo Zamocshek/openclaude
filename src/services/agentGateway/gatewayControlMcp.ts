@@ -36,12 +36,20 @@ export function prepareGatewayControlMcpConfig(
     : { ...sourceServers }
 
   if (profile === 'default' && scriptPath) {
+    const gatewayApiKey =
+      process.env.OPENCLAUDE_AGENT_API_KEY?.trim() || ''
     mcpServers[CONTROL_MCP_NAME] = {
       command: process.execPath,
       args: [scriptPath],
       env: {
         OPENCLAUDE_AGENT_GATEWAY_CONFIG_PATH: getAgentGatewayConfigPath(),
         OPENCLAUDE_AGENT_GATEWAY_STATE_DIR: getAgentGatewayStateDir(),
+        OPENCLAUDE_AGENT_GATEWAY_URL:
+          process.env.OPENCLAUDE_AGENT_GATEWAY_URL
+          || `http://127.0.0.1:${process.env.OPENCLAUDE_AGENT_API_PORT || '8642'}`,
+        ...(gatewayApiKey
+          ? { OPENCLAUDE_AGENT_API_KEY: gatewayApiKey }
+          : {}),
       },
     }
   } else if (profile === 'default' && !scriptPath) {

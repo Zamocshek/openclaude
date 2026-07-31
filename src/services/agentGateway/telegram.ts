@@ -78,6 +78,21 @@ import {
   type SkillStoreItemDetails,
 } from './skillStore.js'
 import { describeGatewaySubagents } from './subagentRuntime.js'
+import {
+  checkAndroidDevice,
+  connectAndroidDevice,
+  discoverAndroidDevices,
+  listAndroidDeviceProfiles,
+  pairAndroidDevice,
+  registerAndroidDeviceProfile,
+  removeAndroidDeviceProfile,
+  setActiveAndroidDeviceProfile,
+  setAndroidDeviceProfileEnabled,
+  type AndroidDeviceCheck,
+  type AndroidDeviceProfile,
+  type AndroidDeviceRegistry,
+  type AndroidDiscoveredDevice,
+} from './androidDevices.js'
 
 export type TelegramFileRef = {
   file_id: string
@@ -502,6 +517,12 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
     ],
   },
   {
+    title: 'Android',
+    commands: [
+      { syntax: '/android', description: 'manage Android devices', botDescription: 'Manage Android MCP devices' },
+    ],
+  },
+  {
     title: 'Skill Store',
     commands: [
       { syntax: '/skills', description: 'browse the Skill Store', botDescription: 'Browse and create agent skills' },
@@ -617,6 +638,7 @@ export function buildTelegramHelpText(
         continue
       }
       if (command.syntax === '/control') continue
+      if (command.syntax === '/context') continue
       if (command.syntax.startsWith('/omni')) {
         if (command.syntax !== '/omni') continue
         lines.push('/omni* - OmniRoute modes: auto,code,fast,cheap,smart,offline')
@@ -1431,6 +1453,14 @@ export class TelegramAgentBridge {
       return
     }
 
+    if (commandText === '/android' || commandText.startsWith('/android ')) {
+      await this.handleAndroidCommand(
+        chatId,
+        getTelegramCommandBody(text, 'android'),
+      )
+      return
+    }
+
     if (
       commandText === '/skills'
       || commandText === '/skillstore'
@@ -2123,6 +2153,142 @@ export class TelegramAgentBridge {
     await this.sendMessage(
       chatId,
       'Usage: /mcp | /mcp add <json> | /mcp enable <name> | /mcp disable <name> | /mcp remove <name>',
+    )
+  }
+
+  private async handleAndroidCommand(
+    chatId: string,
+    commandBody: string,
+  ): Promise<void> {
+    const body = commandBody.trim()
+    const action = body.split(/\s+/u)[0]?.toLowerCase() || ''
+    try {
+      if (!body || ['list', 'status', 'show'].includes(action)) {
+        await this.sendAndroidMenu(chatId)
+        return
+      }
+      if (action === 'discover') {
+        await this.sendAndroidMenu(chatId, await discoverAndroidDevices())
+        return
+      }
+      if (action === 'add') {
+        const match = body.match(
+          /^add\s+([a-z][a-z0-9-]{0,31})\s+(auto|usb|wifi)\s+(\S+)$/iu,
+        )
+        if (!match) {
+          await this.sendMessageWithKeyboard(
+            chatId,
+            buildTelegramAndroidAddInstructions(),
+            buildTelegramAndroidBackKeyboard(),
+          )
+          return
+        }
+        const registry = await registerAndroidDeviceProfile({
+          projectRoot: this.mcpProjectRoot(),
+          alias: match[1]!,
+          connection: match[2]!,
+          serial: match[3]!,
+          makeActive: true,
+        })
+        await this.sendMessageWithKeyboard(
+          chatId,
+          `Android profile saved. It is available as Android-MCP tools on the next agent run.\n\n${formatTelegramAndroidMenu(registry)}`,
+          buildTelegramAndroidKeyboard(registry),
+        )
+        return
+      }
+      if (action === 'pair') {
+        const match = body.match(/^pair\s+(\S+)\s+([0-9]{4,12})$/iu)
+        if (!match) {
+          await this.sendMessage(
+            chatId,
+            'Usage: /android pair <host:pairing-port> <pairing-code>',
+          )
+          return
+        }
+        const result = await pairAndroidDevice(match[1]!, match[2]!)
+        await this.sendMessage(
+          chatId,
+          `Android WiFi pairing: ${result.target}\n${result.message || 'Pairing command completed.'}`,
+        )
+        return
+      }
+      if (action === 'connect') {
+        const identifier = body.slice('connect'.length).trim()
+        if (!identifier) {
+          await this.sendMessage(
+            chatId,
+            'Usage: /android connect <alias|serial|host:port>',
+          )
+          return
+        }
+        const checked = await connectAndroidDevice(identifier)
+        if (checked.alias) await setActiveAndroidDeviceProfile(checked.alias)
+        await this.sendMessageWithKeyboard(
+          chatId,
+          formatTelegramAndroidCheck(checked),
+          buildTelegramAndroidBackKeyboard(),
+        )
+        return
+      }
+      if (action === 'use') {
+        const alias = body.slice('use'.length).trim()
+        const registry = await setActiveAndroidDeviceProfile(alias)
+        await this.sendMessageWithKeyboard(
+          chatId,
+          formatTelegramAndroidMenu(registry),
+          buildTelegramAndroidKeyboard(registry),
+        )
+        return
+      }
+      if (action === 'check' || action === 'test') {
+        const identifier = body.slice(action.length).trim()
+        const checked = await checkAndroidDevice(identifier || undefined)
+        await this.sendMessageWithKeyboard(
+          chatId,
+          formatTelegramAndroidCheck(checked),
+          buildTelegramAndroidBackKeyboard(),
+        )
+        return
+      }
+      const stateMatch = body.match(
+        /^(enable|disable|remove|delete)\s+([a-z][a-z0-9-]{0,31})$/iu,
+      )
+      if (stateMatch) {
+        const stateAction = stateMatch[1]!.toLowerCase()
+        const alias = stateMatch[2]!
+        const registry = stateAction === 'remove' || stateAction === 'delete'
+          ? await removeAndroidDeviceProfile(this.mcpProjectRoot(), alias)
+          : await setAndroidDeviceProfileEnabled(
+              this.mcpProjectRoot(),
+              alias,
+              stateAction === 'enable',
+            )
+        await this.sendMessageWithKeyboard(
+          chatId,
+          formatTelegramAndroidMenu(registry),
+          buildTelegramAndroidKeyboard(registry),
+        )
+        return
+      }
+      await this.sendMessage(chatId, buildTelegramAndroidUsage())
+    } catch (error) {
+      await this.sendMessage(
+        chatId,
+        `Android command failed: ${summarizeTelegramError(error)}`,
+      )
+    }
+  }
+
+  private async sendAndroidMenu(
+    chatId: string,
+    discovered: AndroidDiscoveredDevice[] = [],
+  ): Promise<void> {
+    const registry = await listAndroidDeviceProfiles()
+    await this.sendMessageWithKeyboard(
+      chatId,
+      formatTelegramAndroidMenu(registry, discovered),
+      buildTelegramAndroidKeyboard(registry),
     )
   }
 
@@ -3611,6 +3777,114 @@ export class TelegramAgentBridge {
         return
       }
 
+      if (data === 'menu:android') {
+        const registry = await listAndroidDeviceProfiles()
+        await this.editCallbackMessage(
+          query,
+          formatTelegramAndroidMenu(registry),
+          buildTelegramAndroidKeyboard(registry),
+        )
+        return
+      }
+
+      if (data === 'android:discover') {
+        const [registry, devices] = await Promise.all([
+          listAndroidDeviceProfiles(),
+          discoverAndroidDevices(),
+        ])
+        await this.editCallbackMessage(
+          query,
+          formatTelegramAndroidMenu(registry, devices),
+          buildTelegramAndroidKeyboard(registry),
+        )
+        return
+      }
+
+      if (data === 'android:add') {
+        await this.editCallbackMessage(
+          query,
+          buildTelegramAndroidAddInstructions(),
+          buildTelegramAndroidBackKeyboard(),
+        )
+        return
+      }
+
+      const androidAction = data.match(
+        /^android:(view|use|connect|check|toggle|delete|confirm-delete):([a-z][a-z0-9-]{0,31})$/u,
+      )
+      if (androidAction) {
+        const action = androidAction[1]!
+        const alias = androidAction[2]!
+        let registry = await listAndroidDeviceProfiles()
+        const profile = registry.profiles[alias]
+        if (!profile) throw new Error(`Android profile not found: ${alias}`)
+        if (action === 'view') {
+          await this.editCallbackMessage(
+            query,
+            formatTelegramAndroidProfile(profile, registry),
+            buildTelegramAndroidProfileKeyboard(profile, registry),
+          )
+          return
+        }
+        if (action === 'use') {
+          registry = await setActiveAndroidDeviceProfile(alias)
+          await this.editCallbackMessage(
+            query,
+            formatTelegramAndroidProfile(registry.profiles[alias]!, registry),
+            buildTelegramAndroidProfileKeyboard(registry.profiles[alias]!, registry),
+          )
+          return
+        }
+        if (action === 'connect' || action === 'check') {
+          const checked = action === 'connect'
+            ? await connectAndroidDevice(alias)
+            : await checkAndroidDevice(alias)
+          if (action === 'connect') {
+            registry = await setActiveAndroidDeviceProfile(alias)
+          }
+          await this.editCallbackMessage(
+            query,
+            formatTelegramAndroidCheck(checked),
+            buildTelegramAndroidProfileKeyboard(registry.profiles[alias]!, registry),
+          )
+          return
+        }
+        if (action === 'toggle') {
+          registry = await setAndroidDeviceProfileEnabled(
+            this.mcpProjectRoot(),
+            alias,
+            !profile.enabled,
+          )
+          await this.editCallbackMessage(
+            query,
+            formatTelegramAndroidProfile(registry.profiles[alias]!, registry),
+            buildTelegramAndroidProfileKeyboard(registry.profiles[alias]!, registry),
+          )
+          return
+        }
+        if (action === 'delete') {
+          await this.editCallbackMessage(
+            query,
+            `Remove Android profile ${alias}? The device itself is not modified.`,
+            [[
+              { text: 'Remove', callback_data: `android:confirm-delete:${alias}` },
+              { text: 'Cancel', callback_data: `android:view:${alias}` },
+            ]],
+          )
+          return
+        }
+        registry = await removeAndroidDeviceProfile(
+          this.mcpProjectRoot(),
+          alias,
+        )
+        await this.editCallbackMessage(
+          query,
+          formatTelegramAndroidMenu(registry),
+          buildTelegramAndroidKeyboard(registry),
+        )
+        return
+      }
+
       if (data === 'menu:subagents') {
         await this.editCallbackMessage(
           query,
@@ -5039,7 +5313,10 @@ export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
       { text: 'Skill Store', callback_data: 'menu:skills' },
       { text: 'Runtime', callback_data: 'menu:runtime' },
     ],
-    [{ text: 'Subagents', callback_data: 'menu:subagents' }],
+    [
+      { text: 'Android devices', callback_data: 'menu:android' },
+      { text: 'Subagents', callback_data: 'menu:subagents' },
+    ],
     [
       { text: 'Schedules', callback_data: 'menu:schedule' },
       { text: 'Memory', callback_data: 'menu:memory' },
@@ -5059,6 +5336,158 @@ export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
 function buildTelegramSubagentKeyboard(enabled: boolean): TelegramInlineKeyboard {
   return [
     [{ text: enabled ? 'Disable subagents' : 'Enable subagents', callback_data: 'subagents:toggle' }],
+    [{ text: 'Control panel', callback_data: 'menu:control' }],
+  ]
+}
+
+export function formatTelegramAndroidMenu(
+  registry: AndroidDeviceRegistry,
+  discovered: AndroidDiscoveredDevice[] = [],
+): string {
+  const profiles = Object.values(registry.profiles)
+    .sort((left, right) => left.alias.localeCompare(right.alias))
+  const lines = [
+    'Android MCP device control',
+    `Saved profiles: ${profiles.length}`,
+    `Active: ${registry.activeAlias || 'not selected'}`,
+  ]
+  if (profiles.length === 0) {
+    lines.push(
+      '',
+      'No saved devices. Discover ADB devices or add a USB/WiFi profile.',
+    )
+  }
+  for (const profile of profiles) {
+    lines.push(
+      '',
+      `${registry.activeAlias === profile.alias ? 'ACTIVE' : profile.enabled ? 'ON' : 'OFF'} ${profile.alias}`,
+      `${profile.connection}: ${profile.serial}`,
+      `MCP server: android-${profile.alias}`,
+    )
+  }
+  if (discovered.length > 0) {
+    lines.push('', 'ADB discovery:')
+    for (const device of discovered.slice(0, 20)) {
+      const model = device.details.model
+        ? ` (${device.details.model.replaceAll('_', ' ')})`
+        : ''
+      lines.push(
+        `${device.state.toUpperCase()} ${device.serial} [${device.connection}]${model}`,
+      )
+    }
+  } else if (discovered.length === 0) {
+    lines.push('', 'Use Discover to refresh devices currently visible to ADB.')
+  }
+  return lines.join('\n').slice(0, 3900)
+}
+
+export function buildTelegramAndroidKeyboard(
+  registry: AndroidDeviceRegistry,
+): TelegramInlineKeyboard {
+  const rows: TelegramInlineKeyboard = Object.values(registry.profiles)
+    .sort((left, right) => left.alias.localeCompare(right.alias))
+    .map(profile => [{
+      text: `${registry.activeAlias === profile.alias ? 'ACTIVE' : profile.enabled ? 'ON' : 'OFF'} ${truncateTelegramButton(profile.alias)}`,
+      callback_data: `android:view:${profile.alias}`,
+    }])
+  rows.push([
+    { text: 'Discover', callback_data: 'android:discover' },
+    { text: 'Add device', callback_data: 'android:add' },
+  ])
+  rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
+  return rows
+}
+
+function formatTelegramAndroidProfile(
+  profile: AndroidDeviceProfile,
+  registry: AndroidDeviceRegistry,
+): string {
+  return [
+    `Android profile: ${profile.alias}`,
+    `State: ${profile.enabled ? 'ON' : 'OFF'}`,
+    `Active: ${registry.activeAlias === profile.alias ? 'yes' : 'no'}`,
+    `Connection: ${profile.connection}`,
+    `ADB target: ${profile.serial}`,
+    `MCP server: android-${profile.alias}`,
+    '',
+    'Pinned MCP servers are isolated per device. Changes apply to the next agent run.',
+  ].join('\n')
+}
+
+function buildTelegramAndroidProfileKeyboard(
+  profile: AndroidDeviceProfile,
+  registry: AndroidDeviceRegistry,
+): TelegramInlineKeyboard {
+  const rows: TelegramInlineKeyboard = [
+    [
+      { text: 'Connect', callback_data: `android:connect:${profile.alias}` },
+      { text: 'Check', callback_data: `android:check:${profile.alias}` },
+    ],
+  ]
+  if (registry.activeAlias !== profile.alias && profile.enabled) {
+    rows.push([
+      { text: 'Use by default', callback_data: `android:use:${profile.alias}` },
+    ])
+  }
+  rows.push([
+    {
+      text: profile.enabled ? 'Disable' : 'Enable',
+      callback_data: `android:toggle:${profile.alias}`,
+    },
+    { text: 'Remove', callback_data: `android:delete:${profile.alias}` },
+  ])
+  rows.push([{ text: 'Android devices', callback_data: 'menu:android' }])
+  return rows
+}
+
+function formatTelegramAndroidCheck(check: AndroidDeviceCheck): string {
+  return [
+    `Android device: ${check.alias || check.serial}`,
+    `ADB state: ${check.state}`,
+    `Serial: ${check.serial}`,
+    `Connection: ${check.connection}`,
+    ...(check.manufacturer || check.model
+      ? [`Model: ${[check.manufacturer, check.model].filter(Boolean).join(' ')}`]
+      : []),
+    ...(check.androidVersion
+      ? [`Android: ${check.androidVersion}${check.sdk ? ` (SDK ${check.sdk})` : ''}`]
+      : []),
+  ].join('\n')
+}
+
+function buildTelegramAndroidAddInstructions(): string {
+  return [
+    'Add an Android device profile:',
+    '/android add <alias> <usb|wifi|auto> <serial|host>',
+    '',
+    'Examples:',
+    '/android add personal usb RFCN2013V8D',
+    '/android add lab-phone wifi 192.168.1.8',
+    '',
+    'For Android Wireless debugging, pair first:',
+    '/android pair <host:pairing-port> <pairing-code>',
+    '',
+    'Pairing codes are not stored. USB debugging authorization must be accepted on the device.',
+  ].join('\n')
+}
+
+function buildTelegramAndroidUsage(): string {
+  return [
+    'Usage:',
+    '/android',
+    '/android discover',
+    '/android add <alias> <usb|wifi|auto> <serial|host>',
+    '/android pair <host:port> <code>',
+    '/android connect <alias|serial|host:port>',
+    '/android use <alias>',
+    '/android check [alias|serial]',
+    '/android enable|disable|remove <alias>',
+  ].join('\n')
+}
+
+function buildTelegramAndroidBackKeyboard(): TelegramInlineKeyboard {
+  return [
+    [{ text: 'Android devices', callback_data: 'menu:android' }],
     [{ text: 'Control panel', callback_data: 'menu:control' }],
   ]
 }
