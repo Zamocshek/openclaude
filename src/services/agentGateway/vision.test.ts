@@ -40,6 +40,8 @@ describe('gateway vision input', () => {
       expect(reference).toContain('[Vision input]')
       expect(reference).toContain(`local_path: ${result.imagePaths[0]}`)
       expect(reference).toContain('gateway-vision')
+      expect(reference).not.toContain('prompt_reference:')
+      expect(reference).not.toContain(`@${result.imagePaths[0]}`)
       expect(hasVisionInputReference(reference)).toBe(true)
     } finally {
       await rm(stateDir, { recursive: true, force: true })

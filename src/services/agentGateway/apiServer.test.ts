@@ -261,9 +261,12 @@ describe('AgentApiServer', () => {
 
     expect(response.status).toBe(200)
     const options = runOpenClaudeAgent.mock.calls.at(-1)?.[0] as MockAgentRunOptions
-    expect(options.prompt).toContain('[Vision input]')
-    expect(options.prompt).toContain('gateway-vision')
-    const imagePath = options.prompt.match(/local_path:\s*(.+\.png)/u)?.[1]
+    const currentRequest = options.prompt.split('Current request:').at(-1) || ''
+    expect(currentRequest).toContain('[Vision input]')
+    expect(currentRequest).toContain('gateway-vision')
+    expect(currentRequest).not.toContain('image_url')
+    expect(currentRequest).not.toMatch(/@[^\s]+\.png/u)
+    const imagePath = currentRequest.match(/local_path:\s*(.+\.png)/u)?.[1]
     expect(imagePath).toBeTruthy()
     expect(await readFile(imagePath!)).toHaveLength(68)
   })
@@ -290,8 +293,10 @@ describe('AgentApiServer', () => {
 
     expect(response.status).toBe(200)
     const options = runOpenClaudeAgent.mock.calls.at(-1)?.[0] as MockAgentRunOptions
-    expect(options.prompt).toContain('[Vision input]')
-    expect(options.prompt).toContain('prompt_reference:')
+    const currentRequest = options.prompt.split('Current request:').at(-1) || ''
+    expect(currentRequest).toContain('[Vision input]')
+    expect(currentRequest).not.toContain('prompt_reference:')
+    expect(currentRequest).not.toContain('input_image')
   })
 
   test('can keep long non-stream chat completions alive until the agent finishes', async () => {
