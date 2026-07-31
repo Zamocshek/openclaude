@@ -39,6 +39,7 @@ import {
   getTelegramAgentRepeatedFailureLimit,
   getTelegramAgentRecoveryAttemptLimit,
   getTelegramQueueLimits,
+  getTelegramRetryDelayMs,
   mergeAgentArtifactsWithTelegramDirectives,
   getTelegramQueuePosition,
   getTelegramProviderShortcut,
@@ -48,6 +49,7 @@ import {
   repairLikelyMojibakeText,
   parseTelegramSkillCreateInput,
   parseTelegramPentestAuthorization,
+  parseTelegramErrorLog,
   summarizeAgentProgressChunk,
   safeTelegramFileName,
   selectLargestPhoto,
@@ -57,6 +59,18 @@ import {
 } from './telegram.js'
 import { listCronJobs } from './cron.js'
 import { getDefaultAgentGatewayConfig } from './config.js'
+
+async function waitFor(
+  condition: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    if (condition()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('Timed out waiting for condition')
+}
 
 async function withTempGatewayState<T>(fn: (stateDir: string) => Promise<T>): Promise<T> {
   const previousStateDir = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
@@ -450,6 +464,24 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(transcript).toContain('turn 40')
   })
 
+  test('preserves full logged text and reply relationships in the transcript', () => {
+    const longTail = 'z'.repeat(4_000)
+    const transcript = formatTelegramConversationTranscript([{
+      direction: 'in',
+      chatId: '42',
+      messageId: 9,
+      text: `question ${longTail}`,
+      replyToMessageId: 7,
+      replyToText: 'the exact earlier message',
+      replyToAttachmentSummary: 'document: plan.md',
+    }])
+
+    expect(transcript).toContain(longTail)
+    expect(transcript).toContain('Reply target #7')
+    expect(transcript).toContain('the exact earlier message')
+    expect(transcript).toContain('document: plan.md')
+  })
+
   test('adds replied-to Telegram message context without replacing the transcript', () => {
     const replyContext = buildTelegramReplyContext({
       message_id: 101,
@@ -531,6 +563,35 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(repairLikelyMojibakeText('РўРѕ РµСЃС‚СЊ')).toBe('То есть')
     expect(repairLikelyMojibakeText('Р¦РёС„СЂРѕРІР°СЏ СЃРёРјСѓР»СЏС†РёСЏ')).toBe('Цифровая симуляция')
     expect(repairLikelyMojibakeText('Привет')).toBe('Привет')
+  })
+
+  test('keeps valid Telegram errors when one line is corrupt and redacts old secrets', () => {
+    const telegramToken = `1234567890:AA${'a'.repeat(24)}`
+    const raw = [
+      JSON.stringify({
+        ts: '2026-07-31T00:00:00.000Z',
+        chatId: '42',
+        source: 'agent-run',
+        message: "sshpass -p 'old-password' ssh root@example.test",
+        activity: [`curl https://api.telegram.org/bot${telegramToken}/sendMessage`],
+      }),
+      '{"interrupted":',
+      JSON.stringify({
+        ts: '2026-07-31T00:01:00.000Z',
+        chatId: 'other',
+        source: 'agent-run',
+        message: 'not for this chat',
+      }),
+    ].join('\n')
+
+    const entries = parseTelegramErrorLog(raw, '42', 10)
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.message).toContain('[REDACTED_PASSWORD]')
+    expect(entries[0]?.message).not.toContain('old-password')
+    expect(entries[0]?.activity?.[0]).toContain('[REDACTED_TELEGRAM_TOKEN]')
+    expect(entries[0]?.activity?.[0]).not.toContain(telegramToken)
+    expect(parseTelegramErrorLog(raw, '42', 0)).toEqual([])
   })
 
   test('instructs Telegram agents to use the memory protocol instead of direct memory file edits', () => {
@@ -893,6 +954,13 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(formatTelegramQueueNotice(2, 'second task')).toContain('Queued #2')
   })
 
+  test('uses bounded exponential Telegram request backoff', () => {
+    expect(getTelegramRetryDelayMs(1)).toBe(500)
+    expect(getTelegramRetryDelayMs(3)).toBe(2_000)
+    expect(getTelegramRetryDelayMs(1, 4)).toBe(4_000)
+    expect(getTelegramRetryDelayMs(1, 120)).toBe(60_000)
+  })
+
   test('bounds Telegram queue backpressure settings', () => {
     expect(getTelegramQueueLimits({
       OPENCLAUDE_TELEGRAM_MAX_QUEUED_PER_CHAT: '75',
@@ -921,6 +989,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     const first = (bridge as any).enqueueChatTask('42', 'first task', async () => {
       const controller = new AbortController()
       ;(bridge as any).activeTasks.set('42', {
+        taskId: 'a'.repeat(32),
         controller,
         messageId: 1,
         progress: { dispose: () => {} },
@@ -941,6 +1010,120 @@ describe('agent gateway Telegram bridge helpers', () => {
 
     expect(secondRan).toBe(false)
     expect(sent.join('\n')).toContain('Queued tasks for this chat were cleared')
+  })
+
+  test('registers FIFO order before slow queue notices resolve', async () => {
+    const bridge = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>(resolve => {
+      releaseFirst = resolve
+    })
+    let releaseSecondNotice!: () => void
+    const secondNotice = new Promise<void>(resolve => {
+      releaseSecondNotice = resolve
+    })
+    const order: string[] = []
+    ;(bridge as any).sendMessage = async (_chatId: string, text: string) => {
+      if (text.includes('Queued #1') && text.includes('second')) {
+        await secondNotice
+      }
+    }
+
+    const first = (bridge as any).enqueueChatTask('42', 'first', async () => {
+      const controller = new AbortController()
+      ;(bridge as any).activeTasks.set('42', {
+        taskId: '1'.repeat(32),
+        controller,
+        messageId: 1,
+      })
+      order.push('first')
+      await firstGate
+      ;(bridge as any).activeTasks.delete('42')
+    })
+    await waitFor(() => order.length === 1)
+    const second = (bridge as any).enqueueChatTask('42', 'second', async () => {
+      order.push('second')
+    })
+    const third = (bridge as any).enqueueChatTask('42', 'third', async () => {
+      order.push('third')
+    })
+
+    releaseFirst()
+    releaseSecondNotice()
+    await Promise.all([first, second, third])
+    expect(order).toEqual(['first', 'second', 'third'])
+  })
+
+  test('does not let an old Stop button abort the current task', async () => {
+    const bridge = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+    const controller = new AbortController()
+    const sent: string[] = []
+    ;(bridge as any).sendMessage = async (_chatId: string, text: string) => {
+      sent.push(text)
+    }
+    ;(bridge as any).activeTasks.set('42', {
+      taskId: 'b'.repeat(32),
+      controller,
+      messageId: 2,
+    })
+
+    await (bridge as any).stopTask('42', 'a'.repeat(32))
+
+    expect(controller.signal.aborted).toBe(false)
+    expect(sent.join('\n')).toContain('current task was not stopped')
+  })
+
+  test('removes the Stop keyboard when progress reaches a terminal state', async () => {
+    const bridge = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+    const calls: Array<{ method: string; payload: Record<string, unknown> }> = []
+    ;(bridge as any).callTelegram = async (
+      method: string,
+      payload: Record<string, unknown>,
+    ) => {
+      calls.push({ method, payload })
+      return method === 'sendMessage' ? { message_id: 9 } : {}
+    }
+
+    const progress = await (bridge as any).createTaskProgress(
+      '42',
+      'testing',
+      'a'.repeat(32),
+    )
+    await progress.finish('completed', 'done')
+    const edit = calls.findLast(call => call.method === 'editMessageText')
+    expect(edit?.payload.reply_markup).toEqual({ inline_keyboard: [] })
+  })
+
+  test('retries a transient Telegram API request within a bounded attempt count', async () => {
+    const config = getDefaultAgentGatewayConfig()
+    config.telegram.botToken = 'test-token'
+    const bridge = new TelegramAgentBridge(config)
+    const originalFetch = globalThis.fetch
+    const previousAttempts = process.env.OPENCLAUDE_TELEGRAM_HTTP_ATTEMPTS
+    let attempts = 0
+    process.env.OPENCLAUDE_TELEGRAM_HTTP_ATTEMPTS = '2'
+    globalThis.fetch = (async () => {
+      attempts += 1
+      if (attempts === 1) throw new TypeError('fetch failed')
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+    try {
+      await (bridge as any).callTelegram('sendMessage', {
+        chat_id: '42',
+        text: 'hello',
+      })
+      expect(attempts).toBe(2)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (previousAttempts === undefined) {
+        delete process.env.OPENCLAUDE_TELEGRAM_HTTP_ATTEMPTS
+      } else {
+        process.env.OPENCLAUDE_TELEGRAM_HTTP_ATTEMPTS = previousAttempts
+      }
+    }
   })
 
   test('new chat creates a persistent transcript boundary without touching durable memory', async () => {

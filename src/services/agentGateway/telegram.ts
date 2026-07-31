@@ -170,6 +170,7 @@ type TelegramInlineKeyboardButton = {
 type TelegramInlineKeyboard = TelegramInlineKeyboardButton[][]
 
 type ActiveTelegramTask = {
+  taskId: string
   controller: AbortController
   messageId: number
   progress?: TelegramTaskProgress
@@ -1016,6 +1017,7 @@ export class TelegramAgentBridge {
   private async createTaskProgress(
     chatId: string,
     phase: string,
+    taskId: string,
     signal?: AbortSignal,
   ): Promise<TelegramTaskProgress> {
     const providerProfile = await loadProviderProfile()
@@ -1032,7 +1034,7 @@ export class TelegramAgentBridge {
       disable_web_page_preview: true,
       reply_markup: {
         inline_keyboard: [[
-          { text: 'Stop', callback_data: `stop:${chatId}` },
+          { text: 'Stop', callback_data: `stop:${chatId}:${taskId}` },
         ]],
       },
     })
@@ -1044,7 +1046,7 @@ export class TelegramAgentBridge {
       startedAt,
       providerProfile,
       stopTyping,
-      edit: async text => {
+      edit: async (text, showStop) => {
         if (!messageId) return
         await this.callTelegram('editMessageText', {
           chat_id: chatId,
@@ -1052,9 +1054,9 @@ export class TelegramAgentBridge {
           text,
           disable_web_page_preview: true,
           reply_markup: {
-            inline_keyboard: [[
-              { text: 'Stop', callback_data: `stop:${chatId}` },
-            ]],
+            inline_keyboard: showStop
+              ? [[{ text: 'Stop', callback_data: `stop:${chatId}:${taskId}` }]]
+              : [],
           },
         })
       },
@@ -1074,13 +1076,40 @@ export class TelegramAgentBridge {
       throw new Error('A task is already running. Use /stop first.')
     }
 
+    const taskId = randomUUID().replace(/-/g, '')
     const controller = new AbortController()
-    const progress = await this.createTaskProgress(chatId, phase, controller.signal)
     this.activeTasks.set(chatId, {
+      taskId,
       controller,
-      messageId: progress.messageId,
-      progress,
+      messageId: 0,
     })
+    let progress: TelegramTaskProgress
+    try {
+      progress = await this.createTaskProgress(
+        chatId,
+        phase,
+        taskId,
+        controller.signal,
+      )
+    } catch (error) {
+      if (this.activeTasks.get(chatId)?.taskId === taskId) {
+        this.activeTasks.delete(chatId)
+      }
+      throw error
+    }
+    const active = this.activeTasks.get(chatId)
+    if (!active || active.taskId !== taskId || controller.signal.aborted) {
+      progress.dispose()
+      return {
+        text: '',
+        stderr: 'Task stopped before the agent process started.',
+        exitCode: 1,
+        timedOut: false,
+        durationMs: 0,
+      }
+    }
+    active.messageId = progress.messageId
+    active.progress = progress
 
     let result: AgentRunResult | undefined
     try {
@@ -1094,7 +1123,7 @@ export class TelegramAgentBridge {
         toolPolicy: options?.toolPolicy,
       })
     } finally {
-      if (this.activeTasks.get(chatId)?.controller === controller) {
+      if (this.activeTasks.get(chatId)?.taskId === taskId) {
         this.activeTasks.delete(chatId)
       }
     }
@@ -1275,17 +1304,18 @@ export class TelegramAgentBridge {
     })
     this.queuedTaskCounts.set(chatId, waitingBefore + 1)
 
-    if (position > 0) {
-      await this.sendMessage(chatId, formatTelegramQueueNotice(position, label))
-    }
-
     const previous = this.taskQueues.get(chatId) ?? Promise.resolve()
+    const notice = position > 0
+      ? this.sendMessage(chatId, formatTelegramQueueNotice(position, label))
+          .catch(() => {})
+      : Promise.resolve()
     const next = previous
       .catch(() => {
         // The previous task already reported its own error. Keep the FIFO alive.
       })
       .then(async () => {
         if (epoch !== this.getChatQueueEpoch(chatId) || this.stopped) return
+        await notice
         const remaining = Math.max(
           0,
           (this.queuedTaskCounts.get(chatId) ?? 1) - 1,
@@ -1295,6 +1325,7 @@ export class TelegramAgentBridge {
 
         if (position > 0) {
           await this.sendMessage(chatId, `Starting queued task: ${label}`)
+            .catch(() => {})
         }
         await run()
       })
@@ -1361,7 +1392,7 @@ export class TelegramAgentBridge {
           for (const update of updates) {
             this.offset = Math.max(this.offset, update.update_id + 1)
             if (update.callback_query) {
-              await this.handleCallbackQuery(update.callback_query)
+              this.handleCallbackQueryInBackground(update.callback_query)
             }
             if (update.message) {
               this.handleMessageUpdateInBackground(update)
@@ -1386,6 +1417,19 @@ export class TelegramAgentBridge {
   private handleMessageUpdateInBackground(update: TelegramUpdate): void {
     void this.handleUpdate(update).catch(error => {
       void this.reportMessageUpdateError(update, error).catch(() => {})
+    })
+  }
+
+  private handleCallbackQueryInBackground(query: TelegramCallbackQuery): void {
+    void this.handleCallbackQuery(query).catch(error => {
+      const chatId = query.message?.chat?.id === undefined
+        ? 'system'
+        : String(query.message.chat.id)
+      void recordTelegramError(
+        chatId,
+        'telegram-callback',
+        summarizeTelegramError(error),
+      )
     })
   }
 
@@ -1604,7 +1648,11 @@ export class TelegramAgentBridge {
     }
 
     if (commandText === '/review') {
-      await this.handleReviewCommand(chatId)
+      await this.enqueueChatTask(
+        chatId,
+        'architecture review',
+        () => this.handleReviewCommand(chatId),
+      )
       return
     }
 
@@ -1789,6 +1837,33 @@ export class TelegramAgentBridge {
     text: string,
     modeOverride?: TelegramResearchMode,
   ): Promise<void> {
+    const taskId = randomUUID().replace(/-/g, '')
+    const controller = new AbortController()
+    this.activeTasks.set(chatId, { taskId, controller, messageId: 0 })
+    try {
+      await this.executeQueuedTextMessage(
+        chatId,
+        message,
+        text,
+        modeOverride,
+        taskId,
+        controller,
+      )
+    } finally {
+      if (this.activeTasks.get(chatId)?.taskId === taskId) {
+        this.activeTasks.delete(chatId)
+      }
+    }
+  }
+
+  private async executeQueuedTextMessage(
+    chatId: string,
+    message: TelegramMessage,
+    text: string,
+    modeOverride: TelegramResearchMode | undefined,
+    taskId: string,
+    controller: AbortController,
+  ): Promise<void> {
     const activeMode = modeOverride ?? await this.getChatMode(chatId)
     const effectiveText = applyTelegramResearchMode(activeMode, text)
     const attachments = await this.collectAttachments(message, chatId)
@@ -1814,12 +1889,12 @@ export class TelegramAgentBridge {
       ...(replyContext
         ? {
             replyToMessageId: replyContext.messageId,
-            replyToText: replyContext.text?.slice(0, 1000),
+            replyToText: replyContext.text,
             replyToAttachmentSummary: replyContext.attachmentSummary,
             replyToUsername: replyContext.from?.username,
           }
         : {}),
-    })
+    }).catch(() => {})
 
     const bridgeHandled = await this.tryHandleCronStyleFeedback(
       chatId,
@@ -1834,10 +1909,12 @@ export class TelegramAgentBridge {
         chatId,
         ...(sessionId ? { sessionId } : {}),
         exitCode: 0,
-      })
+      }).catch(() => {})
       await this.sendMessage(chatId, bridgeHandled)
       return
     }
+
+    if (controller.signal.aborted) return
 
     const progressStartedAt = Date.now()
     const progressPhase = 'Running Telegram request'
@@ -1854,20 +1931,31 @@ export class TelegramAgentBridge {
       }),
       reply_markup: {
         inline_keyboard: [[
-          { text: 'Stop', callback_data: `stop:${chatId}` },
+          { text: 'Stop', callback_data: `stop:${chatId}:${taskId}` },
         ]],
       },
     })
     const thinkingMessageId = (thinkingMsg as any)?.message_id ?? (thinkingMsg as any)?.result?.message_id ?? 0
 
-    const controller = new AbortController()
+    const active = this.activeTasks.get(chatId)
+    if (!active || active.taskId !== taskId || controller.signal.aborted) {
+      if (thinkingMessageId) {
+        await this.callTelegram('editMessageText', {
+          chat_id: chatId,
+          message_id: thinkingMessageId,
+          text: 'Task stopped by user.',
+          reply_markup: { inline_keyboard: [] },
+        }).catch(() => {})
+      }
+      return
+    }
     const progress = new TelegramTaskProgress({
       messageId: thinkingMessageId,
       phase: progressPhase,
       startedAt: progressStartedAt,
       providerProfile,
       stopTyping: this.startTypingLoop(chatId, controller.signal),
-      edit: async progressText => {
+      edit: async (progressText, showStop) => {
         if (!thinkingMessageId) return
         await this.callTelegram('editMessageText', {
           chat_id: chatId,
@@ -1875,15 +1963,16 @@ export class TelegramAgentBridge {
           text: progressText,
           disable_web_page_preview: true,
           reply_markup: {
-            inline_keyboard: [[
-              { text: 'Stop', callback_data: `stop:${chatId}` },
-            ]],
+            inline_keyboard: showStop
+              ? [[{ text: 'Stop', callback_data: `stop:${chatId}:${taskId}` }]]
+              : [],
           },
         })
       },
     })
     progress.setPhase('Running Telegram request')
-    this.activeTasks.set(chatId, { controller, messageId: thinkingMessageId, progress })
+    active.messageId = thinkingMessageId
+    active.progress = progress
 
     const prompt = await buildTelegramAgentPromptWithMemory({
       chatId,
@@ -1916,7 +2005,7 @@ export class TelegramAgentBridge {
         toolPolicy,
       })
     } finally {
-      if (this.activeTasks.get(chatId)?.controller === controller) {
+      if (this.activeTasks.get(chatId)?.taskId === taskId) {
         this.activeTasks.delete(chatId)
       }
     }
@@ -1934,6 +2023,7 @@ export class TelegramAgentBridge {
 
     // Log the agent response to chat log
     await appendChatLog(buildAgentChatLogOutput(result, chatId, sessionId))
+      .catch(() => {})
 
     if (result.exitCode !== 0) {
       await recordTelegramError(chatId, 'agent-run', result)
@@ -2017,7 +2107,7 @@ export class TelegramAgentBridge {
       // Log the transcribed voice message to chat log
       await appendChatLog({
         direction: 'in',
-        text: `[${candidate.type} transcribed] ${effectiveAgentText.slice(0, 500)}`,
+        text: `[${candidate.type} transcribed] ${effectiveAgentText}`,
         chatId,
         ...(sessionId ? { sessionId } : {}),
         messageId: message.message_id,
@@ -2025,7 +2115,7 @@ export class TelegramAgentBridge {
         ...(replyContext
           ? {
               replyToMessageId: replyContext.messageId,
-              replyToText: replyContext.text?.slice(0, 1000),
+              replyToText: replyContext.text,
               replyToAttachmentSummary: replyContext.attachmentSummary,
               replyToUsername: replyContext.from?.username,
             }
@@ -3489,7 +3579,11 @@ export class TelegramAgentBridge {
     }
 
     if (['now', 'run', 'once'].includes(action)) {
-      await this.handleEvolveNowCommand(chatId)
+      await this.enqueueChatTask(
+        chatId,
+        'evolution cycle',
+        () => this.handleEvolveNowCommand(chatId),
+      )
       return
     }
 
@@ -3552,9 +3646,30 @@ export class TelegramAgentBridge {
       return
     }
 
+    const taskId = randomUUID().replace(/-/g, '')
     const controller = new AbortController()
-    const progress = await this.createTaskProgress(chatId, phase, controller.signal)
-    this.activeTasks.set(chatId, { controller, messageId: progress.messageId, progress })
+    this.activeTasks.set(chatId, { taskId, controller, messageId: 0 })
+    let progress: TelegramTaskProgress
+    try {
+      progress = await this.createTaskProgress(
+        chatId,
+        phase,
+        taskId,
+        controller.signal,
+      )
+    } catch (error) {
+      if (this.activeTasks.get(chatId)?.taskId === taskId) {
+        this.activeTasks.delete(chatId)
+      }
+      throw error
+    }
+    const active = this.activeTasks.get(chatId)
+    if (!active || active.taskId !== taskId || controller.signal.aborted) {
+      progress.dispose()
+      return
+    }
+    active.messageId = progress.messageId
+    active.progress = progress
     try {
       const result = await runEvolutionCycle(this.config, type, {
         signal: controller.signal,
@@ -3562,7 +3677,7 @@ export class TelegramAgentBridge {
         onStdout: chunk => progress.observeStdout(chunk),
         allowWhenDisabled,
       })
-      if (this.activeTasks.get(chatId)?.controller === controller) {
+      if (this.activeTasks.get(chatId)?.taskId === taskId) {
         this.activeTasks.delete(chatId)
       }
       if (controller.signal.aborted) {
@@ -3579,14 +3694,14 @@ export class TelegramAgentBridge {
       await progress.finish('completed', 'Evolution cycle finished.')
       await this.sendEvolutionResult(chatId, result)
     } catch (error) {
-      if (this.activeTasks.get(chatId)?.controller === controller) {
+      if (this.activeTasks.get(chatId)?.taskId === taskId) {
         this.activeTasks.delete(chatId)
       }
       await progress.finish('failed', 'Evolution cycle failed.')
       await recordTelegramError(chatId, 'evolution-cycle', error)
       await this.sendMessage(chatId, error instanceof Error ? error.message : String(error))
     } finally {
-      if (this.activeTasks.get(chatId)?.controller === controller) {
+      if (this.activeTasks.get(chatId)?.taskId === taskId) {
         this.activeTasks.delete(chatId)
       }
     }
@@ -3841,10 +3956,17 @@ export class TelegramAgentBridge {
 
     const data = query.data || ''
 
-    // stop:<chatId>
-    if (data.startsWith('stop:')) {
-      if (data.slice(5) !== chatId) return
-      await this.stopTask(chatId)
+    const stopAction = data.match(/^stop:([^:]+):([a-f0-9]{32})$/iu)
+    if (stopAction) {
+      if (stopAction[1] !== chatId) return
+      await this.stopTask(chatId, stopAction[2])
+      return
+    }
+    if (data === `stop:${chatId}`) {
+      await this.sendMessage(
+        chatId,
+        'This Stop button belongs to an older completed task. Use /stop for the current task.',
+      )
       return
     }
 
@@ -4187,12 +4309,20 @@ export class TelegramAgentBridge {
       }
 
       if (data === 'runtime:evolve') {
-        await this.handleEvolveNowCommand(chatId)
+        await this.enqueueChatTask(
+          chatId,
+          'evolution cycle',
+          () => this.handleEvolveNowCommand(chatId),
+        )
         return
       }
 
       if (data === 'runtime:review') {
-        await this.handleReviewCommand(chatId)
+        await this.enqueueChatTask(
+          chatId,
+          'architecture review',
+          () => this.handleReviewCommand(chatId),
+        )
         return
       }
 
@@ -4522,9 +4652,16 @@ export class TelegramAgentBridge {
     await this.stopTask(chatId)
   }
 
-  private async stopTask(chatId: string): Promise<void> {
+  private async stopTask(chatId: string, expectedTaskId?: string): Promise<void> {
     const task = this.activeTasks.get(chatId)
     this.invalidateChatQueue(chatId)
+    if (task && expectedTaskId && task.taskId !== expectedTaskId) {
+      await this.sendMessage(
+        chatId,
+        'That task has already finished. The current task was not stopped.',
+      )
+      return
+    }
     if (!task) {
       await this.sendMessage(chatId, 'No active task to stop. Queued tasks for this chat were cleared.')
       return
@@ -4604,13 +4741,34 @@ export class TelegramAgentBridge {
     trimmedGoal: string,
   ): Promise<void> {
     const taskId = `task_${randomUUID().replace(/-/g, '')}`
+    const activeTaskId = randomUUID().replace(/-/g, '')
     const controller = new AbortController()
-    const progress = await this.createTaskProgress(
-      chatId,
-      `Running infinite task ${taskId}`,
-      controller.signal,
-    )
-    this.activeTasks.set(chatId, { controller, messageId: progress.messageId, progress })
+    this.activeTasks.set(chatId, {
+      taskId: activeTaskId,
+      controller,
+      messageId: 0,
+    })
+    let progress: TelegramTaskProgress
+    try {
+      progress = await this.createTaskProgress(
+        chatId,
+        `Running infinite task ${taskId}`,
+        activeTaskId,
+        controller.signal,
+      )
+    } catch (error) {
+      if (this.activeTasks.get(chatId)?.taskId === activeTaskId) {
+        this.activeTasks.delete(chatId)
+      }
+      throw error
+    }
+    const active = this.activeTasks.get(chatId)
+    if (!active || active.taskId !== activeTaskId || controller.signal.aborted) {
+      progress.dispose()
+      return
+    }
+    active.messageId = progress.messageId
+    active.progress = progress
     const consciousness = getAgentGatewayRuntime()?.consciousness
     consciousness?.pause()
     consciousness?.injectObservation(`Infinite task started: ${trimmedGoal.slice(0, 300)}`)
@@ -4658,7 +4816,7 @@ export class TelegramAgentBridge {
       consciousness?.injectObservation(`Infinite task stopped: ${trimmedGoal.slice(0, 300)}`)
       consciousness?.resume()
       progress.dispose()
-      if (this.activeTasks.get(chatId)?.controller === controller) {
+      if (this.activeTasks.get(chatId)?.taskId === activeTaskId) {
         this.activeTasks.delete(chatId)
       }
     }
@@ -4923,17 +5081,62 @@ export class TelegramAgentBridge {
     const token = this.config.telegram.botToken
     if (!token) throw new Error('Telegram bot token is not configured')
 
-    const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(getTelegramFetchTimeoutMs(method)),
-    })
-    const data = await response.json() as TelegramApiResponse<T>
-    if (!response.ok || !data.ok) {
-      throw new Error(data.description || `Telegram ${method} failed`)
+    const maxAttempts = getTelegramRequestAttempts()
+    let lastError: unknown
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await fetch(
+          `https://api.telegram.org/bot${token}/${method}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(getTelegramFetchTimeoutMs(method)),
+          },
+        )
+        let data: TelegramApiResponse<T> & {
+          parameters?: { retry_after?: number }
+        }
+        try {
+          data = await response.json() as typeof data
+        } catch (error) {
+          if (response.status < 500) throw error
+          lastError = new Error(`Telegram ${method} returned HTTP ${response.status}`)
+          if (attempt >= maxAttempts) throw lastError
+          await sleep(getTelegramRetryDelayMs(attempt))
+          continue
+        }
+        if (response.ok && data.ok) {
+          return data.result as T
+        }
+        const error = new Error(
+          data.description || `Telegram ${method} failed`,
+        )
+        lastError = error
+        if (
+          attempt >= maxAttempts
+          || (response.status !== 429 && response.status < 500)
+        ) {
+          throw error
+        }
+        await sleep(getTelegramRetryDelayMs(
+          attempt,
+          data.parameters?.retry_after,
+        ))
+      } catch (error) {
+        lastError = error
+        if (
+          attempt >= maxAttempts
+          || !isTransientTelegramRequestError(error)
+        ) {
+          throw error
+        }
+        await sleep(getTelegramRetryDelayMs(attempt))
+      }
     }
-    return data.result as T
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Telegram ${method} failed`)
   }
 
   private isMessageAllowed(message: TelegramMessage, chatId: string): boolean {
@@ -4978,6 +5181,37 @@ function getTelegramFetchTimeoutMs(method: string): number {
     1_000,
     120_000,
   )
+}
+
+function getTelegramRequestAttempts(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return boundedPositiveInteger(
+    env.OPENCLAUDE_TELEGRAM_HTTP_ATTEMPTS,
+    3,
+    1,
+    5,
+  )
+}
+
+export function getTelegramRetryDelayMs(
+  attempt: number,
+  retryAfterSeconds?: number,
+): number {
+  if (
+    retryAfterSeconds !== undefined
+    && Number.isFinite(retryAfterSeconds)
+    && retryAfterSeconds >= 0
+  ) {
+    return Math.min(60_000, Math.ceil(retryAfterSeconds * 1_000))
+  }
+  return Math.min(10_000, 500 * (2 ** Math.max(0, attempt - 1)))
+}
+
+function isTransientTelegramRequestError(error: unknown): boolean {
+  if (!(error instanceof Error)) return true
+  return /(?:abort|econn|enotfound|etimedout|fetch failed|network|socket|timeout)/iu
+    .test(`${error.name} ${error.message}`)
 }
 
 function getTelegramShutdownTimeoutMs(): number {
@@ -5426,7 +5660,7 @@ function buildAgentChatLogOutput(
     direction: 'out',
     text: stripMemoryDirectiveLines(
       result.exitCode === 0 ? result.text : result.text || failureSummary,
-    ).slice(0, 2000),
+    ),
     chatId,
     ...(sessionId ? { sessionId } : {}),
     exitCode: result.exitCode,
@@ -6776,7 +7010,7 @@ function maskSecretForTelegram(value: string | undefined): string {
   return `${value.slice(0, 4)}...${value.slice(-4)}`
 }
 
-type TelegramErrorLogEntry = {
+export type TelegramErrorLogEntry = {
   ts: string
   chatId: string
   source: string
@@ -6802,7 +7036,9 @@ async function recordTelegramError(
       exitCode: typeof result.exitCode === 'number' ? result.exitCode : undefined,
       timedOut: typeof result.timedOut === 'boolean' ? result.timedOut : undefined,
       message: summarizeTelegramError(error),
-      activity: Array.isArray(result.activity) ? result.activity.slice(-10) : undefined,
+      activity: Array.isArray(result.activity)
+        ? result.activity.slice(-10).map(event => redactAgentText(String(event)))
+        : undefined,
     }
     const dir = join(getAgentGatewayStateDir(), 'logs')
     await mkdir(dir, { recursive: true })
@@ -6825,16 +7061,38 @@ async function loadTelegramErrorLog(
       join(getAgentGatewayStateDir(), 'logs', 'telegram-errors.jsonl'),
       'utf8',
     )
-    return raw
-      .split(/\r?\n/u)
-      .filter(Boolean)
-      .map(line => JSON.parse(line) as TelegramErrorLogEntry)
-      .filter(entry => entry.chatId === chatId)
-      .slice(-limit)
-      .reverse()
+    return parseTelegramErrorLog(raw, chatId, limit)
   } catch {
     return []
   }
+}
+
+export function parseTelegramErrorLog(
+  raw: string,
+  chatId: string,
+  limit: number,
+): TelegramErrorLogEntry[] {
+  const entries: TelegramErrorLogEntry[] = []
+  for (const line of raw.split(/\r?\n/u)) {
+    if (!line.trim()) continue
+    try {
+      const entry = JSON.parse(line) as TelegramErrorLogEntry
+      if (entry.chatId !== chatId) continue
+      entries.push({
+        ...entry,
+        message: redactAgentText(String(entry.message || '')),
+        activity: Array.isArray(entry.activity)
+          ? entry.activity.map(event => redactAgentText(String(event)))
+          : undefined,
+      })
+    } catch {
+      // Keep valid entries usable when one append was interrupted.
+    }
+  }
+  const boundedLimit = Math.max(0, Math.trunc(limit))
+  return boundedLimit === 0
+    ? []
+    : entries.slice(-boundedLimit).reverse()
 }
 
 function summarizeTelegramError(error: unknown): string {
@@ -6856,12 +7114,12 @@ function formatTelegramErrorLogEntry(entry: TelegramErrorLogEntry): string {
     entry.failureKind ? `kind: ${entry.failureKind}` : undefined,
     typeof entry.exitCode === 'number' ? `exit: ${entry.exitCode}` : undefined,
     entry.timedOut ? 'timed out: yes' : undefined,
-    entry.message,
+    redactAgentText(entry.message),
   ].filter(Boolean) as string[]
   if (entry.activity?.length) {
     lines.push('activity:')
     for (const event of entry.activity.slice(-5)) {
-      lines.push(`- ${event}`)
+      lines.push(`- ${redactAgentText(event)}`)
     }
   }
   return lines.join('\n').slice(0, 1800)
@@ -6885,7 +7143,7 @@ class TelegramTaskProgress {
   private readonly startedAt: number
   private readonly providerProfile?: TelegramProgressProviderProfile
   private readonly events: TelegramProgressEvent[] = []
-  private readonly edit: (text: string) => Promise<void>
+  private readonly edit: (text: string, showStop: boolean) => Promise<void>
   private readonly stopTyping: () => void
   private phase: string
   private status: TelegramProgressStatus = 'running'
@@ -6899,7 +7157,7 @@ class TelegramTaskProgress {
     phase: string
     startedAt?: number
     providerProfile?: TelegramProgressProviderProfile
-    edit: (text: string) => Promise<void>
+    edit: (text: string, showStop: boolean) => Promise<void>
     stopTyping: () => void
   }) {
     this.messageId = input.messageId
@@ -6975,13 +7233,16 @@ class TelegramTaskProgress {
     if (this.disposed || !this.messageId) return
     this.lastEditAt = Date.now()
     try {
-      await this.edit(formatTelegramProgressText({
-        status: this.status,
-        phase: this.phase,
-        startedAt: this.startedAt,
-        events: this.events,
-        providerProfile: this.providerProfile,
-      }))
+      await this.edit(
+        formatTelegramProgressText({
+          status: this.status,
+          phase: this.phase,
+          startedAt: this.startedAt,
+          events: this.events,
+          providerProfile: this.providerProfile,
+        }),
+        this.status === 'running',
+      )
     } catch {
       // Telegram rejects unchanged/rate-limited edits; progress is best-effort.
     }
@@ -7370,7 +7631,27 @@ function formatTelegramConversationTranscriptEntry(entry: RecentChatLogEntry): s
   const status = direction === 'out' && Number(entry.exitCode ?? 0) !== 0
     ? ' failed'
     : ''
-  return `${role}${messageId}${username}${status}:\n${text}`
+  const replyToMessageId = entry.replyToMessageId === undefined
+    ? ''
+    : String(entry.replyToMessageId)
+  const replyToText = String(entry.replyToText ?? '').trim()
+  const replyToAttachmentSummary = String(
+    entry.replyToAttachmentSummary ?? '',
+  ).trim()
+  const replyContext = replyToMessageId || replyToText || replyToAttachmentSummary
+    ? [
+        `Reply target${replyToMessageId ? ` #${replyToMessageId}` : ''}:`,
+        replyToText || '(attachment-only message)',
+        replyToAttachmentSummary
+          ? `Attachments: ${replyToAttachmentSummary}`
+          : '',
+      ].filter(Boolean).join('\n')
+    : ''
+  return [
+    `${role}${messageId}${username}${status}:`,
+    replyContext,
+    text,
+  ].filter(Boolean).join('\n')
 }
 
 function formatTelegramSender(from: TelegramMessage['from']): string {

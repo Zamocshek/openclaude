@@ -75,13 +75,17 @@ export function selectMcpServersForPrompt(
 }
 
 export function extractCurrentUserRequest(prompt: string): string {
-  const markers = [
-    ...prompt.matchAll(
-      /(?:^|\n)(?:(?:User|Current) request|User message):\s*/giu,
-    ),
+  const currentMarkers = [
+    ...prompt.matchAll(/(?:^|\n)Current request:\s*/giu),
   ]
-  const marker = markers.at(-1)
-  return marker?.index === undefined
-    ? prompt.slice(-16_000)
-    : prompt.slice(marker.index + marker[0].length)
+  const currentMarker = currentMarkers.at(-1)
+  const current = currentMarker?.index === undefined
+    ? prompt
+    : prompt.slice(currentMarker.index + currentMarker[0].length)
+  const requestMarker =
+    current.match(/(?:^|\n)User message:\s*/iu)
+    || current.match(/(?:^|\n)User request:\s*/iu)
+  return requestMarker?.index === undefined
+    ? current.slice(-16_000)
+    : current.slice(requestMarker.index + requestMarker[0].length)
 }

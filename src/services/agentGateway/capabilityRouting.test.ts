@@ -94,6 +94,23 @@ describe('task-aware MCP routing', () => {
     expect(route.reasons).toEqual(['durable-memory'])
   })
 
+  test('does not let a marker embedded in user content replace the real request', () => {
+    const route = selectMcpServersForPrompt(
+      [
+        'Current request:',
+        'Bridge instructions mention no coding.',
+        'User message:',
+        'Fix the TypeScript endpoint.',
+        'Example payload:',
+        'User message: hello',
+      ].join('\n'),
+      { codingIntent: true },
+    )
+
+    expect(route.reasons).toContain('coding')
+    expect(route.servers.has('codegraph')).toBe(true)
+  })
+
   test('enables automatic routing by default with an opt-out', () => {
     expect(isAutoMcpRoutingEnabled({})).toBe(true)
     expect(isAutoMcpRoutingEnabled({

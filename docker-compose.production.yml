@@ -9,13 +9,13 @@ services:
       OPENCLAUDE_AGENT_INFERENCE_API_KEY: "${OPENCLAUDE_AGENT_INFERENCE_API_KEY:?set OPENCLAUDE_AGENT_INFERENCE_API_KEY}"
     volumes: !override
       - type: bind
-        source: "${OPENCLAUDE_HOST_CONFIG_DIR:-${USERPROFILE}/.openclaude}"
+        source: "${OPENCLAUDE_HOST_CONFIG_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude}"
         target: /home/node/.openclaude
       - type: bind
-        source: "${OPENCLAUDE_HOST_CODEX_DIR:-${USERPROFILE}/.codex}"
+        source: "${OPENCLAUDE_HOST_CODEX_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.codex}"
         target: /run/codex
       - type: bind
-        source: .
+        source: "${OPENCLAUDE_HOST_WORKSPACE_DIR:-.}"
         target: /workspace
     labels:
       org.opencontainers.image.revision: "${OPENCLAUDE_RELEASE_REVISION:-unknown}"
@@ -24,10 +24,20 @@ services:
   openclaude-worker-1:
     image: "openclaude-agent:${OPENCLAUDE_RELEASE_TAG:-production}"
     privileged: false
+    volumes: !override
+      - openclaude-worker-1-config:/home/node/.openclaude
+      - type: bind
+        source: "${OPENCLAUDE_HOST_WORKSPACE_DIR:-.}"
+        target: /workspace
 
   openclaude-worker-2:
     image: "openclaude-agent:${OPENCLAUDE_RELEASE_TAG:-production}"
     privileged: false
+    volumes: !override
+      - openclaude-worker-2-config:/home/node/.openclaude
+      - type: bind
+        source: "${OPENCLAUDE_HOST_WORKSPACE_DIR:-.}"
+        target: /workspace
 
   omniroute:
     environment:

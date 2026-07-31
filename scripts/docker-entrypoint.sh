@@ -116,11 +116,9 @@ run_base_mcp_preflight() {
     return
   fi
 
-  project_root="${OPENCLAUDE_AGENT_RUNNER_CWD:-/workspace}"
-  preflight_script="$project_root/scripts/release/check-base-mcp.cjs"
-  if [ ! -f "$preflight_script" ]; then
-    preflight_script="/app/scripts/release/check-base-mcp.cjs"
-  fi
+  # Run the image-owned copy so bare production workspaces do not need their
+  # own node_modules just to resolve the MCP SDK imported by the preflight.
+  preflight_script="/app/scripts/release/check-base-mcp.cjs"
 
   printf '[mcp] checking required base servers\n' >&2
   if node "$preflight_script"; then

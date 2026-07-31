@@ -34,6 +34,12 @@ export type CronJob = {
   lastStatus?: 'ok' | 'error'
   lastError?: string
   lastOutputFile?: string
+  pendingDelivery?: {
+    content: string
+    attempts: number
+    nextAttemptAt: string
+    lastError: string
+  }
 }
 
 type JobsFile = {
@@ -49,6 +55,7 @@ export type CronSchedulerHandle = {
 export type CronDelivery = (content: string, job: CronJob) => Promise<void>
 
 const SILENT_MARKER = '[SILENT]'
+const cronDateTimeFormatters = new Map<string, Intl.DateTimeFormat>()
 
 function jobsPath(): string {
   return join(getAgentGatewayStateDir(), 'cron-jobs.json')
@@ -416,16 +423,21 @@ function getCronDateParts(
   }
 
   try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      second: '2-digit',
-      minute: '2-digit',
-      hour: '2-digit',
-      hourCycle: 'h23',
-      day: '2-digit',
-      month: '2-digit',
-      weekday: 'short',
-    }).formatToParts(date)
+    let formatter = cronDateTimeFormatters.get(timezone)
+    if (!formatter) {
+      formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        second: '2-digit',
+        minute: '2-digit',
+        hour: '2-digit',
+        hourCycle: 'h23',
+        day: '2-digit',
+        month: '2-digit',
+        weekday: 'short',
+      })
+      cronDateTimeFormatters.set(timezone, formatter)
+    }
+    const parts = formatter.formatToParts(date)
     const value = (type: string): string =>
       parts.find(part => part.type === type)?.value || '0'
     return {
@@ -508,10 +520,27 @@ async function markJobRun(
 
   const job = jobs[index]!
   const now = new Date().toISOString()
-  const completed = (job.repeat?.completed ?? 0) + 1
+  const completed = (job.repeat?.completed ?? 0) + (result.success ? 1 : 0)
   const times = job.repeat?.times
 
-  if (times !== undefined && completed >= times) {
+  if (!result.success) {
+    jobs[index] = {
+      ...job,
+      enabled: true,
+      state: 'scheduled',
+      repeat: {
+        times,
+        completed: job.repeat?.completed ?? 0,
+      },
+      nextRunAt: new Date(
+        Date.now() + getCronRetryDelayMs(1),
+      ).toISOString(),
+      lastRunAt: now,
+      lastStatus: 'error',
+      lastError: result.error,
+      lastOutputFile: result.outputFile,
+    }
+  } else if (times !== undefined && completed >= times) {
     jobs[index] = {
       ...job,
       enabled: false,
@@ -522,6 +551,7 @@ async function markJobRun(
       lastStatus: result.success ? 'ok' : 'error',
       lastError: result.success ? undefined : result.error,
       lastOutputFile: result.outputFile,
+      pendingDelivery: undefined,
     }
   } else {
     jobs[index] = {
@@ -532,10 +562,60 @@ async function markJobRun(
       lastStatus: result.success ? 'ok' : 'error',
       lastError: result.success ? undefined : result.error,
       lastOutputFile: result.outputFile,
+      pendingDelivery: undefined,
     }
   }
 
   await saveCronJobs(jobs)
+}
+
+async function markJobDeliveryFailure(
+  jobId: string,
+  content: string,
+  error: string,
+  outputFile: string | undefined,
+  previousAttempts = 0,
+): Promise<void> {
+  const jobs = await loadCronJobs()
+  const index = jobs.findIndex(job => job.id === jobId)
+  if (index === -1) return
+  const job = jobs[index]!
+  const attempts = previousAttempts + 1
+  const nextAttemptAt = new Date(
+    Date.now() + getCronRetryDelayMs(attempts),
+  ).toISOString()
+  jobs[index] = {
+    ...job,
+    enabled: true,
+    state: 'scheduled',
+    nextRunAt: nextAttemptAt,
+    lastRunAt: new Date().toISOString(),
+    lastStatus: 'error',
+    lastError: error,
+    lastOutputFile: outputFile,
+    pendingDelivery: {
+      content,
+      attempts,
+      nextAttemptAt,
+      lastError: error,
+    },
+  }
+  await saveCronJobs(jobs)
+}
+
+export function getCronRetryDelayMs(attempt: number): number {
+  const baseSeconds = Math.max(
+    10,
+    Math.min(
+      3_600,
+      Number.parseInt(process.env.OPENCLAUDE_CRON_RETRY_SECONDS || '60', 10)
+      || 60,
+    ),
+  )
+  return Math.min(
+    30 * 60_000,
+    baseSeconds * 1_000 * (2 ** Math.max(0, attempt - 1)),
+  )
 }
 
 async function saveJobOutput(job: CronJob, output: string): Promise<string> {
@@ -552,6 +632,26 @@ async function runCronJob(
   config: AgentGatewayConfig,
   deliver?: CronDelivery,
 ): Promise<void> {
+  if (job.pendingDelivery) {
+    try {
+      if (!deliver) throw new Error('Telegram delivery is unavailable')
+      await deliver(job.pendingDelivery.content, job)
+      await markJobRun(job.id, {
+        success: true,
+        outputFile: job.lastOutputFile,
+      })
+    } catch (error) {
+      await markJobDeliveryFailure(
+        job.id,
+        job.pendingDelivery.content,
+        error instanceof Error ? error.message : String(error),
+        job.lastOutputFile,
+        job.pendingDelivery.attempts,
+      )
+    }
+    return
+  }
+
   const mode = job.mode ?? 'agent'
   const prompt = mode === 'message'
     ? job.prompt
@@ -599,15 +699,26 @@ async function runCronJob(
     (job.deliver === 'telegram' || job.deliver === 'origin')
   ) {
     try {
-      await deliver?.(finalText, job)
+      if (!deliver) throw new Error('Telegram delivery is unavailable')
+      await deliver(finalText, job)
     } catch (error) {
       deliveryError = error instanceof Error ? error.message : String(error)
     }
   }
 
+  if (deliveryError) {
+    await markJobDeliveryFailure(
+      job.id,
+      finalText,
+      deliveryError,
+      outputFile,
+    )
+    return
+  }
+
   await markJobRun(job.id, {
-    success: success && !deliveryError,
-    error: !success ? finalText : deliveryError,
+    success,
+    error: !success ? finalText : undefined,
     outputFile,
   })
 }

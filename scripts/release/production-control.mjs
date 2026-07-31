@@ -175,9 +175,38 @@ function assertReleaseTreeClean() {
   }
 }
 
-function releaseEnv(baseEnv, identity) {
+export function buildComposeEnv(baseEnv) {
+  const hostHome = resolve(String(baseEnv.OPENCLAUDE_HOST_HOME || homedir()))
   return {
     ...baseEnv,
+    OPENCLAUDE_COMPOSE_PROJECT_NAME:
+      baseEnv.OPENCLAUDE_COMPOSE_PROJECT_NAME || 'openclaude-agent',
+    OPENCLAUDE_HOST_HOME: hostHome,
+    OPENCLAUDE_HOST_WORKSPACE_DIR: resolve(
+      ROOT,
+      String(baseEnv.OPENCLAUDE_HOST_WORKSPACE_DIR || ROOT),
+    ),
+    OPENCLAUDE_HOST_CONFIG_DIR: resolve(
+      ROOT,
+      String(baseEnv.OPENCLAUDE_HOST_CONFIG_DIR || join(hostHome, '.openclaude')),
+    ),
+    OPENCLAUDE_HOST_CODEX_DIR: resolve(
+      ROOT,
+      String(baseEnv.OPENCLAUDE_HOST_CODEX_DIR || join(hostHome, '.codex')),
+    ),
+    OPENCLAUDE_HOST_TELEGRAM_MCP_DIR: resolve(
+      ROOT,
+      String(
+        baseEnv.OPENCLAUDE_HOST_TELEGRAM_MCP_DIR
+        || join(hostHome, '.openclaude', 'telegram-mcp'),
+      ),
+    ),
+  }
+}
+
+function releaseEnv(baseEnv, identity) {
+  return {
+    ...buildComposeEnv(baseEnv),
     OPENCLAUDE_RELEASE_REVISION: identity.revision,
     OPENCLAUDE_RELEASE_TAG: identity.tag,
   }
@@ -278,7 +307,7 @@ export function getOpenRagVerificationUrls(env) {
 }
 
 export async function verify(options = {}) {
-  const env = readProductionEnv()
+  const env = buildComposeEnv(readProductionEnv())
   const apiPort = env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'
   const omniPort = env.OMNIROUTE_HOST_PORT || '20128'
   const webUiPort = env.OPENCLAUDE_OPEN_WEBUI_HOST_PORT || '8080'
@@ -342,7 +371,7 @@ export async function verify(options = {}) {
   const composeArgs = options.composeArgs || COMPOSE_ARGS
   const published = docker(
     [...composeArgs, 'ps', '--format', 'json'],
-    { capture: true },
+    { capture: true, env },
   )
   for (const line of published.split(/\r?\n/u).filter(Boolean)) {
     const row = JSON.parse(line)
@@ -362,8 +391,9 @@ export async function verify(options = {}) {
       '-T',
       'openclaude-agent',
       'node',
-      'scripts/release/check-base-mcp.cjs',
+      '/app/scripts/release/check-base-mcp.cjs',
     ],
+    { env },
   )
   console.log('Production verification passed')
 }
@@ -373,7 +403,7 @@ function sha256(path) {
 }
 
 export function backup() {
-  const env = readProductionEnv()
+  const env = buildComposeEnv(readProductionEnv())
   const timestamp = new Date().toISOString().replace(/[:.]/gu, '-')
   const destination = join(BACKUPS_DIR, timestamp)
   mkdirSync(destination, { recursive: true, mode: 0o700 })
@@ -440,7 +470,23 @@ export async function deploy() {
   docker([...COMPOSE_ARGS, 'build', ...PRODUCTION_BUILD_SERVICES], {
     env: nextEnv,
   })
-  docker([...COMPOSE_ARGS, 'up', '-d', '--remove-orphans', '--wait'], {
+  const waitTimeout = Math.max(
+    60,
+    Math.min(
+      1_800,
+      Number.parseInt(env.OPENCLAUDE_COMPOSE_WAIT_TIMEOUT_SECONDS || '600', 10)
+      || 600,
+    ),
+  )
+  docker([
+    ...COMPOSE_ARGS,
+    'up',
+    '-d',
+    '--remove-orphans',
+    '--wait',
+    '--wait-timeout',
+    String(waitTimeout),
+  ], {
     env: nextEnv,
   })
   await verify()

@@ -1385,6 +1385,21 @@ export class AgentApiServer {
     response.on('close', () => {
       if (!completed) abortController.abort()
     })
+    const created = Math.floor(Date.now() / 1000)
+    const writeChunk = (delta: Record<string, unknown>) => {
+      response.write(
+        `data: ${JSON.stringify({
+          id,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [{ index: 0, delta, finish_reason: null }],
+        })}\n\n`,
+      )
+    }
+    let fullText = ''
+    const frontmatterStripper = createFrontmatterStreamStripper()
+    const memoryDirectiveStripper = createMemoryDirectiveStreamStripper()
     const queued = this.enqueueAgentExecution(
       `chat.completions.stream:${options.sessionId || id}`,
       async () => {
@@ -1407,18 +1422,18 @@ export class AgentApiServer {
             })
           : { runnerPrompt: '', history: [] }
         if (options.sessionId && options.currentUser) {
-          recordApiChatLog({
+          await appendChatLog({
             direction: 'in',
             source: 'api',
             endpoint: 'chat.completions',
             sessionId: options.sessionId,
             text: options.currentUser.content,
-          })
+          }).catch(() => {})
         }
         const runner = hasCodingMutationIntent(run.runnerPrompt)
           ? runOpenClaudeAgentWithCompletionGate
           : runOpenClaudeAgent
-        return runner({
+        const result = await runner({
           prompt: run.runnerPrompt,
           config: this.config,
           signal: abortController.signal,
@@ -1432,7 +1447,31 @@ export class AgentApiServer {
               writeChunk({ content: visibleChunk })
             }
           },
-        }).then(result => ({ ...result, history: run.history }))
+        })
+        if (result.exitCode !== 0 || response.destroyed) {
+          return { ...result, history: run.history, responseText: '' }
+        }
+
+        const responseText = await this.prepareAgentResponseText(
+          fullText || result.text,
+          'api',
+        )
+        await appendChatLog({
+          direction: 'out',
+          source: 'api',
+          endpoint: 'chat.completions',
+          sessionId: options.sessionId,
+          text: responseText,
+        }).catch(() => {})
+        if (options.sessionId && options.currentUser) {
+          this.storeChatSession(options.sessionId, [
+            ...run.history,
+            options.currentUser,
+            { role: 'assistant', content: responseText },
+          ])
+        }
+        await this.onAgentResponse?.(responseText, 'api')
+        return { ...result, history: run.history, responseText }
       },
     )
 
@@ -1440,35 +1479,22 @@ export class AgentApiServer {
       ...this.corsHeaders(),
       ...(options.sessionId ? { 'X-Hermes-Session-Id': options.sessionId } : {}),
       ...this.apiQueueHeaders(queued),
-      'Content-Type': 'text/event-stream',
+      'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     })
-
-    const created = Math.floor(Date.now() / 1000)
-    const writeChunk = (delta: Record<string, unknown>) => {
-      response.write(
-        `data: ${JSON.stringify({
-          id,
-          object: 'chat.completion.chunk',
-          created,
-          model,
-          choices: [{ index: 0, delta, finish_reason: null }],
-        })}\n\n`,
-      )
-    }
 
     if (queued.position > 1) {
       response.write(`: queued position ${queued.position}\n\n`)
     }
     writeChunk({ role: 'assistant' })
-    let fullText = ''
-    const frontmatterStripper = createFrontmatterStreamStripper()
-    const memoryDirectiveStripper = createMemoryDirectiveStreamStripper()
     const keepalive = setInterval(() => {
       if (!response.destroyed) response.write(': agent working\n\n')
     }, 15_000)
-    let result: AgentRunResult & { history?: ConversationMessage[] }
+    let result: AgentRunResult & {
+      history?: ConversationMessage[]
+      responseText?: string
+    }
     try {
       result = await queued.promise
     } finally {
@@ -1477,14 +1503,24 @@ export class AgentApiServer {
 
     if (response.destroyed) return
 
-    if (result.exitCode !== 0 && !fullText) {
-      writeChunk({ content: formatAgentFailureForApi(result) })
+    if (result.exitCode !== 0) {
+      response.write(
+        `event: error\ndata: ${JSON.stringify(
+          openAiError(formatAgentFailureForApi(result), 'server_error'),
+        )}\n\n`,
+      )
+      response.write('data: [DONE]\n\n')
+      completed = true
+      response.end()
+      return
     }
 
-    const trailingVisibleChunk = [
-      memoryDirectiveStripper.push(frontmatterStripper.flush()),
-      memoryDirectiveStripper.flush(),
-    ].join('')
+    const trailingVisibleChunk = fullText
+      ? [
+          memoryDirectiveStripper.push(frontmatterStripper.flush()),
+          memoryDirectiveStripper.flush(),
+        ].join('')
+      : result.responseText || result.text
     if (trailingVisibleChunk && !response.destroyed) {
       writeChunk({ content: trailingVisibleChunk })
     }
@@ -1503,27 +1539,6 @@ export class AgentApiServer {
     response.write('data: [DONE]\n\n')
     completed = true
     response.end()
-    const normalizedFullText = await this.prepareAgentResponseText(fullText, 'api')
-    if (normalizedFullText) {
-      recordApiChatLog({
-        direction: 'out',
-        source: 'api',
-        endpoint: 'chat.completions',
-        sessionId: options.sessionId,
-        text: normalizedFullText,
-      })
-      if (options.sessionId && options.currentUser) {
-        const history = 'history' in result && Array.isArray(result.history)
-          ? result.history
-          : []
-        this.storeChatSession(options.sessionId, [
-          ...history,
-          options.currentUser,
-          { role: 'assistant', content: normalizedFullText },
-        ])
-      }
-      await this.onAgentResponse?.(normalizedFullText, 'api')
-    }
   }
 
   private async handleResponses(
@@ -1531,6 +1546,17 @@ export class AgentApiServer {
     response: ServerResponse,
   ): Promise<void> {
     const body = await this.readJson(request)
+    if (body.stream === true) {
+      this.writeJson(
+        response,
+        400,
+        openAiError(
+          'Streaming is not supported by /v1/responses; use /v1/chat/completions or stream=false.',
+          'invalid_request_error',
+        ),
+      )
+      return
+    }
     const input = body.input
     if (input === undefined || input === null) {
       this.writeJson(response, 400, openAiError("Missing 'input'"))
@@ -1816,7 +1842,7 @@ export class AgentApiServer {
 
     response.writeHead(200, {
       ...this.corsHeaders(),
-      'Content-Type': 'text/event-stream',
+      'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     })
@@ -2442,7 +2468,7 @@ export class AgentApiServer {
   ): void {
     response.writeHead(status, {
       ...this.corsHeaders(),
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json; charset=utf-8',
       'X-Content-Type-Options': 'nosniff',
       ...headers,
     })
@@ -2473,7 +2499,7 @@ export class AgentApiServer {
     let ended = false
     response.writeHead(200, {
       ...this.corsHeaders(),
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json; charset=utf-8',
       'X-Content-Type-Options': 'nosniff',
       'X-Hermes-Keepalive-Json': '1',
       ...headers,
@@ -3003,6 +3029,9 @@ function createFrontmatterStreamStripper(): FrontmatterStreamStripper {
       }
 
       buffer += chunk
+      if ('---'.startsWith(buffer)) {
+        return ''
+      }
       if (!buffer.startsWith('---')) {
         decided = true
         const visible = buffer

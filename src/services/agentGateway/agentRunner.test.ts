@@ -20,6 +20,7 @@ import {
   extractStreamJsonAssistantText,
   extractStreamJsonResult,
   getAgentStallTimeoutMs,
+  hasStreamJsonToolUse,
   hasCodingMutationIntent,
   hasCodingTaskIntent,
   injectGatewayVisionEvidence,
@@ -534,6 +535,23 @@ describe('agent gateway prompt builder', () => {
       text: '',
       error: '',
     })
+
+    const intermediate = {
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: 'I will inspect the file.' },
+          { type: 'tool_use', name: 'Read', input: { path: 'file.ts' } },
+        ],
+      },
+    }
+    expect(extractStreamJsonAssistantText(intermediate))
+      .toBe('I will inspect the file.')
+    expect(hasStreamJsonToolUse(intermediate)).toBe(true)
+    expect(hasStreamJsonToolUse({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Final answer.' }] },
+    })).toBe(false)
   })
 
   test('links stream-json tool result errors to the original tool call', () => {
@@ -715,6 +733,7 @@ describe('agent gateway prompt builder', () => {
       `-----BEGIN PRIVATE KEY-----\n${secrets[4]}\n-----END PRIVATE KEY-----`,
       `AUTHORIZATION=Bearer ${secrets[5]}`,
       `SSHPASS='${secrets[6]}' sshpass -e ssh root@example.test`,
+      `https://api.telegram.org/bot1234567890:AA${'a'.repeat(24)}/sendMessage`,
     ].join('\n'))
 
     for (const secret of secrets) expect(redacted).not.toContain(secret)
@@ -723,6 +742,7 @@ describe('agent gateway prompt builder', () => {
     expect(redacted).toContain('DEPLOY_PASSWORD=[REDACTED]')
     expect(redacted).toContain('https://[REDACTED]@example.test/path')
     expect(redacted).toContain('[REDACTED_PRIVATE_KEY]')
+    expect(redacted).toContain('bot[REDACTED_TELEGRAM_TOKEN]/sendMessage')
   })
 
   test('does not misclassify tool 404 or forbidden errors as provider state', () => {
@@ -844,6 +864,98 @@ describe('agent gateway prompt builder', () => {
     } finally {
       if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
       else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+    }
+  })
+
+  test('preserves UTF-8 when a stream-json line is split inside a code point', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-utf8-cli-'))
+    const fakeCli = join(cwd, 'fake-utf8-cli.cjs')
+    await writeFile(fakeCli, [
+      'const line = Buffer.from(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Привет" }) + "\\n")',
+      'const marker = line.indexOf(Buffer.from("П"))',
+      'process.stdout.write(line.subarray(0, marker + 1))',
+      'setTimeout(() => process.stdout.end(line.subarray(marker + 1)), 10)',
+    ].join('\n'))
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND =
+      `"${process.execPath}" "${fakeCli}"`
+    try {
+      const config = getDefaultAgentGatewayConfig()
+      config.subagents.enabled = false
+      const result = await runOpenClaudeAgent({
+        prompt: 'Reply in Russian.',
+        config,
+        cwd,
+        streamEvents: true,
+        suppressObservers: true,
+      })
+
+      expect(result.exitCode).toBe(0)
+      expect(result.text).toBe('Привет')
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects a stream-json run that exits without a terminal result', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-truncated-cli-'))
+    const fakeCli = join(cwd, 'fake-truncated-cli.cjs')
+    await writeFile(
+      fakeCli,
+      'console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "unfinished" }] } }))\n',
+    )
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND =
+      `"${process.execPath}" "${fakeCli}"`
+    try {
+      const config = getDefaultAgentGatewayConfig()
+      config.subagents.enabled = false
+      const result = await runOpenClaudeAgent({
+        prompt: 'Complete the task.',
+        config,
+        cwd,
+        streamEvents: true,
+        suppressObservers: true,
+      })
+
+      expect(result.exitCode).toBe(1)
+      expect(result.text).toBe('')
+      expect(result.stderr).toContain('without a terminal result')
+      expect(result.failureKind).toBe('execution')
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('contains stdin EPIPE failures inside the current agent run', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-epipe-cli-'))
+    const fakeCli = join(cwd, 'fake-epipe-cli.cjs')
+    await writeFile(fakeCli, 'process.stdin.destroy(); process.exit(0)\n')
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND =
+      `"${process.execPath}" "${fakeCli}"`
+    try {
+      const config = getDefaultAgentGatewayConfig()
+      config.runner.timeoutMs = 5_000
+      config.subagents.enabled = false
+      const result = await runOpenClaudeAgent({
+        prompt: 'x'.repeat(8 * 1024 * 1024),
+        config,
+        cwd,
+        streamEvents: true,
+        suppressObservers: true,
+      })
+
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toMatch(/terminal result|send the prompt/iu)
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+      await rm(cwd, { recursive: true, force: true })
     }
   })
 
