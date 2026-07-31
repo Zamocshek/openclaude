@@ -8009,7 +8009,9 @@ function formatAttachmentForPrompt(attachment: TelegramAttachment): string {
   if (attachment.duration) lines.push(`  duration_seconds: ${attachment.duration}`)
   if (attachment.localPath) {
     lines.push(`  local_path: ${attachment.localPath}`)
-    lines.push(`  prompt_reference: @${attachment.localPath}`)
+    if (!isVisualTelegramAttachment(attachment)) {
+      lines.push(`  prompt_reference: @${attachment.localPath}`)
+    }
   }
   if (attachment.transcriptPath) lines.push(`  transcript_path: ${attachment.transcriptPath}`)
   if (attachment.encodingRepair) {

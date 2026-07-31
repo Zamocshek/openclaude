@@ -103,10 +103,9 @@ export async function materializeVisionInput(
           [
             VISION_INPUT_MARKER,
             `local_path: ${saved.path}`,
-            `prompt_reference: @${saved.path}`,
             `mime_type: ${saved.mimeType}`,
             `size_bytes: ${saved.size}`,
-            'Inspect the actual image. If the current model is not multimodal, delegate it to gateway-vision and use the returned visual evidence.',
+            'Do not attach or read this image in the parent model. Delegate the exact local_path to gateway-vision and use the returned visual evidence.',
           ].join('\n'),
         )
       } catch (error) {
