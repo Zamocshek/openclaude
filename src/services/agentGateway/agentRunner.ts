@@ -1,6 +1,13 @@
-import { existsSync, readFileSync } from 'fs'
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+} from 'fs'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
-import { dirname, resolve } from 'path'
+import { randomUUID } from 'crypto'
+import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import stripAnsi from 'strip-ansi'
 import { isInBundledMode } from '../../utils/bundledMode.js'
@@ -19,6 +26,12 @@ import {
   prepareGatewaySubagentRuntime,
   type GatewaySubagentRuntime,
 } from './subagentRuntime.js'
+import {
+  extractCurrentUserRequest,
+  isAutoMcpRoutingEnabled,
+  selectMcpServersForPrompt,
+} from './capabilityRouting.js'
+import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
 
 export { redactAgentText } from './redaction.js'
 
@@ -39,6 +52,7 @@ export type AgentRunResult = {
   stderr: string
   exitCode: number
   timedOut: boolean
+  stalled?: boolean
   durationMs?: number
   costUsd?: number
   activity?: string[]
@@ -55,6 +69,8 @@ export type AgentRunArtifact = {
 
 export type AgentRunFailureKind =
   | 'timeout'
+  | 'transient_network'
+  | 'quality_gate'
   | 'rate_limit'
   | 'auth'
   | 'model_not_found'
@@ -112,6 +128,7 @@ const CAPABILITY_ROUTING_APPEND_SYSTEM_PROMPT = [
 ].join(' ')
 const CODING_EXECUTION_APPEND_SYSTEM_PROMPT = [
   'For every request that creates, changes, reviews, debugs, deploys, or verifies code, invoke the code Skill before editing.',
+  'Treat the user request as an acceptance contract: identify the observable acceptance criteria and the narrowest baseline check before changing files.',
   'Read repository instructions, git status, and each existing target file before Edit or Write; the file tools enforce this precondition.',
   'Before every individual Edit, re-read that exact target file immediately beforehand and copy a unique old_string from the current output. Never edit from a summary, a stale read, or an assumed date/value.',
   'For repeated fields in logs, diaries, and trackers, include the nearest unique heading or adjacent lines in old_string. Do not use replace_all unless every matching occurrence must change; after a rejected Edit, re-read before one corrected retry.',
@@ -120,7 +137,7 @@ const CODING_EXECUTION_APPEND_SYSTEM_PROMPT = [
   'avoid shell redirection, cat, echo, heredocs, or generated patch scripts for source/config edits unless no native file editing tool is exposed; when a shell fallback is the only route, verify the exact file contents immediately afterward.',
   'Keep a TodoWrite checklist for multi-step work, preserve unrelated dirty changes, and continue from the existing diff after recovery instead of starting over.',
   'Correct tool schemas and preconditions after an error, never repeat an identical failing call, and verify the resulting state after any fallback.',
-  'Do not report completion until relevant tests or runtime checks pass and the final diff has been inspected.',
+  'Reserve a final evaluator phase after the last file mutation: run the relevant tests or runtime checks, inspect the final diff, and only then report completion. A check run before the last edit does not count.',
   'Never put credentials in command arguments, source, logs, or progress output; use environment variables, protected configuration, or stdin.',
 ].join(' ')
 const OPENRAG_APPEND_SYSTEM_PROMPT = [
@@ -213,9 +230,12 @@ const IGNORABLE_STDERR_PATTERNS = [
 const IGNORABLE_POST_SUCCESS_STDERR_PATTERNS = [
 ]
 const DEFAULT_FIRST_OUTPUT_PROGRESS_MS = 60_000
+const DEFAULT_AGENT_STALL_TIMEOUT_MS = 15 * 60_000
+const STALE_RUN_MCP_CONFIG_MS = 24 * 60 * 60_000
 const MAX_AGENT_TEXT_BUFFER_CHARS = 4 * 1024 * 1024
 const MAX_AGENT_STDERR_BUFFER_CHARS = 1024 * 1024
 const MAX_TRACKED_TOOL_USES = 512
+const MAX_AGENT_ACTIVITY_EVENTS = 240
 const PENTEST_ALLOWED_TOOLS = [
   'Skill',
   'TodoWrite',
@@ -231,6 +251,8 @@ const PENTEST_ALLOWED_TOOLS = [
 ]
 const CODING_TASK_INTENT_RE =
   /(?:\b(?:code|coding|bug|debug|implement|implementation|refactor|repository|script|unit test|integration test|typecheck|lint|build|deploy|function|class|endpoint)\b|\.(?:c|cc|cpp|cs|css|go|html|java|js|jsx|json|kt|php|py|rb|rs|sh|sql|swift|ts|tsx|vue|yaml|yml)\b|(?:код|баг|дебаг|рефактор|программ|скрипт|репозитор|тест|сборк|депло|функц|класс|эндпоинт|апи))/iu
+const CODING_MUTATION_INTENT_RE =
+  /(?:\b(?:add|change|create|delete|edit|fix|implement|migrate|modify|move|patch|refactor|remove|rename|replace|rewrite|scaffold|update|upgrade|write)\b|(?:добав|измен|созда|удал|исправ|реализ|мигрир|перемест|патч|рефактор|переимен|замен|перепиш|обнов|напиш|почин|доработ))/iu
 
 export function addAgentRunObserver(observer: AgentRunObserver): () => void {
   agentRunObservers.add(observer)
@@ -298,20 +320,27 @@ export function buildAgentArgs(
     prompt?: string
     subagentRuntime?: GatewaySubagentRuntime
     toolPolicy?: 'default' | 'pentest'
+    preparedMcpConfigPath?: string
+    preparedMcpServerNames?: Set<string>
+    toolsEnabledOverride?: boolean
   } = {},
 ): string[] {
   const pentestPolicy = options.toolPolicy === 'pentest'
-  const toolsEnabled = pentestPolicy || !config.runner.disableTools
+  const toolsEnabled = options.toolsEnabledOverride
+    ?? (pentestPolicy || !config.runner.disableTools)
   const mcpProjectRoot = config.runner.cwd || process.cwd()
-  const mcpConfigPath = prepareGatewayControlMcpConfig(
-    mcpProjectRoot,
-    pentestPolicy
-      ? 'pentest'
-      : toolsEnabled
-        ? 'default'
-        : 'disabled',
-  )
-  const enabledMcpServers = readPreparedMcpServerNames(mcpConfigPath)
+  const mcpProfile = pentestPolicy
+    ? 'pentest'
+    : toolsEnabled
+      ? 'default'
+      : 'disabled'
+  const mcpConfigPath = options.preparedMcpConfigPath
+    ?? prepareGatewayControlMcpConfig(
+      mcpProjectRoot,
+      mcpProfile,
+    )
+  const enabledMcpServers = options.preparedMcpServerNames
+    ?? readPreparedMcpServerNames(mcpConfigPath)
   const args = [
     '--print',
     ...(options.streamEvents ? ['--verbose'] : []),
@@ -504,9 +533,13 @@ function hasLifeRpgSystem(config: AgentGatewayConfig): boolean {
 }
 
 export function hasCodingTaskIntent(prompt: string): boolean {
-  const currentRequest = prompt.match(/User request:\s*([\s\S]*)$/iu)?.[1]
-    || prompt.slice(-12_000)
+  return CODING_TASK_INTENT_RE.test(extractCurrentUserRequest(prompt))
+}
+
+export function hasCodingMutationIntent(prompt: string): boolean {
+  const currentRequest = extractCurrentUserRequest(prompt)
   return CODING_TASK_INTENT_RE.test(currentRequest)
+    && CODING_MUTATION_INTENT_RE.test(currentRequest)
 }
 
 function parseDotEnvFile(cwd: string): NodeJS.ProcessEnv {
@@ -714,6 +747,89 @@ function appendTailText(current: string, chunk: string, maxChars: number): strin
     : combined.slice(combined.length - maxChars)
 }
 
+function prepareAgentRunMcpConfig(input: {
+  config: AgentGatewayConfig
+  prompt: string
+  projectRoot: string
+  toolPolicy?: 'default' | 'pentest'
+}): {
+  path?: string
+  serverNames: Set<string>
+  toolsEnabled: boolean
+  autoRouted: boolean
+  cleanup: () => void
+} {
+  const pentestPolicy = input.toolPolicy === 'pentest'
+  const toolsEnabled = pentestPolicy || !input.config.runner.disableTools
+  const profile = pentestPolicy
+    ? 'pentest'
+    : toolsEnabled
+      ? 'default'
+      : 'disabled'
+  const autoRoute = (
+    profile === 'default'
+    && isAutoMcpRoutingEnabled()
+  )
+    ? selectMcpServersForPrompt(input.prompt, {
+        codingIntent: hasCodingTaskIntent(input.prompt),
+        eligibleServerNames: readPreparedMcpServerNames(
+          resolveEffectiveMcpConfigPath(input.projectRoot),
+        ),
+      })
+    : undefined
+  const runMcpDir = join(
+    getAgentGatewayStateDir(),
+    'run-mcp',
+  )
+  pruneStaleRunMcpConfigs(runMcpDir)
+  const outputPath = join(
+    runMcpDir,
+    `${randomUUID()}.mcp.json`,
+  )
+  const path = prepareGatewayControlMcpConfig(
+    input.projectRoot,
+    profile,
+    {
+      ...(autoRoute?.mode === 'auto'
+        ? { includeServers: autoRoute.servers }
+        : {}),
+      outputPath,
+    },
+  )
+  return {
+    path,
+    serverNames: readPreparedMcpServerNames(path),
+    toolsEnabled,
+    autoRouted: Boolean(autoRoute),
+    cleanup: () => {
+      if (!path || path !== outputPath) return
+      try {
+        unlinkSync(path)
+      } catch {
+        // The process may already have cleaned an ephemeral run config.
+      }
+    },
+  }
+}
+
+function pruneStaleRunMcpConfigs(directory: string): void {
+  if (!existsSync(directory)) return
+  const cutoff = Date.now() - STALE_RUN_MCP_CONFIG_MS
+  try {
+    for (const name of readdirSync(directory)) {
+      if (!name.endsWith('.mcp.json')) continue
+      const path = join(directory, name)
+      try {
+        if (statSync(path).mtimeMs < cutoff) unlinkSync(path)
+      } catch {
+        // Another run or process may have removed the stale file.
+      }
+    }
+  } catch {
+    // A cleanup failure must not prevent the requested agent run.
+  }
+}
+
 export function runOpenClaudeAgent(
   options: AgentRunOptions,
 ): Promise<AgentRunResult> {
@@ -726,6 +842,12 @@ export function runOpenClaudeAgent(
       options.config,
       childEnv,
     )
+    const runMcpConfig = prepareAgentRunMcpConfig({
+      config: options.config,
+      prompt: options.prompt,
+      projectRoot: cwd,
+      toolPolicy: options.toolPolicy,
+    })
     const args = [
       ...invocation.args,
       ...buildAgentArgs(options.config, {
@@ -733,6 +855,9 @@ export function runOpenClaudeAgent(
         prompt: options.prompt,
         subagentRuntime,
         toolPolicy: options.toolPolicy,
+        preparedMcpConfigPath: runMcpConfig.path,
+        preparedMcpServerNames: runMcpConfig.serverNames,
+        toolsEnabledOverride: runMcpConfig.toolsEnabled,
       }),
     ]
     const observerContext: AgentRunObserverContext = {
@@ -747,9 +872,11 @@ export function runOpenClaudeAgent(
     let streamResultCostUsd: number | undefined
     let stderr = ''
     let timedOut = false
+    let stalled = false
     let settled = false
     let timeoutTimer: ReturnType<typeof setTimeout>
     let firstOutputTimer: ReturnType<typeof setTimeout> | undefined
+    let stallTimer: ReturnType<typeof setTimeout> | undefined
     let forceResolveTimer: ReturnType<typeof setTimeout> | undefined
     const activity: string[] = []
     const seenProgress = new Set<string>()
@@ -765,19 +892,57 @@ export function runOpenClaudeAgent(
       const truncated = normalized.length > 220
         ? `${normalized.slice(0, 217)}...`
         : normalized
-      if (seenProgress.has(truncated)) return
-      seenProgress.add(truncated)
+      const preserveRepeatedToolResult = /^tool result (?:success|error)\b/iu.test(truncated)
+      if (!preserveRepeatedToolResult && seenProgress.has(truncated)) return
+      if (!preserveRepeatedToolResult) seenProgress.add(truncated)
       activity.push(truncated)
-      while (activity.length > 60) {
+      while (activity.length > MAX_AGENT_ACTIVITY_EVENTS) {
         const removed = activity.shift()
         if (removed && !activity.includes(removed)) seenProgress.delete(removed)
       }
       options.onProgress?.(truncated)
     }
     const firstOutputProgressMs = getFirstOutputProgressMs(options.config.runner.timeoutMs)
+    const stallTimeoutMs = options.streamEvents
+      ? getAgentStallTimeoutMs(options.config.runner.timeoutMs)
+      : 0
     const killOnFirstOutputTimeout = shouldKillOnFirstOutputTimeout()
     recordProgress('runtime starting')
     if (autoCodeWorkflow) recordProgress('skill auto-route: code')
+    if (runMcpConfig.autoRouted) {
+      recordProgress(
+        `mcp auto-route: ${
+          runMcpConfig.serverNames.size > 0
+            ? [...runMcpConfig.serverNames].sort().join(', ')
+            : 'none'
+        }`,
+      )
+    }
+
+    const resetStallWatchdog = () => {
+      if (stallTimer) clearTimeout(stallTimer)
+      if (
+        settled
+        || stallTimeoutMs <= 0
+        || stallTimeoutMs >= options.config.runner.timeoutMs
+      ) {
+        return
+      }
+      stallTimer = setTimeout(() => {
+        stalled = true
+        timedOut = true
+        recordProgress(
+          `stall watchdog: no process output for ${formatDuration(stallTimeoutMs)}`,
+        )
+        stderr = appendTailText(
+          stderr,
+          `\nAgent made no observable progress for ${formatDuration(stallTimeoutMs)}. The stalled child process was stopped so recovery can choose another route.`,
+          MAX_AGENT_STDERR_BUFFER_CHARS,
+        )
+        killProcessTree(proc)
+        forceResolveTimer = setTimeout(() => finish(1), 1000)
+      }, stallTimeoutMs)
+    }
 
     const handleStreamLine = (line: string) => {
       const trimmed = line.trim()
@@ -827,7 +992,7 @@ export function runOpenClaudeAgent(
 
     if (!options.suppressObservers) {
       for (const observer of agentRunObservers) {
-        void observer.onStart?.(observerContext)
+        invokeObserverSafely(() => observer.onStart?.(observerContext))
       }
     }
 
@@ -844,6 +1009,7 @@ export function runOpenClaudeAgent(
       settled = true
       clearTimeout(timeoutTimer)
       if (firstOutputTimer) clearTimeout(firstOutputTimer)
+      if (stallTimer) clearTimeout(stallTimer)
       if (forceResolveTimer) clearTimeout(forceResolveTimer)
       options.signal?.removeEventListener('abort', onAbort)
       if (options.streamEvents && streamLineBuffer.trim()) {
@@ -855,7 +1021,11 @@ export function runOpenClaudeAgent(
         stripAnsi(streamResultText || textStdout).trim(),
       )
       const timeoutMessage = timedOut
-        ? buildTimeoutMessage(options.config.runner.timeoutMs, activity)
+        ? buildTimeoutMessage(
+            options.config.runner.timeoutMs,
+            activity,
+            stalled ? stallTimeoutMs : undefined,
+          )
         : ''
       const normalizedStderr = redactAgentText(
         stripAnsi([stderr, streamResultError, timeoutMessage].filter(Boolean).join('\n')).trim(),
@@ -904,6 +1074,7 @@ export function runOpenClaudeAgent(
         stderr: effectiveStderr,
         exitCode: normalizedExitCode,
         timedOut,
+        ...(stalled ? { stalled: true } : {}),
         durationMs,
         ...(streamResultCostUsd === undefined
           ? {}
@@ -919,12 +1090,13 @@ export function runOpenClaudeAgent(
             }
           : {}),
       }
+      runMcpConfig.cleanup()
+      subagentRuntime?.cleanup()
       if (!options.suppressObservers) {
         for (const observer of agentRunObservers) {
-          void observer.onFinish?.(observerContext, result)
+          invokeObserverSafely(() => observer.onFinish?.(observerContext, result))
         }
       }
-      subagentRuntime?.cleanup()
       resolve(result)
     }
 
@@ -935,6 +1107,7 @@ export function runOpenClaudeAgent(
     options.signal?.addEventListener('abort', onAbort, { once: true })
 
     proc.stdout.on('data', data => {
+      resetStallWatchdog()
       if (firstOutputTimer) {
         clearTimeout(firstOutputTimer)
         firstOutputTimer = undefined
@@ -966,6 +1139,7 @@ export function runOpenClaudeAgent(
       killProcessTree(proc)
       forceResolveTimer = setTimeout(() => finish(1), 1000)
     }, options.config.runner.timeoutMs)
+    resetStallWatchdog()
     if (firstOutputProgressMs > 0 && firstOutputProgressMs < options.config.runner.timeoutMs) {
       const scheduleFirstOutputProgress = (elapsedMs: number) => {
         firstOutputTimer = setTimeout(() => {
@@ -991,6 +1165,14 @@ export function runOpenClaudeAgent(
   })
 }
 
+function invokeObserverSafely(callback: () => void | Promise<void> | undefined): void {
+  try {
+    void Promise.resolve(callback()).catch(() => {})
+  } catch {
+    // Observability hooks must not affect process lifecycle or cleanup.
+  }
+}
+
 function getFirstOutputProgressMs(totalTimeoutMs: number): number {
   const raw = process.env.OPENCLAUDE_AGENT_RUNNER_FIRST_OUTPUT_TIMEOUT_MS
   if (raw !== undefined) {
@@ -998,6 +1180,20 @@ function getFirstOutputProgressMs(totalTimeoutMs: number): number {
     if (Number.isFinite(parsed) && parsed >= 0) return Math.min(parsed, totalTimeoutMs)
   }
   return Math.min(DEFAULT_FIRST_OUTPUT_PROGRESS_MS, totalTimeoutMs)
+}
+
+export function getAgentStallTimeoutMs(
+  totalTimeoutMs: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS
+  if (raw !== undefined && raw.trim() !== '') {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.min(parsed, totalTimeoutMs)
+    }
+  }
+  return Math.min(DEFAULT_AGENT_STALL_TIMEOUT_MS, totalTimeoutMs)
 }
 
 function shouldKillOnFirstOutputTimeout(): boolean {
@@ -1103,6 +1299,8 @@ export function summarizeStreamJsonProgress(
       const id = typeof record.tool_use_id === 'string' ? record.tool_use_id : ''
       if (!record.is_error) {
         const toolName = id ? context?.toolNameById?.get(id) : ''
+        const tool = id ? context?.toolUseById.get(id) : ''
+        if (tool) events.push(`tool result success (${tool})`)
         if (toolName && context?.artifacts) {
           for (const artifact of extractCamofoxScreenshotArtifacts(
             toolName,
@@ -1282,8 +1480,16 @@ export function extractStreamJsonResult(
   }
 }
 
-function buildTimeoutMessage(timeoutMs: number, activity: string[]): string {
-  const lines = [`Agent timed out after ${formatDuration(timeoutMs)}.`]
+function buildTimeoutMessage(
+  timeoutMs: number,
+  activity: string[],
+  stallTimeoutMs?: number,
+): string {
+  const lines = [
+    stallTimeoutMs === undefined
+      ? `Agent timed out after ${formatDuration(timeoutMs)}.`
+      : `Agent stalled with no process output for ${formatDuration(stallTimeoutMs)}.`,
+  ]
   const lastActivity = activity.slice(-8)
   if (lastActivity.length > 0) {
     lines.push('Last activity:')
@@ -1348,6 +1554,8 @@ export function classifyAgentRunFailure(input: {
     kind = 'model_not_found'
   } else if (/(error_max_turns|maximum number of turns|reached max turns)/i.test(combined)) {
     kind = 'max_turns'
+  } else if (/(fetch failed|econnreset|etimedout|eai_again|enotfound|socket hang up|connection reset|network error|temporarily unavailable|\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout)/i.test(providerCombined)) {
+    kind = 'transient_network'
   } else if (hasToolActivity || /(no such tool available|tool_use_error)/i.test(providerCombined)) {
     kind = 'tool_error'
   } else if (/(400|invalid_request|bad request|invalid request)/i.test(providerCombined)) {
@@ -1380,6 +1588,8 @@ function buildFailureDiagnostic(
 
   if (kind === 'rate_limit') {
     lines.push('Provider rate limit or quota retry detected. Try another model/provider, wait for quota reset, or reduce max turns/tool fanout.')
+  } else if (kind === 'transient_network') {
+    lines.push('A transient provider/network failure interrupted the run. Retry with bounded backoff and preserve completed workspace changes.')
   } else if (kind === 'auth') {
     lines.push('Provider authentication/billing rejection detected. Check API key, account credits, base URL, and model access.')
   } else if (kind === 'model_not_found') {

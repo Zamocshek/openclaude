@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -9,6 +17,8 @@ import {
   classifyAgentRunFailure,
   extractCamofoxScreenshotArtifacts,
   extractStreamJsonResult,
+  getAgentStallTimeoutMs,
+  hasCodingMutationIntent,
   hasCodingTaskIntent,
   isIgnorablePostSuccessStderr,
   normalizeMessageContent,
@@ -45,6 +55,19 @@ describe('agent gateway prompt builder', () => {
         { type: 'image_url', image_url: { url: 'ignored' } },
       ]),
     ).toBe('first\nsecond')
+  })
+
+  test('detects coding and mutation intent from the current API request only', () => {
+    const prompt = [
+      'Old dialogue: fix the TypeScript implementation.',
+      'Current request:',
+      'Объясни результат без изменений.',
+    ].join('\n')
+    expect(hasCodingTaskIntent(prompt)).toBe(false)
+    expect(hasCodingMutationIntent(prompt)).toBe(false)
+    expect(hasCodingMutationIntent(
+      'Current request:\nИсправь TypeScript endpoint',
+    )).toBe(true)
   })
 
   test('keeps prompts out of CLI argv so variadic options cannot swallow them', () => {
@@ -347,7 +370,8 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('If Write is absent, never call it')
     expect(systemPrompt).toContain('avoid shell redirection')
     expect(systemPrompt).toContain('Keep a TodoWrite checklist')
-    expect(systemPrompt).toContain('relevant tests or runtime checks pass')
+    expect(systemPrompt).toContain('final evaluator phase after the last file mutation')
+    expect(systemPrompt).toContain('A check run before the last edit does not count')
     expect(systemPrompt).toContain('Never put credentials in command arguments')
     expect(systemPrompt).toContain('# Production Coding Workflow')
     expect(systemPrompt).toContain('## 4. Definition of done')
@@ -444,6 +468,39 @@ describe('agent gateway prompt builder', () => {
 
     expect(toolEvents).toContain('mcp_mcp_router_PowerShell: "Get-Process RustDesk"')
     expect(resultEvents).toContain('tool result error (mcp_mcp_router_PowerShell: "Get-Process RustDesk"): window not found')
+  })
+
+  test('records successful tool results with the original call summary', () => {
+    const context: StreamProgressContext = {
+      toolUseById: new Map(),
+      toolNameById: new Map(),
+    }
+    summarizeStreamJsonProgress({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_success',
+          name: 'Bash',
+          input: { command: 'bun test agentRunner.test.ts' },
+        }],
+      },
+    }, context)
+    const events = summarizeStreamJsonProgress({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_success',
+          is_error: false,
+          content: '201 pass',
+        }],
+      },
+    }, context)
+
+    expect(events).toEqual([
+      'tool result success (Bash: "bun test agentRunner.test.ts")',
+    ])
   })
 
   test('bounds remembered tool calls for multi-hour stream sessions', () => {
@@ -748,6 +805,185 @@ describe('agent gateway prompt builder', () => {
       timedOut: true,
       activity: ['result: success'],
     })).toBe(false)
+  })
+
+  test('classifies provider fetch failures as transient network state', () => {
+    const failure = classifyAgentRunFailure({
+      text: '',
+      stderr: 'API Error: fetch failed\ncause: ECONNRESET',
+      exitCode: 1,
+      timedOut: false,
+      activity: ['api retry: attempt 3/3 status network'],
+    })
+
+    expect(failure.kind).toBe('transient_network')
+    expect(failure.diagnostic).toContain('bounded backoff')
+  })
+
+  test('keeps a terminal provider fetch failure above recovered tool history', () => {
+    const failure = classifyAgentRunFailure({
+      text: '',
+      stderr: 'API Error: fetch failed\ncause: ECONNRESET',
+      exitCode: 1,
+      timedOut: false,
+      activity: [
+        'tool result error (Edit: "src/index.ts"): stale old_string',
+        'tool result success (Edit: "src/index.ts")',
+      ],
+    })
+
+    expect(failure.kind).toBe('transient_network')
+  })
+
+  test('bounds the idle watchdog by the total runner timeout', () => {
+    expect(getAgentStallTimeoutMs(60_000, {
+      OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS: '5000',
+    })).toBe(5_000)
+    expect(getAgentStallTimeoutMs(2_000, {
+      OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS: '5000',
+    })).toBe(2_000)
+    expect(getAgentStallTimeoutMs(60_000, {
+      OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS: '0',
+    })).toBe(0)
+  })
+
+  test('stops a child whose stderr heartbeat does not represent agent progress', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-stall-cli-'))
+    const fakeCli = join(cwd, 'fake-stall-cli.cjs')
+    await writeFile(
+      fakeCli,
+      'setInterval(() => process.stderr.write("heartbeat\\n"), 20)\n',
+    )
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    const previousStall = process.env.OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS
+    const previousState = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND =
+      `"${process.execPath}" "${fakeCli}"`
+    process.env.OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS = '100'
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = join(cwd, 'state')
+    try {
+      const config = getDefaultAgentGatewayConfig()
+      config.runner.timeoutMs = 5_000
+      config.subagents.enabled = false
+      const result = await runOpenClaudeAgent({
+        prompt: 'Wait forever.',
+        config,
+        cwd,
+        streamEvents: true,
+        suppressObservers: true,
+      })
+
+      expect(result.exitCode).toBe(1)
+      expect(result.timedOut).toBe(true)
+      expect(result.stalled).toBe(true)
+      expect(result.failureKind).toBe('timeout')
+      expect(result.diagnostic).toContain('stall watchdog')
+      expect(result.durationMs).toBeLessThan(3_000)
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+      if (previousStall === undefined) delete process.env.OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS
+      else process.env.OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS = previousStall
+      if (previousState === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousState
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('isolates task-scoped MCP profiles across concurrent runs and cleans them', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-routed-mcp-'))
+    const fakeCli = join(cwd, 'fake-mcp-cli.cjs')
+    await writeFile(fakeCli, [
+      'const fs = require("fs")',
+      'const index = process.argv.indexOf("--mcp-config")',
+      'const configPath = process.argv[index + 1]',
+      'const config = JSON.parse(fs.readFileSync(configPath, "utf8"))',
+      'const result = JSON.stringify({ configPath, servers: Object.keys(config.mcpServers || {}).sort() })',
+      'console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result }))',
+    ].join('\n'))
+    await writeFile(join(cwd, '.mcp.json'), JSON.stringify({
+      mcpServers: {
+        hindsight: { command: 'node', args: ['hindsight.mjs'] },
+        codegraph: { command: 'node', args: ['codegraph.mjs'] },
+        context7: { command: 'node', args: ['context7.mjs'] },
+        camofox: { command: 'node', args: ['camofox.mjs'] },
+        searxng: { command: 'node', args: ['searxng.mjs'] },
+      },
+    }))
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    const previousState = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    const stateDir = join(cwd, 'state')
+    const staleConfig = join(stateDir, 'run-mcp', 'stale.mcp.json')
+    await mkdir(join(stateDir, 'run-mcp'), { recursive: true })
+    await writeFile(staleConfig, '{"mcpServers":{}}')
+    const staleTime = new Date(Date.now() - (25 * 60 * 60_000))
+    await utimes(staleConfig, staleTime, staleTime)
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND =
+      `"${process.execPath}" "${fakeCli}"`
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = stateDir
+    try {
+      const config = getDefaultAgentGatewayConfig()
+      config.runner.cwd = cwd
+      config.subagents.enabled = false
+      const [codingResult, browserResult, allResult] = await Promise.all([
+        runOpenClaudeAgent({
+          prompt: 'Fix the TypeScript implementation.',
+          config,
+          cwd,
+          streamEvents: true,
+          suppressObservers: true,
+        }),
+        runOpenClaudeAgent({
+          prompt: 'Open the website in Camofox and take a screenshot.',
+          config,
+          cwd,
+          streamEvents: true,
+          suppressObservers: true,
+        }),
+        runOpenClaudeAgent({
+          prompt: 'Use all MCP tools for this task.',
+          config,
+          cwd,
+          streamEvents: true,
+          suppressObservers: true,
+        }),
+      ])
+      const coding = JSON.parse(codingResult.text) as {
+        configPath: string
+        servers: string[]
+      }
+      const browser = JSON.parse(browserResult.text) as {
+        configPath: string
+        servers: string[]
+      }
+      const all = JSON.parse(allResult.text) as {
+        configPath: string
+        servers: string[]
+      }
+
+      expect(coding.servers).toEqual(['codegraph', 'context7', 'hindsight'])
+      expect(browser.servers).toEqual(['camofox', 'hindsight'])
+      expect(all.servers).toEqual([
+        'camofox',
+        'codegraph',
+        'context7',
+        'gateway-control',
+        'hindsight',
+        'searxng',
+      ])
+      expect(coding.configPath).not.toBe(browser.configPath)
+      expect(all.configPath).not.toBe(coding.configPath)
+      expect(await access(coding.configPath).then(() => true, () => false)).toBe(false)
+      expect(await access(browser.configPath).then(() => true, () => false)).toBe(false)
+      expect(await access(all.configPath).then(() => true, () => false)).toBe(false)
+      expect(await access(staleConfig).then(() => true, () => false)).toBe(false)
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+      if (previousState === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousState
+      await rm(cwd, { recursive: true, force: true })
+    }
   })
 
   test('does not recurse into gateway-server mode for child agent runs', () => {

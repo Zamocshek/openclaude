@@ -86,6 +86,34 @@ describe('gateway control MCP configuration', () => {
     expect(generated.mcpServers).toEqual({})
   })
 
+  test('builds a task-scoped MCP profile from enabled servers only', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'openclaude-task-mcp-project-'))
+    const state = await mkdtemp(join(tmpdir(), 'openclaude-task-mcp-state-'))
+    temporaryPaths.push(project, state)
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = state
+    await writeFile(join(project, '.mcp.json'), JSON.stringify({
+      mcpServers: {
+        codegraph: { command: 'node', args: ['codegraph.mjs'] },
+        camofox: { command: 'node', args: ['camofox.mjs'] },
+        hindsight: { command: 'node', args: ['hindsight.mjs'] },
+      },
+    }))
+    const outputPath = join(state, 'runs', 'task.mcp.json')
+
+    const generatedPath = prepareGatewayControlMcpConfig(
+      project,
+      'default',
+      {
+        includeServers: new Set(['codegraph']),
+        outputPath,
+      },
+    )
+    const generated = JSON.parse(await readFile(generatedPath!, 'utf8'))
+
+    expect(generatedPath).toBe(outputPath)
+    expect(Object.keys(generated.mcpServers)).toEqual(['codegraph'])
+  })
+
   test('exposes Android tools and calls the authenticated Gateway API', async () => {
     const requests: Array<{ path: string; authorization: string | null }> = []
     mockGateway = Bun.serve({

@@ -35,6 +35,7 @@ import {
   getAudioTranscriptionCandidate,
   getAttachmentCandidates,
   getTelegramAgentFailureKindLimit,
+  getTelegramRecoveryBackoffMs,
   getTelegramAgentRepeatedFailureLimit,
   getTelegramAgentRecoveryAttemptLimit,
   getTelegramQueueLimits,
@@ -783,6 +784,35 @@ describe('agent gateway Telegram bridge helpers', () => {
       ...base,
       failureKind: 'max_turns',
     })).toBe(true)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'transient_network',
+    })).toBe(true)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
+      failureKind: 'quality_gate',
+    })).toBe(true)
+  })
+
+  test('uses bounded exponential backoff for transient network recovery', () => {
+    const result = {
+      text: '',
+      stderr: 'API Error: fetch failed',
+      exitCode: 1,
+      timedOut: false,
+      failureKind: 'transient_network' as const,
+    }
+    const env = {
+      OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MS: '250',
+      OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MAX_MS: '1000',
+    } as NodeJS.ProcessEnv
+
+    expect(getTelegramRecoveryBackoffMs(result, 1, env)).toBe(250)
+    expect(getTelegramRecoveryBackoffMs(result, 3, env)).toBe(1000)
+    expect(getTelegramRecoveryBackoffMs({
+      ...result,
+      failureKind: 'tool_error',
+    }, 1, env)).toBe(0)
   })
 
   test('builds stable recovery failure signatures for repeated infrastructure errors', () => {

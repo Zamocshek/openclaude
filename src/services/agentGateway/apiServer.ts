@@ -7,6 +7,7 @@ import { parseHumanLimit } from '../../utils/limitParsing.js'
 import { updateAgentGatewayConfig, type AgentGatewayConfig } from './config.js'
 import {
   buildPromptFromChatMessages,
+  hasCodingMutationIntent,
   normalizeMessageContent,
   runOpenClaudeAgent,
   type AgentRunResult,
@@ -94,6 +95,9 @@ import {
   isRouterBuiltinToolName,
   updateRouterBuiltinToolState,
 } from './toolRouterTools.js'
+import {
+  runOpenClaudeAgentWithCompletionGate,
+} from './taskQuality.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -1240,7 +1244,7 @@ export class AgentApiServer {
           sessionId,
           text: chatInput.currentUser.content,
         })
-        const result = await runOpenClaudeAgent({
+        const result = await runOpenClaudeAgentWithCompletionGate({
           prompt: runnerPrompt,
           config: this.config,
           signal: requestAbort.signal,
@@ -1405,7 +1409,10 @@ export class AgentApiServer {
             text: options.currentUser.content,
           })
         }
-        return runOpenClaudeAgent({
+        const runner = hasCodingMutationIntent(run.runnerPrompt)
+          ? runOpenClaudeAgentWithCompletionGate
+          : runOpenClaudeAgent
+        return runner({
           prompt: run.runnerPrompt,
           config: this.config,
           signal: abortController.signal,
@@ -1452,7 +1459,15 @@ export class AgentApiServer {
     let fullText = ''
     const frontmatterStripper = createFrontmatterStreamStripper()
     const memoryDirectiveStripper = createMemoryDirectiveStreamStripper()
-    const result = await queued.promise
+    const keepalive = setInterval(() => {
+      if (!response.destroyed) response.write(': agent working\n\n')
+    }, 15_000)
+    let result: AgentRunResult & { history?: ConversationMessage[] }
+    try {
+      result = await queued.promise
+    } finally {
+      clearInterval(keepalive)
+    }
 
     if (response.destroyed) return
 
@@ -1580,7 +1595,7 @@ export class AgentApiServer {
           previousResponseId: previousResponseId || undefined,
           text: prompt,
         })
-        const result = await runOpenClaudeAgent({
+        const result = await runOpenClaudeAgentWithCompletionGate({
           prompt: runnerPrompt,
           config: this.config,
           signal: requestAbort.signal,
@@ -1695,7 +1710,10 @@ export class AgentApiServer {
         queue_id: queued.id,
         queue_position: queued.position,
       })
-      return runOpenClaudeAgent({
+      const runner = hasCodingMutationIntent(runnerPrompt)
+        ? runOpenClaudeAgentWithCompletionGate
+        : runOpenClaudeAgent
+      return runner({
         prompt: runnerPrompt,
         config: this.config,
         onStdout: chunk => {

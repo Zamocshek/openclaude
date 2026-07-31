@@ -29,6 +29,9 @@ const runOpenClaudeAgent = mock(defaultRunOpenClaudeAgent)
 mock.module('./agentRunner.js', () => ({
   runOpenClaudeAgent,
   addAgentRunObserver: () => () => {},
+  hasCodingMutationIntent: (prompt: string) =>
+    /\b(?:fix|implement|refactor|update|change|create|write)\b/iu
+      .test(prompt),
   normalizeMessageContent: (content: unknown) =>
     typeof content === 'string' ? content : String(content ?? ''),
   buildPromptFromChatMessages: (messages: Array<Record<string, unknown>>) => {
