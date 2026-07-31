@@ -7,6 +7,7 @@ import { registerDebugSkill } from './debug.js'
 import { registerKeybindingsSkill } from './keybindings.js'
 import { registerLoopSkill } from './loop.js'
 import { registerPentestSkill } from './pentest.js'
+import { registerQwenCollaborationSkill } from './qwenCollaboration.js'
 import { registerSimplifySkill } from './simplify.js'
 import { registerTelegramMcpSkills } from './telegramMcp.js'
 import { registerUpdateConfigSkill } from './updateConfig.js'
@@ -25,6 +26,7 @@ export function initBundledSkills(): void {
   registerKeybindingsSkill()
   registerCodeSkill()
   registerPentestSkill()
+  registerQwenCollaborationSkill()
   registerDebugSkill()
   registerSimplifySkill()
   registerBatchSkill()

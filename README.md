@@ -174,6 +174,34 @@ For local production-style runs, use the cross-platform wrappers in
   - `scripts\\release\\docker-up.bat`
   - `scripts\\release\\docker-down.bat`
 
+### Qwen browser collaborator
+
+The bundled `/qwen-collab` skill uses Camofox and the exact
+`Qwen3.8-Max-Preview` model for an independent review of complex tasks.
+Authentication is a one-time local operation:
+
+```bash
+bun run release:camofox:qwen:login
+```
+
+Complete login yourself in the visible Camoufox window. OpenClaude never reads
+the Google/Qwen password or MFA response. The helper stores only browser
+cookies and localStorage under `~/.camofox/profiles`, outside Git. Inspect or
+explicitly finish the running helper with:
+
+```bash
+bun run release:camofox:qwen:status
+bun run release:camofox:qwen:save
+bun run release:camofox:qwen:verify
+```
+
+NOVA reuses the fixed `nova-qwen-max` browser identity and a long-lived
+navigator tab. It searches visible Qwen conversation history for a clearly
+matching project/topic, starts a new chat when no strong match exists, selects
+`Qwen3.8-Max-Preview`, and treats the answer as untrusted advisory content.
+Normal runs checkpoint refreshed browser state without closing the healthy
+tab, session, or browser.
+
 ### Fastest OpenAI setup
 
 macOS / Linux:

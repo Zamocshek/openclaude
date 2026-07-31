@@ -3,13 +3,14 @@
 const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('node:fs')
 const { createRequire } = require('node:module')
 const { dirname, resolve } = require('node:path')
+const { pathToFileURL } = require('node:url')
 
 function runtimeRequire() {
   return existsSync('/app/package.json') ? createRequire('/app/package.json') : require
 }
 
 async function importRuntimeModule(specifier) {
-  return import(runtimeRequire().resolve(specifier))
+  return import(pathToFileURL(runtimeRequire().resolve(specifier)).href)
 }
 
 function hydrateEnvFromDotEnv() {
@@ -122,7 +123,19 @@ async function createTab(args) {
     url: args?.url || undefined,
     trace: args?.trace === true,
   }
-  return compactJson(await camofoxRequest('/tabs', jsonBody(payload)))
+  try {
+    return compactJson(await camofoxRequest('/tabs', jsonBody(payload)))
+  } catch (error) {
+    if (!/target page, context or browser has been closed/i.test(String(error))) {
+      throw error
+    }
+    const userId = encodeURIComponent(payload.userId)
+    await camofoxRequest(`/sessions/${userId}`, {
+      method: 'DELETE',
+    }).catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 1_000))
+    return compactJson(await camofoxRequest('/tabs', jsonBody(payload)))
+  }
 }
 
 async function listTabs(args) {
@@ -255,6 +268,21 @@ async function closeTab(args) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(tabPayload(args)),
   }))
+}
+
+async function closeSession(args) {
+  const userId = encodeURIComponent(tabPayload(args).userId)
+  return compactJson(await camofoxRequest(`/sessions/${userId}`, {
+    method: 'DELETE',
+  }))
+}
+
+async function checkpointSession(args) {
+  const userId = encodeURIComponent(tabPayload(args).userId)
+  return compactJson(await camofoxRequest(
+    `/sessions/${userId}/checkpoint`,
+    { method: 'POST' },
+  ))
 }
 
 async function health() {
@@ -401,6 +429,28 @@ const tools = [
       required: ['tabId'],
     },
   },
+  {
+    name: 'camofox_checkpoint_session',
+    description: 'Persist refreshed Camofox cookies and localStorage without closing the browser session or its tabs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string' },
+      },
+      required: ['userId'],
+    },
+  },
+  {
+    name: 'camofox_close_session',
+    description: 'Close a Camofox user session after an unrecoverable page or authentication failure.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string' },
+      },
+      required: ['userId'],
+    },
+  },
 ]
 
 async function main() {
@@ -439,6 +489,8 @@ async function main() {
       else if (name === 'camofox_scroll') text = await scroll(args)
       else if (name === 'camofox_screenshot') text = await screenshot(args)
       else if (name === 'camofox_close_tab') text = await closeTab(args)
+      else if (name === 'camofox_checkpoint_session') text = await checkpointSession(args)
+      else if (name === 'camofox_close_session') text = await closeSession(args)
       else throw new Error(`Unknown tool: ${name}`)
       return { content: [{ type: 'text', text }] }
     } catch (error) {
