@@ -22,7 +22,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { getAgentGatewayStateDir } from './config.js'
 import type { AgentGatewayConfig } from './config.js'
-import { runOpenClaudeAgent } from './agentRunner.js'
+import { runOpenClaudeAgentWithCompletionGate } from './taskQuality.js'
 import { buildSelfEditPrompt, gitStatus, gitDiff } from './selfEdit.js'
 
 // ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ export async function runInfiniteTask(
     // Build the prompt with full context from previous iterations
     const prompt = buildIterationPrompt(currentPrompt, state, strategy)
 
-    const result = await runOpenClaudeAgent({
+    const result = await runOpenClaudeAgentWithCompletionGate({
       prompt,
       config,
       signal: options?.signal,
@@ -332,7 +332,7 @@ async function analyzeFailure(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({
+    const result = await runOpenClaudeAgentWithCompletionGate({
       prompt: analysisPrompt,
       config: {
         ...config,

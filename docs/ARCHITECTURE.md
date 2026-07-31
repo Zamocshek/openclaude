@@ -108,8 +108,26 @@ Spawns OpenClaude CLI subprocess:
 - Passes prompt via stdin
 - Captures stdout/stderr
 - Configurable timeout and max turns
+- Uses a 900000 ms idle-output watchdog for structured-progress runs by
+  default; `0` disables it
 - Permission mode support
+- Treats enabled MCP servers as eligible capabilities and creates a unique,
+  task-scoped strict MCP profile for each run
+- Selects relevant eligible MCP servers automatically by default; an explicit
+  `all tools` or `all MCP` request selects every eligible server, including
+  dynamically imported servers
+- Keeps enabled Hindsight in the baseline route for durable memory
+- Requires a successful verifier after the last coding mutation by default,
+  with two bounded evaluator correction passes and fail-closed completion
+- Merges implementation and evaluator artifacts, activity, duration, and cost
+- Buffers streaming coding answers until verification while sending SSE
+  keepalive comments
+- Classifies transient provider/network failures for bounded retry
 - Strips ANSI codes from output
+
+Telegram recovery applies exponential bounded backoff to transient
+provider/network failures. Non-transient failures continue to use their
+failure-class retry limits without network backoff.
 
 ### 2.5 Memory System (`memory.ts`)
 
@@ -229,6 +247,26 @@ Config file: `~/.config/openclaude/agent-gateway.json`
   }
 }
 ```
+
+### 3.1 Production Execution Environment
+
+The production execution controls are environment variables so the same
+behavior applies to Telegram, Agent API, cron, Ouroboros, and OpenWebUI runs:
+
+- `OPENCLAUDE_AGENT_AUTO_MCP_ROUTING=1` (default): enabled MCP servers are
+  eligible, while every run receives an isolated task-scoped profile containing
+  only relevant servers. An explicit `all tools`/`all MCP` request includes all
+  eligible servers, including JSON-imported servers. Enabled Hindsight remains
+  available as the durable-memory baseline.
+- `OPENCLAUDE_AGENT_CODING_COMPLETION_GATE=1` (default): any successful coding
+  mutation requires a relevant verifier to succeed after the final edit. The
+  gate allows two bounded correction passes and then fails closed.
+- `OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS=900000` (default): aborts a child
+  run after 15 minutes without output. Set `0` to disable this watchdog.
+- `OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MS=1000` and
+  `OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MAX_MS=30000` (defaults):
+  configure exponential bounded backoff for transient provider/network
+  retries.
 
 ---
 

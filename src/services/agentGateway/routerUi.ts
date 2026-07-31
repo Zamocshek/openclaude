@@ -59,7 +59,7 @@ export function buildToolRouterHtml(
       <header><h1>OpenClaude Agent</h1><form id="auth-form" class="head-actions"><input id="api-key" class="key-input" type="password" autocomplete="off" placeholder="Gateway API key"><button id="connect" class="button primary" type="submit">Connect</button><button id="refresh" class="button" type="button">Refresh</button></form></header>
       <section id="notice" class="notice"></section>
       <section id="servers" class="view active">
-        <div class="view-head"><div><h2>MCP Servers</h2><p class="sub">Manage the registry used by new agent runs. Secrets are never shown here.</p></div><button id="open-import" class="button primary">+ Import JSON</button></div>
+        <div class="view-head"><div><h2>MCP Servers</h2><p class="sub">Enabled servers are eligible for task-aware routing in new runs. Secrets are never shown here.</p></div><button id="open-import" class="button primary">+ Import JSON</button></div>
         <div id="summary" class="summary"></div><div class="toolbar"><input id="server-search" class="search" placeholder="Search MCP servers..."><button id="refresh-servers" class="button">Refresh</button></div><div id="server-list" class="list"><div class="empty">Connect to load MCP servers.</div></div>
       </section>
       <section id="skills" class="view">

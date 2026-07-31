@@ -3,7 +3,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import type { AgentGatewayConfig } from './config.js'
 import { getAgentGatewayStateDir } from './config.js'
-import { runOpenClaudeAgent } from './agentRunner.js'
+import { runOpenClaudeAgentWithCompletionGate } from './taskQuality.js'
 
 export type CronSchedule =
   | { kind: 'once'; runAt: string; display: string }
@@ -565,7 +565,7 @@ async function runCronJob(
 
   const result = mode === 'message'
     ? { exitCode: 0, text: job.prompt, stderr: '' }
-    : await runOpenClaudeAgent({
+    : await runOpenClaudeAgentWithCompletionGate({
         prompt,
         config,
       })

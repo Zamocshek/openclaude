@@ -14,6 +14,12 @@ import {
   type AgentRunArtifact,
   type AgentRunResult,
 } from './agentRunner.js'
+import {
+  buildCodingCompletionFailure,
+  buildCodingVerificationPrompt,
+  getCodingCompletionGap,
+  mergeAgentRunResults,
+} from './taskQuality.js'
 import { redactAgentText } from './redaction.js'
 import { detectTranscriptionTool, transcribeAudio } from './transcription.js'
 import {
@@ -1121,22 +1127,31 @@ export class TelegramAgentBridge {
     let currentPrompt = input.prompt
     const repeatedFailures = new Map<string, number>()
     const failureKindCounts = new Map<string, number>()
+    let verificationAttempts = 0
+    let verificationPending = false
+    const completionPasses: AgentRunResult[] = []
 
     while (true) {
       const isRecovery = recoveryAttempt > 0
+      const isVerification = verificationPending
+      verificationPending = false
       input.progress.setPhase(
-        isRecovery
+        isVerification
+          ? 'Verifying implementation and final diff'
+          : isRecovery
           ? formatTelegramRecoveryPhase(recoveryAttempt, recovery.maxRecoveryAttempts)
           : input.phase,
       )
-      if (isRecovery) {
+      if (isVerification) {
+        input.progress.addEvent('coding completion gate: verifier pass')
+      } else if (isRecovery) {
         input.progress.addEvent(
           `recovery attempt ${recoveryAttempt}${recovery.maxRecoveryAttempts === null ? '' : `/${recovery.maxRecoveryAttempts}`}`,
         )
       }
 
       const startedAt = Date.now()
-      const result = await runOpenClaudeAgent({
+      let result = await runOpenClaudeAgent({
         prompt: currentPrompt,
         config: this.config,
         signal: input.controller.signal,
@@ -1147,8 +1162,28 @@ export class TelegramAgentBridge {
         onStdout: chunk => input.progress.observeStdout(chunk),
       }).catch(error => buildAgentExceptionResult(error, Date.now() - startedAt))
 
-      if (input.controller.signal.aborted || result.exitCode === 0) {
+      if (input.controller.signal.aborted) {
         return result
+      }
+      if (result.exitCode === 0) {
+        completionPasses.push(result)
+        result = mergeAgentRunResults(completionPasses)
+        const completionGap = getCodingCompletionGap(input.prompt, result)
+        if (completionGap) {
+          if (verificationAttempts < 2) {
+            verificationAttempts += 1
+            verificationPending = true
+            currentPrompt = buildCodingVerificationPrompt({
+              originalPrompt: input.prompt,
+              previousResult: result,
+              gap: completionGap,
+            })
+            continue
+          }
+          result = buildCodingCompletionFailure(result, completionGap)
+        } else {
+          return result
+        }
       }
 
       await recordTelegramError(
@@ -1186,6 +1221,23 @@ export class TelegramAgentBridge {
       }
 
       recoveryAttempt += 1
+      if (result.failureKind === 'quality_gate') {
+        verificationAttempts = 0
+      }
+      const backoffMs = getTelegramRecoveryBackoffMs(
+        result,
+        recoveryAttempt,
+      )
+      if (backoffMs > 0) {
+        input.progress.addEvent(
+          `recovery backoff: ${formatDuration(backoffMs)}`,
+        )
+        const completedDelay = await delayWithAbort(
+          backoffMs,
+          input.controller.signal,
+        )
+        if (!completedDelay) return result
+      }
       currentPrompt = buildTelegramAgentRecoveryPrompt({
         originalPrompt: input.prompt,
         previousResult: result,
@@ -5112,6 +5164,49 @@ export function shouldRetryTelegramAgentFailure(result: AgentRunResult): boolean
   return result.failureKind === 'tool_error'
     || result.failureKind === 'max_turns'
     || result.failureKind === 'timeout'
+    || result.failureKind === 'transient_network'
+    || result.failureKind === 'quality_gate'
+}
+
+export function getTelegramRecoveryBackoffMs(
+  result: AgentRunResult,
+  attempt: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (result.failureKind !== 'transient_network') return 0
+  const base = parsePositiveEnvNumber(
+    env.OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MS,
+    1_000,
+  )
+  const max = parsePositiveEnvNumber(
+    env.OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MAX_MS,
+    30_000,
+  )
+  return Math.min(max, base * (2 ** Math.max(0, attempt - 1)))
+}
+
+function parsePositiveEnvNumber(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw === undefined || raw.trim() === '') return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+}
+
+function delayWithAbort(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false)
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(true)
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve(false)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 export function getAgentRecoveryFailureSignature(result: AgentRunResult): string {

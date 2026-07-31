@@ -409,6 +409,16 @@ global model-tools switch starts subsequent runs with an empty strict MCP
 configuration and no built-in tool schemas. Capability-specific system guidance
 is included only for MCP servers and skills that are enabled for that run.
 
+An enabled MCP server is **eligible**, not automatically loaded into every
+request. With `OPENCLAUDE_AGENT_AUTO_MCP_ROUTING=1` (the production default),
+each run receives its own isolated, task-scoped strict MCP profile containing
+only the eligible servers relevant to the current request. Enabled Hindsight is
+kept as the durable-memory baseline. A dynamically imported server is selected
+when the request names it, and an explicit request to use `all tools` or
+`all MCP` includes every eligible server for that run.
+Set the variable to `0` only when every enabled MCP server must be exposed to
+every normal run.
+
 ### Telegram MCP And Maton
 
 The production stack runs the vendored Telegram MCP as one private
@@ -459,12 +469,29 @@ shared by Telegram, the Agent API, cron runs, and OpenWebUI inference.
 Code implementation, debugging, review, deployment, and refactoring requests
 route through the bundled `code` skill. It enforces repository discovery,
 Read-before-Edit/Write, native file editing, TodoWrite checkpoints, targeted
-verification, final diff review, and recovery from corrected tool calls. Docker
-defaults allow up to 720 turns and 12 hours for the main gateway run; replica
-workers allow 240 turns and 4 hours. Telegram Stop still aborts the active child
-process immediately. Override these limits with
+verification, final diff review, and recovery from corrected tool calls. With
+`OPENCLAUDE_AGENT_CODING_COMPLETION_GATE=1` (the production default), a
+successful coding mutation is not considered complete until a relevant
+verifier succeeds after the last edit. A test that ran before the final
+mutation does not satisfy the gate. The evaluator gets at most two bounded
+correction passes and then fails closed instead of reporting unverified work as
+complete. Artifacts, activity, duration, and cost from all passes are retained.
+For streaming OpenAI-compatible coding requests, the final answer is buffered
+until the gate passes while SSE keepalives keep OpenWebUI connections alive.
+
+Docker defaults allow up to 720 turns and 12 hours for the main gateway run;
+replica workers allow 240 turns and 4 hours. An independent structured-progress
+watchdog stops a stalled child after 900000 ms without output by default; configure it with
+`OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS`, or set that variable to `0` to
+disable the watchdog. Telegram Stop still aborts the active child process
+immediately. Override the total run limits with
 `OPENCLAUDE_AGENT_RUNNER_MAX_TURNS`, `OPENCLAUDE_AGENT_RUNNER_TIMEOUT_MS`,
 `OPENCLAUDE_AGENT_WORKER_MAX_TURNS`, and `OPENCLAUDE_AGENT_WORKER_TIMEOUT_MS`.
+
+Telegram retries transient provider and network failures with exponential
+bounded backoff. The initial and maximum delays default to 1000 ms and 30000 ms
+and are configured with `OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MS` and
+`OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MAX_MS`.
 
 For verifier-driven terminal coding tasks, set
 `OPENCLAUDE_TERMINAL_BENCH=1`. This enables a verifier-first execution profile

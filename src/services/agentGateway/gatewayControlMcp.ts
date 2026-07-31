@@ -24,11 +24,21 @@ type McpConfig = {
 export function prepareGatewayControlMcpConfig(
   projectRoot: string,
   profile: 'default' | 'pentest' | 'disabled' = 'default',
+  options: {
+    includeServers?: ReadonlySet<string>
+    outputPath?: string
+  } = {},
 ): string | undefined {
   const scriptPath = resolveGatewayControlMcpScriptPath()
   const sourcePath = resolveEffectiveMcpConfigPath(projectRoot)
   const source = readMcpConfig(sourcePath)
-  const sourceServers = source.mcpServers || {}
+  const sourceServers = Object.fromEntries(
+    Object.entries(source.mcpServers || {})
+      .filter(([name]) => (
+        options.includeServers === undefined
+        || options.includeServers.has(name)
+      )),
+  )
   const mcpServers = profile === 'disabled'
     ? {}
     : profile === 'pentest'
@@ -38,7 +48,10 @@ export function prepareGatewayControlMcpConfig(
         )
       : { ...sourceServers }
 
-  if (profile === 'default' && scriptPath) {
+  const includeControlServer =
+    options.includeServers === undefined
+    || options.includeServers.has(CONTROL_MCP_NAME)
+  if (profile === 'default' && scriptPath && includeControlServer) {
     const gatewayApiKey =
       process.env.OPENCLAUDE_AGENT_API_KEY?.trim() || ''
     mcpServers[CONTROL_MCP_NAME] = {
@@ -55,12 +68,17 @@ export function prepareGatewayControlMcpConfig(
           : {}),
       },
     }
-  } else if (profile === 'default' && !scriptPath) {
+  } else if (
+    profile === 'default'
+    && !scriptPath
+    && options.includeServers === undefined
+    && !options.outputPath
+  ) {
     return sourcePath
   }
 
   const stateDir = getAgentGatewayStateDir()
-  const outputPath = join(
+  const outputPath = options.outputPath || join(
     stateDir,
     profile === 'pentest'
       ? PENTEST_MCP_CONFIG_FILE
@@ -68,7 +86,7 @@ export function prepareGatewayControlMcpConfig(
         ? DISABLED_MCP_CONFIG_FILE
         : CONTROL_MCP_CONFIG_FILE,
   )
-  mkdirSync(stateDir, { recursive: true })
+  mkdirSync(dirname(outputPath), { recursive: true })
   writeFileSync(outputPath, `${JSON.stringify({ mcpServers }, null, 2)}\n`, {
     encoding: 'utf8',
     mode: 0o600,
