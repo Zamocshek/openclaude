@@ -15,10 +15,14 @@ import {
   getAgentGatewayProjectRoot,
   getAgentGatewayStateDir,
   type AgentGatewayConfig,
+  type AgentGatewaySubagentRoute,
 } from './config.js'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 import { CODE_SKILL_PROMPT } from '../../skills/codingWorkflow.js'
-import { getReasoningEffortForModel } from '../api/providerConfig.js'
+import {
+  getReasoningEffortForModel,
+  resolveRuntimeCodexCredentials,
+} from '../api/providerConfig.js'
 import { prepareGatewayControlMcpConfig } from './gatewayControlMcp.js'
 import { redactAgentText } from './redaction.js'
 import {
@@ -46,6 +50,8 @@ export type AgentRunOptions = {
   signal?: AbortSignal
   suppressObservers?: boolean
   toolPolicy?: 'default' | 'pentest'
+  /** Internal provider override used by gateway-managed specialist preflights. */
+  envOverrides?: NodeJS.ProcessEnv
 }
 
 export type AgentRunResult = {
@@ -245,6 +251,7 @@ const MAX_AGENT_TEXT_BUFFER_CHARS = 4 * 1024 * 1024
 const MAX_AGENT_STDERR_BUFFER_CHARS = 1024 * 1024
 const MAX_TRACKED_TOOL_USES = 512
 const MAX_AGENT_ACTIVITY_EVENTS = 240
+const VISUAL_IMAGE_EXTENSION = '(?:png|jpe?g|webp|gif)'
 const PENTEST_ALLOWED_TOOLS = [
   'Skill',
   'TodoWrite',
@@ -708,6 +715,141 @@ export function buildAgentChildEnv(
   return childEnv
 }
 
+export function extractVisualLocalPaths(prompt: string): string[] {
+  const paths = [...prompt.matchAll(
+    new RegExp(
+      `(?:^|\\n)[ \\t]*local_path:[ \\t]*["']?(.+?\\.${VISUAL_IMAGE_EXTENSION})["']?[ \\t]*(?=\\n|$)`,
+      'giu',
+    ),
+  )]
+    .map(match => String(match[1] || '').trim())
+    .filter(Boolean)
+  return [...new Set(paths)]
+}
+
+export function injectGatewayVisionEvidence(
+  prompt: string,
+  evidence: string,
+): string {
+  const sanitized = sanitizeVisualPrompt(prompt)
+  return [
+    sanitized,
+    '',
+    '[Gateway vision evidence]',
+    evidence.trim(),
+    'The image paths were removed after inspection. Use this evidence and do not attempt to read or attach the images again.',
+  ].join('\n')
+}
+
+function sanitizeVisualPrompt(prompt: string): string {
+  return prompt
+    .replace(/\[Vision input\]/giu, '[Image already inspected by gateway-vision]')
+    .replace(
+      new RegExp(
+        `^([ \\t]*)local_path:[ \\t]*["']?.+?\\.${VISUAL_IMAGE_EXTENSION}["']?[ \\t]*$`,
+        'gimu',
+      ),
+      '$1local_path: [removed after gateway-vision inspection]',
+    )
+    .replace(
+      new RegExp(
+        `^[ \\t]*prompt_reference:[ \\t]*@.+?\\.${VISUAL_IMAGE_EXTENSION}[ \\t]*$`,
+        'gimu',
+      ),
+      '',
+    )
+    .replace(/^[ \t]*mime_type:[ \t]*image\/[^\r\n]+$/gimu, '')
+    .replace(
+      /^[ \t]*-[ \t]*type:[ \t]*photo[ \t]*$/gimu,
+      '- type: image-already-inspected',
+    )
+    .replace(
+      /^.*Do not attach or read this image in the parent model\..*$/gimu,
+      '',
+    )
+    .replace(
+      /^.*At least one attachment is visual\. Inspect the actual local image through gateway-vision.*$/gimu,
+      '',
+    )
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim()
+}
+
+function buildGatewayVisionProviderEnv(
+  route: AgentGatewaySubagentRoute,
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv | undefined {
+  const provider = route.provider.trim().toLowerCase()
+  const model = route.model.trim()
+  const baseUrl = route.baseUrl.trim().replace(/\/+$/u, '')
+  if (!provider || !model || !baseUrl) return undefined
+
+  let apiKey = route.apiKey || (route.apiKeyEnv ? env[route.apiKeyEnv] : '')
+  if (!apiKey && provider === 'codex') {
+    try {
+      apiKey = resolveRuntimeCodexCredentials({ env }).apiKey
+    } catch {
+      apiKey = ''
+    }
+  }
+  if (!apiKey && provider === 'deepseek') {
+    apiKey = env.DEEPSEEK_API_KEY || env.OPENCLAUDE_DEEPSEEK_API_KEY
+  }
+  if (!apiKey && provider === 'openrouter') apiKey = env.OPENROUTER_API_KEY
+  if (!apiKey) apiKey = env.OPENAI_API_KEY || env.OPENCLAUDE_API_KEY
+  if (!apiKey?.trim()) return undefined
+
+  const normalizedKey = apiKey.trim()
+  return {
+    OPENCLAUDE_RESPECT_PROVIDER_ENV: '1',
+    OPENCLAUDE_PROVIDER: provider,
+    OPENCLAUDE_BASE_URL: baseUrl,
+    OPENCLAUDE_MODEL: model,
+    OPENCLAUDE_API_KEY: normalizedKey,
+    CLAUDE_CODE_USE_OPENAI: '1',
+    CLAUDE_CODE_USE_GEMINI: '',
+    CLAUDE_CODE_USE_MISTRAL: '',
+    CLAUDE_CODE_USE_GITHUB: '',
+    OPENAI_BASE_URL: baseUrl,
+    OPENAI_MODEL: model,
+    OPENAI_API_KEY: provider === 'codex' ? '' : normalizedKey,
+    ...(provider === 'codex' ? { CODEX_API_KEY: normalizedKey } : {}),
+  }
+}
+
+function buildGatewayVisionPrompt(prompt: string, imagePaths: string[]): string {
+  const currentRequest = sanitizeVisualPrompt(extractCurrentUserRequest(prompt))
+  return [
+    'You are the Gateway Vision specialist.',
+    'Inspect every attached image and answer the user question using only observable visual evidence.',
+    'Report exact visible text when asked. State uncertainty instead of inferring from filenames.',
+    '',
+    'Image attachments:',
+    ...imagePaths.map(path => `@${path}`),
+    '',
+    'User request:',
+    currentRequest,
+  ].join('\n')
+}
+
+function visionOnlyConfig(config: AgentGatewayConfig): AgentGatewayConfig {
+  return {
+    ...config,
+    runner: {
+      ...config.runner,
+      maxTurns: Math.min(config.runner.maxTurns, 12),
+      permissionMode: 'default',
+      disableTools: true,
+      availableTools: [],
+      disallowedTools: [],
+    },
+    subagents: {
+      ...config.subagents,
+      enabled: false,
+    },
+  }
+}
+
 function isEnvTruthy(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test(String(value || '').trim())
 }
@@ -846,7 +988,67 @@ function pruneStaleRunMcpConfigs(directory: string): void {
   }
 }
 
-export function runOpenClaudeAgent(
+export async function runOpenClaudeAgent(
+  options: AgentRunOptions,
+): Promise<AgentRunResult> {
+  const imagePaths = extractVisualLocalPaths(options.prompt)
+  if (imagePaths.length === 0) {
+    return runOpenClaudeAgentProcess(options)
+  }
+
+  const route = options.config.subagents.enabled
+    ? options.config.subagents.routes['gateway-vision']
+    : undefined
+  const routeEnv = route
+    ? buildGatewayVisionProviderEnv(
+        route,
+        buildAgentChildEnv(process.env, options.cwd || options.config.runner.cwd || process.cwd()),
+      )
+    : undefined
+  const startedAt = Date.now()
+  let evidence = ''
+  let visionResult: AgentRunResult | undefined
+
+  if (route && routeEnv) {
+    options.onProgress?.('vision preflight: inspecting image with gateway-vision')
+    visionResult = await runOpenClaudeAgentProcess({
+      prompt: buildGatewayVisionPrompt(options.prompt, imagePaths),
+      cwd: options.cwd,
+      config: visionOnlyConfig(options.config),
+      streamEvents: options.streamEvents,
+      signal: options.signal,
+      suppressObservers: true,
+      envOverrides: routeEnv,
+    })
+    if (visionResult.exitCode === 0 && visionResult.text.trim()) {
+      evidence = visionResult.text.trim()
+      options.onProgress?.('vision preflight: visual evidence ready')
+    } else {
+      const failure = visionResult.diagnostic || visionResult.stderr || 'vision specialist returned no evidence'
+      evidence = `Vision inspection was unavailable: ${redactAgentText(failure).slice(0, 1200)}`
+      options.onProgress?.('vision preflight: unavailable; continuing with an explicit limitation')
+    }
+  } else {
+    evidence = 'Vision inspection was unavailable because gateway-vision is not configured or has no usable credential.'
+    options.onProgress?.('vision preflight: gateway-vision unavailable')
+  }
+
+  const result = await runOpenClaudeAgentProcess({
+    ...options,
+    prompt: injectGatewayVisionEvidence(options.prompt, evidence),
+  })
+  const visionActivity = visionResult?.activity?.map(event => `vision: ${event}`) || []
+  return {
+    ...result,
+    durationMs: Date.now() - startedAt,
+    ...(visionResult?.costUsd || result.costUsd
+      ? { costUsd: (visionResult?.costUsd || 0) + (result.costUsd || 0) }
+      : {}),
+    activity: [...visionActivity, ...(result.activity || [])],
+  }
+}
+
+function runOpenClaudeAgentProcess(
   options: AgentRunOptions,
 ): Promise<AgentRunResult> {
   return new Promise(resolve => {
@@ -854,6 +1056,7 @@ export function runOpenClaudeAgent(
     const autoCodeWorkflow = hasCodingTaskIntent(options.prompt)
     const cwd = options.cwd || options.config.runner.cwd || process.cwd()
     const childEnv = buildAgentChildEnv(process.env, cwd)
+    Object.assign(childEnv, options.envOverrides || {})
     const subagentRuntime = prepareGatewaySubagentRuntime(
       options.config,
       childEnv,
