@@ -211,6 +211,23 @@ Automatic voice message transcription:
 - Auto-detects available tool
 - Temp files cleaned up after processing
 
+### 2.11 Vision Routing (`vision.ts`, `subagentRuntime.ts`)
+
+Visual requests are provider-aware without coupling the Telegram or OpenAI
+interfaces to one multimodal model:
+
+- Telegram downloads the largest photo variant and records its absolute path.
+- Chat Completions `image_url` and Responses `input_image` base64 data URLs are
+  signature-checked, content-addressed, mode `0600`, and retained for follow-up
+  turns for seven days by default.
+- The text-only coordinator delegates the path and question to
+  `gateway-vision`, a read-only Codex subagent that must inspect the image with
+  `Read`.
+- The parent receives only the grounded textual report, so DeepSeek never
+  receives an unsupported binary image tool result.
+- HTTP(S) image URLs are left as references rather than fetched by the gateway,
+  avoiding an SSRF path into the host or Docker network.
+
 ---
 
 ## 3. Configuration

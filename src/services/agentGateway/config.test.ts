@@ -6,6 +6,17 @@ import {
 } from './config.js'
 
 describe('agent gateway config normalization', () => {
+  test('ships a Codex-backed multimodal route for text-only coordinators', () => {
+    expect(
+      getDefaultAgentGatewayConfig().subagents.routes['gateway-vision'],
+    ).toEqual({
+      provider: 'codex',
+      model: 'gpt-5.6-sol?reasoning=medium',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      apiKeyEnv: 'CODEX_API_KEY',
+    })
+  })
+
   test('falls back from invalid runner numeric values', () => {
     const defaults = getDefaultAgentGatewayConfig()
     const config = normalizeAgentGatewayConfig({

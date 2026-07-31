@@ -14,6 +14,7 @@ const roleNames = new Set([
   'gateway-plan',
   'gateway-implement',
   'gateway-review',
+  'gateway-vision',
 ])
 const providerDefaults = {
   codex: { baseUrl: 'https://chatgpt.com/backend-api/codex', apiKeyEnv: 'CODEX_API_KEY' },
@@ -49,6 +50,12 @@ const defaultRoutes = {
     baseUrl: 'https://api.deepseek.com/v1',
     apiKeyEnv: 'DEEPSEEK_API_KEY',
   },
+  'gateway-vision': {
+    provider: 'codex',
+    model: 'gpt-5.6-sol?reasoning=medium',
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+    apiKeyEnv: 'CODEX_API_KEY',
+  },
 }
 
 const server = new Server(
@@ -69,7 +76,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          role: { type: 'string', description: 'gateway-explore, gateway-plan, gateway-implement, or gateway-review' },
+          role: { type: 'string', description: 'gateway-explore, gateway-plan, gateway-implement, gateway-review, or gateway-vision' },
           provider: { type: 'string', description: 'Provider identifier, for example codex, deepseek, openrouter, lmstudio-lan' },
           model: { type: 'string', description: 'Exact model id, optionally with ?reasoning=level for Codex' },
           base_url: { type: 'string', description: 'Required only for a provider without a known OpenAI-compatible endpoint' },

@@ -103,6 +103,37 @@ describe('agent gateway prompt builder', () => {
     expect(args[args.indexOf('--tools') + 1]).toBe('Bash,Read,Agent')
   })
 
+  test('routes visual inputs through the dedicated multimodal subagent', () => {
+    const config = getDefaultAgentGatewayConfig()
+    const subagentRuntime = {
+      settingsPath: '/tmp/subagent-routing.settings.json',
+      agentsJson: '{}',
+      roles: [{
+        name: 'gateway-vision',
+        provider: 'codex',
+        model: 'gpt-5.6-sol?reasoning=medium',
+      }],
+      cleanup: () => {},
+    }
+    const args = buildAgentArgs(config, {
+      prompt: '[Vision input]\nlocal_path: /workspace/image.png',
+      subagentRuntime,
+    })
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(systemPrompt).toContain('Delegate the visual inspection exactly once')
+    expect(systemPrompt).toContain('Do not call Read on image files in the parent run')
+    expect(systemPrompt).toContain('gateway-vision')
+
+    const textArgs = buildAgentArgs(config, {
+      prompt: 'Answer a text-only question.',
+      subagentRuntime,
+    })
+    const textSystemPrompt =
+      textArgs[textArgs.indexOf('--append-system-prompt') + 1]
+    expect(textSystemPrompt).not.toContain('Delegate the visual inspection exactly once')
+  })
+
   test('can disable model tool calls and all MCP process startup', async () => {
     const config = getDefaultAgentGatewayConfig()
     config.runner.disableTools = true

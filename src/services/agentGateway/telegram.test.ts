@@ -399,6 +399,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(prompt).toContain('Что на скрине?')
     expect(prompt).toContain('local_path: C:\\tmp\\screen.png')
     expect(prompt).toContain('prompt_reference: @C:\\tmp\\screen.png')
+    expect(prompt).toContain('Inspect the actual local image through gateway-vision')
     expect(prompt).toContain('[TELEGRAM_SEND_FILE path="C:\\path\\to\\file.png"')
     expect(prompt).toContain('[[image:C:\\path\\to\\image.png]]')
   })

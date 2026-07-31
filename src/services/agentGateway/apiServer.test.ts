@@ -26,14 +26,40 @@ const defaultRunOpenClaudeAgent = async (options: MockAgentRunOptions) => {
 
 const runOpenClaudeAgent = mock(defaultRunOpenClaudeAgent)
 
+function mockCurrentRequest(prompt: string): string {
+  const markers = [
+    ...prompt.matchAll(/(?:^|\n)(?:User|Current) request:\s*/giu),
+  ]
+  const marker = markers.at(-1)
+  return marker?.index === undefined
+    ? prompt
+    : prompt.slice(marker.index + marker[0].length)
+}
+
 mock.module('./agentRunner.js', () => ({
   runOpenClaudeAgent,
   addAgentRunObserver: () => () => {},
   hasCodingMutationIntent: (prompt: string) =>
-    /\b(?:fix|implement|refactor|update|change|create|write)\b/iu
-      .test(prompt),
-  normalizeMessageContent: (content: unknown) =>
-    typeof content === 'string' ? content : String(content ?? ''),
+    /\b(?:add|change|create|delete|edit|fix|implement|modify|patch|refactor|remove|update|write)\b/iu
+      .test(mockCurrentRequest(prompt)),
+  hasCodingTaskIntent: (prompt: string) =>
+    /\b(?:code|coding|bug|debug|implement|refactor|script|test|typecheck|lint|build|function|class|endpoint|typescript)\b/iu
+      .test(mockCurrentRequest(prompt)),
+  normalizeMessageContent: (content: unknown) => {
+    if (typeof content === 'string') return content
+    if (!Array.isArray(content)) return String(content ?? '')
+    return content
+      .map(part => {
+        if (typeof part === 'string') return part
+        if (!part || typeof part !== 'object') return ''
+        const record = part as Record<string, unknown>
+        if (typeof record.text === 'string') return record.text
+        if (typeof record.content === 'string') return record.content
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n')
+  },
   buildPromptFromChatMessages: (messages: Array<Record<string, unknown>>) => {
     const system = messages
       .filter(message => message.role === 'system')
@@ -206,6 +232,66 @@ describe('AgentApiServer', () => {
         prompt: expect.stringContaining('Persistent memory tool protocol'),
       }),
     )
+  })
+
+  test('materializes Chat Completions image_url input for vision routing', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const response = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'What is in this image?' },
+            {
+              type: 'image_url',
+              image_url: {
+                url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+              },
+            },
+          ],
+        }],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const options = runOpenClaudeAgent.mock.calls.at(-1)?.[0] as MockAgentRunOptions
+    expect(options.prompt).toContain('[Vision input]')
+    expect(options.prompt).toContain('gateway-vision')
+    const imagePath = options.prompt.match(/local_path:\s*(.+\.png)/u)?.[1]
+    expect(imagePath).toBeTruthy()
+    expect(await readFile(imagePath!)).toHaveLength(68)
+  })
+
+  test('materializes Responses input_image instead of dropping it', async () => {
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const response = await fetch(`${server.url}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        input: [
+          { type: 'input_text', text: 'Read this image.' },
+          {
+            type: 'input_image',
+            image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+          },
+        ],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const options = runOpenClaudeAgent.mock.calls.at(-1)?.[0] as MockAgentRunOptions
+    expect(options.prompt).toContain('[Vision input]')
+    expect(options.prompt).toContain('prompt_reference:')
   })
 
   test('can keep long non-stream chat completions alive until the agent finishes', async () => {
@@ -1136,13 +1222,16 @@ describe('AgentApiServer', () => {
         messages: [{ role: 'user', content: 'second queued turn' }],
       }),
     })
-    await waitFor(() => pending.length === 1)
-
-    const queuedStatus = await fetch(`${server.url}/api/queue/status`)
-    expect(queuedStatus.status).toBe(200)
-    const queuedStatusBody = await queuedStatus.json() as {
+    let queuedStatusBody: {
       active: { label: string } | null
       waiting: number
+    } = { active: null, waiting: 0 }
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const queuedStatus = await fetch(`${server.url}/api/queue/status`)
+      expect(queuedStatus.status).toBe(200)
+      queuedStatusBody = await queuedStatus.json() as typeof queuedStatusBody
+      if (queuedStatusBody.waiting === 1) break
+      await new Promise(resolve => setTimeout(resolve, 10))
     }
     expect(queuedStatusBody.active?.label).toBe(`chat.completions:${sessionId}`)
     expect(queuedStatusBody.waiting).toBe(1)

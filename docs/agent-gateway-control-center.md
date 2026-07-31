@@ -211,8 +211,8 @@ Inference and providers:
 Gateway subagents:
 
 - `/subagents [on|off|list|set|remove]` - inspect or control provider/model
-  routing for `gateway-explore`, `gateway-plan`, `gateway-implement`, and
-  `gateway-review`.
+  routing for `gateway-explore`, `gateway-plan`, `gateway-implement`,
+  `gateway-review`, and `gateway-vision`.
 - `/subagents set gateway-review deepseek deepseek-v4-pro` - route a role to a
   separate API/model. The coordinator parallelizes only independent read-only
   delegates and serializes conflicting edits.

@@ -220,6 +220,12 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
           baseUrl: 'https://api.deepseek.com/v1',
           apiKeyEnv: 'DEEPSEEK_API_KEY',
         },
+        'gateway-vision': {
+          provider: 'codex',
+          model: 'gpt-5.6-sol?reasoning=medium',
+          baseUrl: 'https://chatgpt.com/backend-api/codex',
+          apiKeyEnv: 'CODEX_API_KEY',
+        },
       },
     },
   }
