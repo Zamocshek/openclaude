@@ -79,7 +79,11 @@ def _init_db(conn: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
-            resolved_at TEXT
+            started_at TEXT,
+            resolved_at TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            result_json TEXT,
+            error_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS assistant_todos (
@@ -126,6 +130,19 @@ def _init_db(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    pending_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(assistant_pending_actions)")
+    }
+    for column, definition in {
+        "started_at": "TEXT",
+        "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+        "result_json": "TEXT",
+        "error_json": "TEXT",
+    }.items():
+        if column not in pending_columns:
+            conn.execute(
+                f"ALTER TABLE assistant_pending_actions ADD COLUMN {column} {definition}"
+            )
     try:
         conn.execute(
             """
@@ -489,6 +506,49 @@ def get_pending_action(conn: sqlite3.Connection, action_id: int) -> Optional[sql
     ).fetchone()
 
 
+def find_action_for_content_draft(
+    conn: sqlite3.Connection,
+    draft_id: int,
+    *,
+    statuses: tuple[str, ...] = ("pending", "executing", "sent", "needs_reconciliation"),
+) -> Optional[sqlite3.Row]:
+    """Find the durable delivery record for a content draft."""
+    placeholders = ",".join("?" for _ in statuses)
+    rows = conn.execute(
+        f"""
+        SELECT * FROM assistant_pending_actions
+        WHERE action_type='send_message' AND status IN ({placeholders})
+        ORDER BY id DESC
+        """,
+        statuses,
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except Exception:
+            continue
+        if int(payload.get("content_draft_id") or 0) == int(draft_id):
+            return row
+    return None
+
+
+def claim_pending_action(conn: sqlite3.Connection, action_id: int) -> Optional[sqlite3.Row]:
+    """Atomically claim a pending external action so it cannot be sent twice."""
+    started_at = now_iso()
+    cursor = conn.execute(
+        """
+        UPDATE assistant_pending_actions
+        SET status='executing', started_at=?, attempt_count=attempt_count + 1,
+            error_json=NULL
+        WHERE id=? AND status='pending'
+        """,
+        (started_at, int(action_id)),
+    )
+    if cursor.rowcount != 1:
+        return None
+    return get_pending_action(conn, action_id)
+
+
 def list_pending_actions(conn: sqlite3.Connection, account_id: Optional[str] = None) -> List[sqlite3.Row]:
     if account_id:
         return list(
@@ -512,14 +572,27 @@ def list_pending_actions(conn: sqlite3.Connection, account_id: Optional[str] = N
     )
 
 
-def resolve_pending_action(conn: sqlite3.Connection, action_id: int, status: str) -> None:
+def resolve_pending_action(
+    conn: sqlite3.Connection,
+    action_id: int,
+    status: str,
+    *,
+    result: Optional[Dict[str, Any]] = None,
+    error: Optional[Dict[str, Any]] = None,
+) -> None:
     conn.execute(
         """
         UPDATE assistant_pending_actions
-        SET status=?, resolved_at=?
+        SET status=?, resolved_at=?, result_json=?, error_json=?
         WHERE id=?
         """,
-        (status, now_iso(), int(action_id)),
+        (
+            status,
+            now_iso(),
+            json.dumps(result, ensure_ascii=False) if result is not None else None,
+            json.dumps(error, ensure_ascii=False) if error is not None else None,
+            int(action_id),
+        ),
     )
 
 

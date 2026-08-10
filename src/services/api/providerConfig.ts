@@ -29,35 +29,35 @@ const CODEX_ALIAS_MODELS: Record<
 > = {
   codexplan: {
     model: 'gpt-5.6-sol',
-    reasoningEffort: 'high',
+    reasoningEffort: 'ultra',
   },
   'gpt-5.6': {
     model: 'gpt-5.6-sol',
-    reasoningEffort: 'medium',
+    reasoningEffort: 'ultra',
   },
   'gpt-5.6-sol': {
     model: 'gpt-5.6-sol',
-    reasoningEffort: 'medium',
+    reasoningEffort: 'ultra',
   },
   'gpt-5.6-terra': {
     model: 'gpt-5.6-terra',
-    reasoningEffort: 'medium',
+    reasoningEffort: 'ultra',
   },
   'gpt-5.6-luna': {
     model: 'gpt-5.6-luna',
-    reasoningEffort: 'medium',
+    reasoningEffort: 'max',
   },
   'gpt-5.5': {
     model: 'gpt-5.5',
-    reasoningEffort: 'medium',
+    reasoningEffort: 'xhigh',
   },
   'gpt-5.4': {
     model: 'gpt-5.4',
-    reasoningEffort: 'high',
+    reasoningEffort: 'xhigh',
   },
   'gpt-5.3-codex': {
     model: 'gpt-5.3-codex',
-    reasoningEffort: 'high',
+    reasoningEffort: 'xhigh',
   },
   'gpt-5.3-codex-spark': {
     model: 'gpt-5.3-codex-spark',
@@ -67,22 +67,22 @@ const CODEX_ALIAS_MODELS: Record<
   },
   'gpt-5.2-codex': {
     model: 'gpt-5.2-codex',
-    reasoningEffort: 'high',
+    reasoningEffort: 'xhigh',
   },
   'gpt-5.1-codex-max': {
     model: 'gpt-5.1-codex-max',
-    reasoningEffort: 'high',
+    reasoningEffort: 'xhigh',
   },
   'gpt-5.1-codex-mini': {
     model: 'gpt-5.1-codex-mini',
   },
   'gpt-5.4-mini': {
     model: 'gpt-5.4-mini',
-    reasoningEffort: 'medium',
+    reasoningEffort: 'xhigh',
   },
   'gpt-5.2': {
     model: 'gpt-5.2',
-    reasoningEffort: 'medium',
+    reasoningEffort: 'xhigh',
   },
 } as const
 

@@ -3,7 +3,13 @@ import os
 
 os.environ["TELEGRAM_API_ID"] = "12345"
 os.environ["TELEGRAM_API_HASH"] = "dummy_hash"
-from main import validate_id, ValidationError, log_and_format_error
+from main import (
+    ValidationError,
+    _channel_posting_access,
+    _normalize_chat_reference,
+    log_and_format_error,
+    validate_id,
+)
 from functools import wraps
 import asyncio
 from typing import Union, List, Optional
@@ -95,3 +101,67 @@ async def test_no_id_provided():
 async def test_none_id_provided():
     result, kwargs = await dummy_function(user_id=None)
     assert result == "success"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://t.me/slivmartin", ("entity", "slivmartin")),
+        ("t.me/+nS0h5CVn-_Q1OTAy", ("invite", "nS0h5CVn-_Q1OTAy")),
+        ("https://t.me/joinchat/AbCd_123", ("invite", "AbCd_123")),
+        ("-1001776823101", ("entity", -1001776823101)),
+        ("@endryteytfull", ("entity", "@endryteytfull")),
+    ],
+)
+def test_normalize_chat_reference(value, expected):
+    assert _normalize_chat_reference(value) == expected
+
+
+def test_broadcast_posting_access_requires_explicit_post_messages_right():
+    entity = type(
+        "FakeChannel",
+        (),
+        {
+            "creator": False,
+            "broadcast": True,
+            "megagroup": False,
+            "admin_rights": type("Rights", (), {"post_messages": True})(),
+        },
+    )()
+
+    access = _channel_posting_access(entity)
+
+    assert access["can_post"] is True
+    assert access["basis"] == "admin_rights.post_messages"
+
+
+def test_platform_restriction_overrides_creator_or_admin_rights():
+    reason = type(
+        "Reason",
+        (),
+        {"platform": "all", "reason": "terms", "text": "channel restricted"},
+    )()
+    entity = type(
+        "FakeRestrictedChannel",
+        (),
+        {
+            "creator": True,
+            "broadcast": True,
+            "megagroup": False,
+            "restricted": True,
+            "restriction_reason": [reason],
+            "admin_rights": type("Rights", (), {"post_messages": True})(),
+        },
+    )()
+
+    access = _channel_posting_access(entity)
+
+    assert access["can_post"] is False
+    assert access["basis"] == "channel is restricted by Telegram"
+    assert access["restriction_reasons"][0]["reason"] == "terms"
+
+
+def test_batch_timeout_is_longer_than_single_operation_timeout():
+    from main import BATCH_TOOL_OPERATION_TIMEOUT, TOOL_OPERATION_TIMEOUT
+
+    assert BATCH_TOOL_OPERATION_TIMEOUT > TOOL_OPERATION_TIMEOUT

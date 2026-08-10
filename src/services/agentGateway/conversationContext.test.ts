@@ -89,4 +89,15 @@ describe('agent gateway conversation context budgets', () => {
     expect(selected.at(-1)?.content).toContain('newest-')
     expect(selected[0]?.content).not.toContain('old-')
   })
+
+  test('never keeps an assistant reply without its user turn', () => {
+    const selected = trimConversationMessagesWithinCharBudget([
+      { role: 'user', content: 'question-' + 'x'.repeat(1_000) },
+      { role: 'assistant', content: 'short answer' },
+    ], 160)
+
+    expect(selected.map(message => message.role)).toEqual(['user', 'assistant'])
+    expect(selected[0]?.content).toContain('[truncated]')
+    expect(selected[1]?.content).toBe('short answer')
+  })
 })

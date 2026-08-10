@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto'
 import type { AgentGatewayConfig } from './config.js'
 import { getAgentGatewayStateDir } from './config.js'
 import { runOpenClaudeAgentWithCompletionGate } from './taskQuality.js'
+import type { AgentRunResult } from './agentRunner.js'
 
 export type CronSchedule =
   | { kind: 'once'; runAt: string; display: string }
@@ -56,6 +57,33 @@ export type CronDelivery = (content: string, job: CronJob) => Promise<void>
 
 const SILENT_MARKER = '[SILENT]'
 const cronDateTimeFormatters = new Map<string, Intl.DateTimeFormat>()
+
+export function buildScheduledCronAgentPrompt(jobPrompt: string): string {
+  return [
+    '[SYSTEM: You are generating the content for a scheduled OpenClaude cron delivery. The gateway owns transport and will send your final response to the configured destination. Return only the final message content. Do not send, prepare, preview, schedule, or confirm delivery yourself. Do not call Telegram, Maton, or other messaging tools. Never return a pending action, confirmation request, transport status, or instructions to invoke another tool. If you have nothing new or noteworthy to report, respond with exactly "[SILENT]" (optionally followed by a brief internal note). This suppresses delivery while still saving output locally. Only use [SILENT] when there are genuinely no changes worth reporting.]',
+    '',
+    jobPrompt,
+  ].join('\n')
+}
+
+export function getCronAgentDeliveryBlockReason(
+  result: {
+    pendingInteractions?: readonly unknown[]
+    completionStatus?: 'completed' | 'blocked'
+    completionGate?: { status: 'verified' | 'blocked' | 'failed' }
+  },
+): string | undefined {
+  if (result.pendingInteractions?.length) {
+    return 'Scheduled delivery attempted an interactive action'
+  }
+  if (
+    result.completionStatus === 'blocked'
+    || result.completionGate?.status === 'blocked'
+  ) {
+    return 'Scheduled delivery was blocked before producing final content'
+  }
+  return undefined
+}
 
 function jobsPath(): string {
   return join(getAgentGatewayStateDir(), 'cron-jobs.json')
@@ -655,22 +683,22 @@ async function runCronJob(
   const mode = job.mode ?? 'agent'
   const prompt = mode === 'message'
     ? job.prompt
-    : [
-        '[SYSTEM: You are running as a scheduled OpenClaude cron job. Your final response is saved locally. If you have nothing new or noteworthy to report, respond with exactly "[SILENT]" (optionally followed by a brief internal note). This suppresses delivery to Telegram while still saving output locally. Only use [SILENT] when there are genuinely no changes worth reporting.]',
-        '',
-        'Note: The agent cannot see Telegram delivery metadata and therefore cannot respond to it.',
-        '',
-        job.prompt,
-      ].join('\n')
+    : buildScheduledCronAgentPrompt(job.prompt)
 
-  const result = mode === 'message'
-    ? { exitCode: 0, text: job.prompt, stderr: '' }
+  const result: AgentRunResult = mode === 'message'
+    ? { exitCode: 0, text: job.prompt, stderr: '', timedOut: false }
     : await runOpenClaudeAgentWithCompletionGate({
         prompt,
         config,
+        executionContext: 'scheduled-delivery',
       })
-  const success = result.exitCode === 0
-  const finalText = success ? result.text : result.stderr || 'Agent run failed'
+  const deliveryBlockReason = mode === 'agent'
+    ? getCronAgentDeliveryBlockReason(result)
+    : undefined
+  const success = result.exitCode === 0 && !deliveryBlockReason
+  const finalText = success
+    ? result.text
+    : deliveryBlockReason || result.stderr || 'Agent run failed'
   const output = [
     `# Cron Job: ${job.name}`,
     '',

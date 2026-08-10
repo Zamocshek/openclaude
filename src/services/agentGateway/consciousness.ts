@@ -392,6 +392,7 @@ export function createBackgroundConsciousness(
           prompt,
           config,
           suppressObservers: true,
+          executionClass: 'maintenance',
           streamEvents: true,
           signal: controller.signal,
         })

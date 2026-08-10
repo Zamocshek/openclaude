@@ -124,12 +124,93 @@ function parseCompactJson(value) {
   }
 }
 
-function tabPayload(args = {}) {
-  const cfg = config()
-  return {
-    userId: String(args.userId || args.user_id || cfg.userId),
-    sessionKey: String(args.sessionKey || args.session_key || cfg.sessionKey),
+const tabIdentityById = new Map()
+
+function browserModelProfileForUrl(value) {
+  if (!value) return undefined
+  try {
+    const requested = new URL(String(value))
+    return listBrowserModelProfiles().find(profile => {
+      if (!profile.enabled) return false
+      try {
+        return new URL(profile.url).origin === requested.origin
+      } catch {
+        return false
+      }
+    })
+  } catch {
+    return undefined
   }
+}
+
+function tabPayload(args = {}, tabId) {
+  const cfg = config()
+  const remembered = tabId ? tabIdentityById.get(String(tabId)) : undefined
+  const profile = browserModelProfileForUrl(args?.url)
+  const userId = String(
+    args.userId || args.user_id || remembered?.userId || profile?.userId || cfg.userId,
+  )
+  return {
+    userId,
+    sessionKey: String(
+      args.sessionKey
+      || args.session_key
+      || (remembered?.userId === userId ? remembered.sessionKey : '')
+      || (profile?.userId === userId ? profile.sessionKey : '')
+      || cfg.sessionKey,
+    ),
+  }
+}
+
+function tabRecords(value) {
+  const parsed = parseCompactJson(value)
+  if (Array.isArray(parsed)) return parsed
+  if (Array.isArray(parsed?.tabs)) return parsed.tabs
+  if (parsed?.tab && typeof parsed.tab === 'object') return [parsed.tab]
+  if (parsed && typeof parsed === 'object') return [parsed]
+  return []
+}
+
+function rememberTabIdentity(value, identity) {
+  for (const tab of tabRecords(value)) {
+    const tabId = String(tab?.tabId || tab?.tab_id || tab?.targetId || tab?.id || '').trim()
+    if (tabId) tabIdentityById.set(tabId, { ...identity })
+  }
+}
+
+function listingContainsTab(value, tabId) {
+  return tabRecords(value).some(tab =>
+    String(tab?.tabId || tab?.tab_id || tab?.targetId || tab?.id || '').trim() === tabId,
+  )
+}
+
+async function tabPayloadForOperation(args = {}, tabId) {
+  const normalizedTabId = String(tabId || '').trim()
+  if (
+    args.userId
+    || args.user_id
+    || tabIdentityById.has(normalizedTabId)
+  ) {
+    return tabPayload(args, normalizedTabId)
+  }
+
+  for (const profile of listBrowserModelProfiles().filter(item => item.enabled)) {
+    const identity = {
+      userId: profile.userId,
+      sessionKey: profile.sessionKey,
+    }
+    try {
+      const tabs = await camofoxRequest(
+        `/tabs?userId=${encodeURIComponent(identity.userId)}`,
+      )
+      rememberTabIdentity(tabs, identity)
+      if (listingContainsTab(tabs, normalizedTabId)) return identity
+    } catch {
+      // A broken optional profile must not block the configured default identity.
+    }
+  }
+
+  return tabPayload(args, normalizedTabId)
 }
 
 async function createTab(args) {
@@ -139,7 +220,9 @@ async function createTab(args) {
     trace: args?.trace === true,
   }
   try {
-    return compactJson(await camofoxRequest('/tabs', jsonBody(payload)))
+    const created = await camofoxRequest('/tabs', jsonBody(payload))
+    rememberTabIdentity(created, payload)
+    return compactJson(created)
   } catch (error) {
     if (!/target page, context or browser has been closed/i.test(String(error))) {
       throw error
@@ -149,20 +232,25 @@ async function createTab(args) {
       method: 'DELETE',
     }).catch(() => {})
     await new Promise(resolve => setTimeout(resolve, 1_000))
-    return compactJson(await camofoxRequest('/tabs', jsonBody(payload)))
+    const created = await camofoxRequest('/tabs', jsonBody(payload))
+    rememberTabIdentity(created, payload)
+    return compactJson(created)
   }
 }
 
 async function listTabs(args) {
-  const userId = encodeURIComponent(tabPayload(args).userId)
-  return compactJson(await camofoxRequest(`/tabs?userId=${userId}`))
+  const identity = tabPayload(args)
+  const userId = encodeURIComponent(identity.userId)
+  const tabs = await camofoxRequest(`/tabs?userId=${userId}`)
+  rememberTabIdentity(tabs, identity)
+  return compactJson(tabs)
 }
 
 async function navigate(args) {
   const tabId = String(args?.tabId || args?.tab_id || '').trim()
   if (!tabId) throw new Error('tabId is required')
   const body = {
-    ...tabPayload(args),
+    ...await tabPayloadForOperation(args, tabId),
     url: args?.url || undefined,
     macro: args?.macro || undefined,
     query: args?.query || undefined,
@@ -173,8 +261,9 @@ async function navigate(args) {
 async function snapshot(args) {
   const tabId = String(args?.tabId || args?.tab_id || '').trim()
   if (!tabId) throw new Error('tabId is required')
+  const identity = await tabPayloadForOperation(args, tabId)
   const params = new URLSearchParams({
-    userId: tabPayload(args).userId,
+    userId: identity.userId,
     format: args?.format || 'text',
   })
   if (args?.offset !== undefined) params.set('offset', String(args.offset))
@@ -188,7 +277,7 @@ async function click(args) {
   const tabId = String(args?.tabId || args?.tab_id || '').trim()
   if (!tabId) throw new Error('tabId is required')
   const body = {
-    ...tabPayload(args),
+    ...await tabPayloadForOperation(args, tabId),
     ref: args?.ref || undefined,
     selector: args?.selector || undefined,
     doubleClick: args?.doubleClick === true || args?.double_click === true,
@@ -202,7 +291,7 @@ async function typeText(args) {
   if (!tabId) throw new Error('tabId is required')
   if (args?.text === undefined) throw new Error('text is required')
   const body = {
-    ...tabPayload(args),
+    ...await tabPayloadForOperation(args, tabId),
     ref: args?.ref || undefined,
     selector: args?.selector || undefined,
     text: String(args.text),
@@ -217,7 +306,7 @@ async function press(args) {
   if (!tabId) throw new Error('tabId is required')
   if (!args?.key) throw new Error('key is required')
   return compactJson(await camofoxRequest(`/tabs/${encodeURIComponent(tabId)}/press`, jsonBody({
-    ...tabPayload(args),
+    ...await tabPayloadForOperation(args, tabId),
     key: String(args.key),
   })))
 }
@@ -226,7 +315,7 @@ async function scroll(args) {
   const tabId = String(args?.tabId || args?.tab_id || '').trim()
   if (!tabId) throw new Error('tabId is required')
   return compactJson(await camofoxRequest(`/tabs/${encodeURIComponent(tabId)}/scroll`, jsonBody({
-    ...tabPayload(args),
+    ...await tabPayloadForOperation(args, tabId),
     direction: args?.direction || 'down',
     amount: Number(args?.amount || 800),
   })))
@@ -235,7 +324,8 @@ async function scroll(args) {
 async function screenshot(args) {
   const tabId = String(args?.tabId || args?.tab_id || '').trim()
   if (!tabId) throw new Error('tabId is required')
-  const params = new URLSearchParams({ userId: tabPayload(args).userId })
+  const identity = await tabPayloadForOperation(args, tabId)
+  const params = new URLSearchParams({ userId: identity.userId })
   const savePath = resolve(String(args?.save_path || args?.savePath || `output/camofox/${tabId}.png`))
   mkdirSync(dirname(savePath), { recursive: true })
 
@@ -278,18 +368,26 @@ async function screenshot(args) {
 async function closeTab(args) {
   const tabId = String(args?.tabId || args?.tab_id || '').trim()
   if (!tabId) throw new Error('tabId is required')
-  return compactJson(await camofoxRequest(`/tabs/${encodeURIComponent(tabId)}`, {
+  const identity = await tabPayloadForOperation(args, tabId)
+  const result = await camofoxRequest(`/tabs/${encodeURIComponent(tabId)}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(tabPayload(args)),
-  }))
+    body: JSON.stringify(identity),
+  })
+  tabIdentityById.delete(tabId)
+  return compactJson(result)
 }
 
 async function closeSession(args) {
-  const userId = encodeURIComponent(tabPayload(args).userId)
-  return compactJson(await camofoxRequest(`/sessions/${userId}`, {
+  const identity = tabPayload(args)
+  const userId = encodeURIComponent(identity.userId)
+  const result = await camofoxRequest(`/sessions/${userId}`, {
     method: 'DELETE',
-  }))
+  })
+  for (const [tabId, remembered] of tabIdentityById.entries()) {
+    if (remembered.userId === identity.userId) tabIdentityById.delete(tabId)
+  }
+  return compactJson(result)
 }
 
 async function checkpointSession(args) {
@@ -378,7 +476,7 @@ const tools = [
   },
   {
     name: 'camofox_create_tab',
-    description: 'Create a Camofox tab, optionally opening a URL. Returns tabId.',
+    description: 'Create a Camofox tab, optionally opening a URL. Known browser-model URLs automatically use their persistent authenticated profile. Returns tabId.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -660,10 +758,14 @@ if (require.main === module) {
 }
 
 module.exports = {
+  browserModelProfileForUrl,
   checkpointModelProfile,
   listModelProfiles,
   openModelProfile,
   removeModelProfile,
   setModelProfile,
+  tabPayload,
+  tabPayloadForOperation,
+  tabIdentityById,
   tools,
 }

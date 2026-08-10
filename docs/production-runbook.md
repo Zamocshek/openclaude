@@ -64,7 +64,7 @@ The primary endpoints are:
 - Tool Router: `http://127.0.0.1:8642/router`
 - File Manager: `http://127.0.0.1:8642/files`
 - OmniRoute: `http://127.0.0.1:20128`
-- Telegram MCP: `http://127.0.0.1:18765`
+- Telegram MCP: `http://127.0.0.1:19765`
 - Hindsight UI: `http://127.0.0.1:9999`
 - OpenRAG: `http://127.0.0.1:3000`
 

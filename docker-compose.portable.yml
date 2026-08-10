@@ -13,6 +13,9 @@ services:
         source: "${OPENCLAUDE_HOST_CODEX_DIR:-./.openclaude-data/codex}"
         target: /run/codex
       - type: bind
+        source: "${OPENCLAUDE_HOST_SSH_DIR:-./.openclaude-data/ssh}"
+        target: /root/.ssh
+      - type: bind
         source: .
         target: /workspace
     environment:
@@ -33,6 +36,7 @@ services:
       CODEX_MODELS_CACHE_PATH: "/run/codex/models_cache.json"
     volumes: !override
       - openclaude-worker-1-config:/home/node/.openclaude
+      - "${OPENCLAUDE_HOST_SSH_DIR:-./.openclaude-data/ssh}:/root/.ssh"
       - type: bind
         source: "${OPENCLAUDE_HOST_CODEX_DIR:-./.openclaude-data/codex}"
         target: /run/codex
@@ -55,6 +59,7 @@ services:
       CODEX_MODELS_CACHE_PATH: "/run/codex/models_cache.json"
     volumes: !override
       - openclaude-worker-2-config:/home/node/.openclaude
+      - "${OPENCLAUDE_HOST_SSH_DIR:-./.openclaude-data/ssh}:/root/.ssh"
       - type: bind
         source: "${OPENCLAUDE_HOST_CODEX_DIR:-./.openclaude-data/codex}"
         target: /run/codex

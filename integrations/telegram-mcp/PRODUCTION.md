@@ -33,6 +33,9 @@ TELEGRAM_MCP_WEB_TOKEN=
 VPROMOTIONS_API_URL=https://vpromotions.ru/api/v2
 VPROMOTIONS_API_KEY=
 VPROMOTIONS_TIMEOUT=30
+TWIBOOST_API_URL=https://twiboost.com/api/v2
+TWIBOOST_API_KEY=
+TWIBOOST_TIMEOUT=30
 ```
 
 Relative runtime paths are resolved from the source/deployment directory. Set
@@ -199,6 +202,8 @@ The content workflow adds a local editorial pipeline for channel posting:
 - `content_add_target`: register channels/chats where approved posts can be published.
 - `content_sync_sources`: cache recent source posts in `TELEGRAM_MCP_CONTENT_DB`.
 - `content_research_context`: give the MCP agent source material plus recent own history.
+- `content_channel_profiles`: list channel themes, description status, and formats.
+- `content_channel_post_brief`: resolve the exact target's editorial rules before drafting.
 - `content_similarity_check`: check a draft against stored source/draft/published posts.
 - `content_create_draft`: store a draft only if it is not too similar, unless explicitly overridden.
 - `content_prepare_publish`: create a pending Telegram send action.
@@ -208,9 +213,15 @@ Recommended safe sequence:
 
 ```text
 content_workflow_config -> content_add_source/content_add_target -> content_sync_sources
--> content_research_context -> agent rewrites -> content_create_draft
+-> content_research_context -> content_channel_post_brief -> agent rewrites -> content_create_draft
 -> content_prepare_publish -> human approval -> assistant_confirm_action
 ```
+
+`channel_profiles.json` ships with the deployment. Until the owner supplies a
+confirmed description, the registry uses an explicitly labelled inferred
+placeholder. Use `auto` for adaptive length or select `short`, `standard`, or
+`long`; do not impose one global length range. Telegram's own hard limits still
+apply: 4096 UTF-16 units for text and 1024 for media captions.
 
 ## Maton API Gateway
 

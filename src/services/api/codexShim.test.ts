@@ -88,7 +88,7 @@ describe('Codex provider config', () => {
     const resolved = resolveProviderRequest({ model: 'codexplan' })
     expect(resolved.transport).toBe('codex_responses')
     expect(resolved.resolvedModel).toBe('gpt-5.6-sol')
-    expect(resolved.reasoning).toEqual({ effort: 'high' })
+    expect(resolved.reasoning).toEqual({ effort: 'xhigh' })
     expect(resolved.baseUrl).toBe('https://chatgpt.com/backend-api/codex')
   })
 
@@ -101,7 +101,7 @@ describe('Codex provider config', () => {
     const resolved = resolveProviderRequest({ model: 'gpt-5.5' })
     expect(resolved.transport).toBe('codex_responses')
     expect(resolved.resolvedModel).toBe('gpt-5.5')
-    expect(resolved.reasoning).toEqual({ effort: 'medium' })
+    expect(resolved.reasoning).toEqual({ effort: 'xhigh' })
     expect(resolved.baseUrl).toBe('https://chatgpt.com/backend-api/codex')
   })
 

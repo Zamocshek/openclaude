@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'crypto'
 import { createReadStream } from 'fs'
-import { appendFile, mkdir, readFile, writeFile, stat } from 'fs/promises'
+import { appendFile, mkdir, readFile, rename, rm, writeFile, stat } from 'fs/promises'
 import { join } from 'path'
 import { createInterface } from 'readline'
 import {
@@ -19,6 +19,47 @@ import {
   getAgentGatewayStateDir,
 } from './config.js'
 import { parseHumanLimit, UNLIMITED_LIMIT } from '../../utils/limitParsing.js'
+
+const memoryMutationTails = new Map<string, Promise<void>>()
+
+async function serializeMemoryMutation<T>(
+  key: string,
+  mutation: () => Promise<T>,
+): Promise<T> {
+  const previous = memoryMutationTails.get(key) || Promise.resolve()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  const tail = previous.catch(() => {}).then(() => gate)
+  memoryMutationTails.set(key, tail)
+  await previous.catch(() => {})
+  try {
+    return await mutation()
+  } finally {
+    release()
+    if (memoryMutationTails.get(key) === tail) memoryMutationTails.delete(key)
+  }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return Boolean(
+    error
+      && typeof error === 'object'
+      && 'code' in error
+      && (error as { code?: unknown }).code === 'ENOENT',
+  )
+}
+
+async function writeTextAtomic(path: string, content: string): Promise<void> {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, content, { encoding: 'utf8', mode: 0o600 })
+    await rename(temporary, path)
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {})
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,6 +82,12 @@ export type DialogueBlock = {
 export type DialogueMeta = {
   lastConsolidatedOffset: number
   lastConsolidatedAt?: string
+}
+
+type DialogueState = {
+  version: 1
+  blocks: DialogueBlock[]
+  meta: DialogueMeta
 }
 
 export type IdentityEntry = {
@@ -166,6 +213,10 @@ function dialogueMetaPath(): string {
   return join(memoryDir(), 'dialogue_meta.json')
 }
 
+function dialogueStatePath(): string {
+  return join(memoryDir(), 'dialogue_state.json')
+}
+
 function chatLogPath(): string {
   return join(getAgentGatewayStateDir(), 'logs', 'chat.jsonl')
 }
@@ -276,18 +327,23 @@ function getMemoryLimitFromEnv(keys: string[], fallback: number): number {
 export async function loadCuratedMemoryStore(): Promise<CuratedMemoryStore> {
   try {
     const raw = await readFile(curatedStorePath(), 'utf8')
-    const parsed = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object') {
-      return { version: 1, entries: [] }
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (
+      !parsed
+      || typeof parsed !== 'object'
+      || parsed.version !== 1
+      || !Array.isArray(parsed.entries)
+    ) {
+      throw new Error('Curated memory store has an invalid schema')
     }
-    const entries = Array.isArray(parsed.entries)
-      ? parsed.entries
-        .map(normalizeCuratedMemoryEntry)
-        .filter((entry): entry is CuratedMemoryEntry => Boolean(entry))
-      : []
+    const entries = parsed.entries.map(normalizeCuratedMemoryEntry)
+    if (entries.some(entry => !entry)) {
+      throw new Error('Curated memory store contains an invalid entry')
+    }
     return { version: 1, entries }
-  } catch {
-    return { version: 1, entries: [] }
+  } catch (error) {
+    if (isMissingFile(error)) return { version: 1, entries: [] }
+    throw error
   }
 }
 
@@ -301,8 +357,9 @@ export async function loadPendingCuratedMemoryActions(): Promise<
     return parsed
       .map(normalizePendingCuratedMemoryAction)
       .filter((item): item is PendingCuratedMemoryAction => Boolean(item))
-  } catch {
-    return []
+  } catch (error) {
+    if (isMissingFile(error)) return []
+    throw error
   }
 }
 
@@ -364,6 +421,22 @@ export async function addCuratedMemoryEntry(options: {
   added: boolean
   usage: CuratedMemoryUsage
 }> {
+  return serializeMemoryMutation(
+    curatedStorePath(),
+    () => addCuratedMemoryEntryUnlocked(options),
+  )
+}
+
+async function addCuratedMemoryEntryUnlocked(options: {
+  kind: CuratedMemoryKind
+  content: string
+  source?: string
+  tags?: string[]
+}): Promise<{
+  entry: CuratedMemoryEntry
+  added: boolean
+  usage: CuratedMemoryUsage
+}> {
   const content = normalizeCuratedMemoryContent(options.content)
   validateCuratedMemoryContent(content)
 
@@ -410,6 +483,20 @@ export async function replaceCuratedMemoryEntry(options: {
   entry: CuratedMemoryEntry
   usage: CuratedMemoryUsage
 }> {
+  return serializeMemoryMutation(
+    curatedStorePath(),
+    () => replaceCuratedMemoryEntryUnlocked(options),
+  )
+}
+
+async function replaceCuratedMemoryEntryUnlocked(options: {
+  id: string
+  content: string
+  tags?: string[]
+}): Promise<{
+  entry: CuratedMemoryEntry
+  usage: CuratedMemoryUsage
+}> {
   const content = normalizeCuratedMemoryContent(options.content)
   validateCuratedMemoryContent(content)
 
@@ -445,6 +532,16 @@ export async function removeCuratedMemoryEntry(id: string): Promise<{
   removed: boolean
   usage: CuratedMemoryUsage
 }> {
+  return serializeMemoryMutation(
+    curatedStorePath(),
+    () => removeCuratedMemoryEntryUnlocked(id),
+  )
+}
+
+async function removeCuratedMemoryEntryUnlocked(id: string): Promise<{
+  removed: boolean
+  usage: CuratedMemoryUsage
+}> {
   const store = await loadCuratedMemoryStore()
   const nextEntries = store.entries.filter(entry => entry.id !== id)
   const removed = nextEntries.length !== store.entries.length
@@ -458,6 +555,22 @@ export async function removeCuratedMemoryEntry(id: string): Promise<{
 }
 
 export async function replaceCuratedMemoryText(options: {
+  kind?: CuratedMemoryKind
+  oldText: string
+  content: string
+  tags?: string[]
+}): Promise<{
+  entry: CuratedMemoryEntry
+  oldText: string
+  usage: CuratedMemoryUsage
+}> {
+  return serializeMemoryMutation(
+    curatedStorePath(),
+    () => replaceCuratedMemoryTextUnlocked(options),
+  )
+}
+
+async function replaceCuratedMemoryTextUnlocked(options: {
   kind?: CuratedMemoryKind
   oldText: string
   content: string
@@ -510,6 +623,22 @@ export async function removeCuratedMemoryText(options: {
   oldText: string
   usage: CuratedMemoryUsage
 }> {
+  return serializeMemoryMutation(
+    curatedStorePath(),
+    () => removeCuratedMemoryTextUnlocked(options),
+  )
+}
+
+async function removeCuratedMemoryTextUnlocked(options: {
+  kind?: CuratedMemoryKind
+  oldText: string
+}): Promise<{
+  removed: boolean
+  entry?: CuratedMemoryEntry
+  removedEntry?: CuratedMemoryEntry
+  oldText: string
+  usage: CuratedMemoryUsage
+}> {
   const oldText = normalizeOldText(options.oldText)
   const store = await loadCuratedMemoryStore()
   const match = findUniqueCuratedMemoryTextMatch(
@@ -551,13 +680,22 @@ export async function removeCuratedMemoryText(options: {
 export async function applyCuratedMemoryAction(
   input: CuratedMemoryActionInput,
 ): Promise<CuratedMemoryActionResult> {
+  return serializeMemoryMutation(
+    curatedStorePath(),
+    () => applyCuratedMemoryActionUnlocked(input),
+  )
+}
+
+async function applyCuratedMemoryActionUnlocked(
+  input: CuratedMemoryActionInput,
+): Promise<CuratedMemoryActionResult> {
   const action = normalizeCuratedMemoryActionInput(input)
 
   if (action.action === 'add') {
     return {
       action: 'add',
       pending: false,
-      result: await addCuratedMemoryEntry({
+      result: await addCuratedMemoryEntryUnlocked({
         kind: action.kind || 'memory',
         content: action.content || '',
         source: action.source,
@@ -571,7 +709,7 @@ export async function applyCuratedMemoryAction(
       return {
         action: 'replace',
         pending: false,
-        result: await replaceCuratedMemoryEntry({
+        result: await replaceCuratedMemoryEntryUnlocked({
           id: action.id,
           content: action.content || '',
           tags: action.tags,
@@ -581,7 +719,7 @@ export async function applyCuratedMemoryAction(
     return {
       action: 'replace',
       pending: false,
-      result: await replaceCuratedMemoryText({
+      result: await replaceCuratedMemoryTextUnlocked({
         kind: action.kind,
         oldText: action.oldText || '',
         content: action.content || '',
@@ -594,14 +732,14 @@ export async function applyCuratedMemoryAction(
     return {
       action: 'remove',
       pending: false,
-      result: await removeCuratedMemoryEntry(action.id),
+      result: await removeCuratedMemoryEntryUnlocked(action.id),
     }
   }
 
   return {
     action: 'remove',
     pending: false,
-    result: await removeCuratedMemoryText({
+    result: await removeCuratedMemoryTextUnlocked({
       kind: action.kind,
       oldText: action.oldText || '',
     }),
@@ -628,6 +766,15 @@ export async function applyOrStageCuratedMemoryAction(
 export async function stageCuratedMemoryAction(
   input: CuratedMemoryActionInput,
 ): Promise<PendingCuratedMemoryAction> {
+  return serializeMemoryMutation(
+    pendingCuratedMemoryPath(),
+    () => stageCuratedMemoryActionUnlocked(input),
+  )
+}
+
+async function stageCuratedMemoryActionUnlocked(
+  input: CuratedMemoryActionInput,
+): Promise<PendingCuratedMemoryAction> {
   const action = normalizeCuratedMemoryActionInput(input)
   const pending = await loadPendingCuratedMemoryActions()
   const staged: PendingCuratedMemoryAction = {
@@ -642,6 +789,19 @@ export async function stageCuratedMemoryAction(
 }
 
 export async function approvePendingCuratedMemoryAction(
+  id = 'all',
+): Promise<{
+  approved: PendingCuratedMemoryAction[]
+  remaining: PendingCuratedMemoryAction[]
+  results: CuratedMemoryActionResult[]
+}> {
+  return serializeMemoryMutation(
+    pendingCuratedMemoryPath(),
+    () => approvePendingCuratedMemoryActionUnlocked(id),
+  )
+}
+
+async function approvePendingCuratedMemoryActionUnlocked(
   id = 'all',
 ): Promise<{
   approved: PendingCuratedMemoryAction[]
@@ -672,6 +832,18 @@ export async function approvePendingCuratedMemoryAction(
 }
 
 export async function rejectPendingCuratedMemoryAction(
+  id = 'all',
+): Promise<{
+  rejected: PendingCuratedMemoryAction[]
+  remaining: PendingCuratedMemoryAction[]
+}> {
+  return serializeMemoryMutation(
+    pendingCuratedMemoryPath(),
+    () => rejectPendingCuratedMemoryActionUnlocked(id),
+  )
+}
+
+async function rejectPendingCuratedMemoryActionUnlocked(
   id = 'all',
 ): Promise<{
   rejected: PendingCuratedMemoryAction[]
@@ -962,22 +1134,50 @@ export async function applyCuratedMemoryDirectives(
   results: CuratedMemoryActionResult[]
 }> {
   const parsed = extractCuratedMemoryDirectives(text)
-  const results: CuratedMemoryActionResult[] = []
+  const actions = parsed.directives
+    .filter(directive => {
+      const target = directive.kind || 'memory'
+      if (target === 'memory' && options.memoryEnabled === false) return false
+      if (target === 'user' && options.userProfileEnabled === false) return false
+      return true
+    })
+    .map(directive => ({
+      ...directive,
+      source: options.source || directive.source || 'agent',
+    }))
 
-  for (const directive of parsed.directives) {
-    const target = directive.kind || 'memory'
-    if (target === 'memory' && options.memoryEnabled === false) continue
-    if (target === 'user' && options.userProfileEnabled === false) continue
-    results.push(
-      await applyOrStageCuratedMemoryAction(
-        {
-          ...directive,
-          source: options.source || directive.source || 'agent',
-        },
-        { requireApproval: options.requireApproval },
-      ),
-    )
-  }
+  const results = options.requireApproval
+    ? await serializeMemoryMutation(pendingCuratedMemoryPath(), async () => {
+        const original = await loadPendingCuratedMemoryActions()
+        const staged: CuratedMemoryActionResult[] = []
+        try {
+          for (const action of actions) {
+            const pending = await stageCuratedMemoryActionUnlocked(action)
+            staged.push({
+              action: pending.action,
+              pending: true,
+              staged: pending,
+            })
+          }
+          return staged
+        } catch (error) {
+          await savePendingCuratedMemoryActions(original)
+          throw error
+        }
+      })
+    : await serializeMemoryMutation(curatedStorePath(), async () => {
+        const original = await loadCuratedMemoryStore()
+        const applied: CuratedMemoryActionResult[] = []
+        try {
+          for (const action of actions) {
+            applied.push(await applyCuratedMemoryActionUnlocked(action))
+          }
+          return applied
+        } catch (error) {
+          await saveCuratedMemoryStore(original)
+          throw error
+        }
+      })
 
   return {
     text: parsed.text,
@@ -994,7 +1194,10 @@ async function saveCuratedMemoryStore(store: CuratedMemoryStore): Promise<void> 
       .filter((entry): entry is CuratedMemoryEntry => Boolean(entry)),
   }
   await mkdir(memoryDir(), { recursive: true })
-  await writeFile(curatedStorePath(), `${JSON.stringify(normalized, null, 2)}\n`)
+  await writeTextAtomic(
+    curatedStorePath(),
+    `${JSON.stringify(normalized, null, 2)}\n`,
+  )
   await regenerateCuratedMemoryMarkdown(normalized.entries)
 }
 
@@ -1005,7 +1208,7 @@ async function savePendingCuratedMemoryActions(
     .map(normalizePendingCuratedMemoryAction)
     .filter((item): item is PendingCuratedMemoryAction => Boolean(item))
   await mkdir(memoryDir(), { recursive: true })
-  await writeFile(
+  await writeTextAtomic(
     pendingCuratedMemoryPath(),
     `${JSON.stringify(normalized, null, 2)}\n`,
   )
@@ -1391,14 +1594,26 @@ function countOccurrences(haystack: string, needle: string): number {
 export async function loadScratchpadBlocks(): Promise<MemoryBlock[]> {
   try {
     const raw = await readFile(scratchpadBlocksPath(), 'utf8')
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed) || parsed.some(block => !isMemoryBlock(block))) {
+      throw new Error('Scratchpad block store has an invalid schema')
+    }
+    return parsed
+  } catch (error) {
+    if (isMissingFile(error)) return []
+    throw error
   }
 }
 
 export async function saveScratchpadBlocks(
+  blocks: MemoryBlock[],
+  options: { archiveBlocks?: MemoryBlock[]; reason?: string } = {},
+): Promise<void> {
+  return serializeMemoryMutation(scratchpadBlocksPath(), () =>
+    saveScratchpadBlocksUnlocked(blocks, options))
+}
+
+async function saveScratchpadBlocksUnlocked(
   blocks: MemoryBlock[],
   options: { archiveBlocks?: MemoryBlock[]; reason?: string } = {},
 ): Promise<void> {
@@ -1411,38 +1626,73 @@ export async function saveScratchpadBlocks(
       .join('\n')
     await appendFile(scratchpadArchivePath(), `${lines}\n`)
   }
-  await writeFile(scratchpadBlocksPath(), JSON.stringify(blocks, null, 2))
+  await writeTextAtomic(scratchpadBlocksPath(), JSON.stringify(blocks, null, 2))
   await regenerateScratchpadMdFromBlocks(blocks)
+}
+
+export async function commitScratchpadConsolidation(
+  expectedPrefix: MemoryBlock[],
+  replacement: MemoryBlock[],
+): Promise<boolean> {
+  return serializeMemoryMutation(scratchpadBlocksPath(), async () => {
+    const current = await loadScratchpadBlocks()
+    if (
+      current.length < expectedPrefix.length
+      || expectedPrefix.some((block, index) => !sameMemoryBlock(block, current[index]))
+    ) {
+      return false
+    }
+    await saveScratchpadBlocksUnlocked(
+      [...replacement, ...current.slice(expectedPrefix.length)],
+      { archiveBlocks: expectedPrefix, reason: 'consolidation' },
+    )
+    return true
+  })
 }
 
 export async function appendScratchpadBlock(
   content: string,
   source = 'consciousness',
 ): Promise<MemoryBlock> {
-  const blocks = await loadScratchpadBlocks()
-  const newBlock: MemoryBlock = {
-    ts: new Date().toISOString(),
-    source,
-    content,
-  }
-  blocks.push(newBlock)
+  return serializeMemoryMutation(scratchpadBlocksPath(), async () => {
+    const blocks = await loadScratchpadBlocks()
+    const newBlock: MemoryBlock = {
+      ts: new Date().toISOString(),
+      source,
+      content,
+    }
+    blocks.push(newBlock)
 
-  const maxBlocks = getScratchpadMaxBlocks()
-  const archiveBlocks = blocks.length > maxBlocks
-    ? blocks.splice(0, blocks.length - maxBlocks)
-    : []
-  await saveScratchpadBlocks(blocks, {
-    archiveBlocks,
-    reason: 'configured-active-window',
+    const maxBlocks = getScratchpadMaxBlocks()
+    const archiveBlocks = blocks.length > maxBlocks
+      ? blocks.splice(0, blocks.length - maxBlocks)
+      : []
+    await saveScratchpadBlocksUnlocked(blocks, {
+      archiveBlocks,
+      reason: 'configured-active-window',
+    })
+    return newBlock
   })
-  return newBlock
+}
+
+function sameMemoryBlock(
+  left: MemoryBlock,
+  right: MemoryBlock | undefined,
+): boolean {
+  return Boolean(
+    right
+    && left.ts === right.ts
+    && left.source === right.source
+    && left.content === right.content,
+  )
 }
 
 export async function loadScratchpad(): Promise<string> {
   try {
     return await readFile(scratchpadPath(), 'utf8')
-  } catch {
-    return '# Scratchpad\n\n(empty)\n'
+  } catch (error) {
+    if (isMissingFile(error)) return '# Scratchpad\n\n(empty)\n'
+    throw error
   }
 }
 
@@ -1482,7 +1732,8 @@ export async function getScratchpadTotalChars(): Promise<number> {
 export async function loadIdentity(): Promise<string> {
   try {
     return await readFile(identityPath(), 'utf8')
-  } catch {
+  } catch (error) {
+    if (!isMissingFile(error)) throw error
     const defaultIdentity = buildDefaultIdentity()
     await mkdir(memoryDir(), { recursive: true })
     await writeFile(identityPath(), defaultIdentity)
@@ -1510,38 +1761,133 @@ function buildDefaultIdentity(): string {
 // ---------------------------------------------------------------------------
 
 export async function loadDialogueBlocks(): Promise<DialogueBlock[]> {
-  try {
-    const raw = await readFile(dialogueBlocksPath(), 'utf8')
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
+  return (await loadDialogueState()).blocks
 }
 
 export async function saveDialogueBlocks(blocks: DialogueBlock[]): Promise<void> {
-  await mkdir(memoryDir(), { recursive: true })
-  await writeFile(dialogueBlocksPath(), JSON.stringify(blocks, null, 2))
+  return serializeMemoryMutation(dialogueStatePath(), async () => {
+    const current = await loadDialogueState()
+    await saveDialogueStateUnlocked({ ...current, blocks })
+  })
 }
 
 export async function loadDialogueMeta(): Promise<DialogueMeta> {
-  try {
-    const raw = await readFile(dialogueMetaPath(), 'utf8')
-    return JSON.parse(raw)
-  } catch {
-    return { lastConsolidatedOffset: 0 }
-  }
+  return (await loadDialogueState()).meta
 }
 
 export async function saveDialogueMeta(meta: DialogueMeta): Promise<void> {
+  return serializeMemoryMutation(dialogueStatePath(), async () => {
+    const current = await loadDialogueState()
+    await saveDialogueStateUnlocked({ ...current, meta })
+  })
+}
+
+export async function saveDialogueState(
+  blocks: DialogueBlock[],
+  meta: DialogueMeta,
+): Promise<void> {
+  return serializeMemoryMutation(dialogueStatePath(), () =>
+    saveDialogueStateUnlocked({ version: 1, blocks, meta }))
+}
+
+async function loadDialogueState(): Promise<DialogueState> {
+  try {
+    const raw = await readFile(dialogueStatePath(), 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    if (!isDialogueState(parsed)) {
+      throw new Error('Dialogue state store has an invalid schema')
+    }
+    return parsed
+  } catch (error) {
+    if (!isMissingFile(error)) throw error
+  }
+
+  const [blocks, meta] = await Promise.all([
+    loadLegacyDialogueBlocks(),
+    loadLegacyDialogueMeta(),
+  ])
+  return { version: 1, blocks, meta }
+}
+
+async function loadLegacyDialogueBlocks(): Promise<DialogueBlock[]> {
+  try {
+    const raw = await readFile(dialogueBlocksPath(), 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed) || parsed.some(block => !isDialogueBlock(block))) {
+      throw new Error('Dialogue block store has an invalid schema')
+    }
+    return parsed
+  } catch (error) {
+    if (isMissingFile(error)) return []
+    throw error
+  }
+}
+
+async function loadLegacyDialogueMeta(): Promise<DialogueMeta> {
+  try {
+    const raw = await readFile(dialogueMetaPath(), 'utf8')
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (!isDialogueMeta(parsed)) {
+      throw new Error('Dialogue metadata has an invalid schema')
+    }
+    return parsed as DialogueMeta
+  } catch (error) {
+    if (isMissingFile(error)) return { lastConsolidatedOffset: 0 }
+    throw error
+  }
+}
+
+async function saveDialogueStateUnlocked(state: DialogueState): Promise<void> {
+  if (!isDialogueState(state)) {
+    throw new Error('Refusing to save invalid dialogue state')
+  }
   await mkdir(memoryDir(), { recursive: true })
-  await writeFile(dialogueMetaPath(), JSON.stringify(meta, null, 2))
+  await writeTextAtomic(dialogueStatePath(), JSON.stringify(state, null, 2))
+}
+
+function isMemoryBlock(value: unknown): value is MemoryBlock {
+  if (!value || typeof value !== 'object') return false
+  const block = value as Record<string, unknown>
+  return typeof block.ts === 'string'
+    && typeof block.source === 'string'
+    && typeof block.content === 'string'
+}
+
+function isDialogueBlock(value: unknown): value is DialogueBlock {
+  if (!value || typeof value !== 'object') return false
+  const block = value as Record<string, unknown>
+  return typeof block.ts === 'string'
+    && (block.type === 'summary' || block.type === 'era')
+    && typeof block.range === 'string'
+    && Number.isSafeInteger(block.messageCount)
+    && typeof block.content === 'string'
+}
+
+function isDialogueMeta(value: unknown): value is DialogueMeta {
+  if (!value || typeof value !== 'object') return false
+  const meta = value as Record<string, unknown>
+  return Number.isSafeInteger(meta.lastConsolidatedOffset)
+    && Number(meta.lastConsolidatedOffset) >= 0
+    && (meta.lastConsolidatedAt === undefined || typeof meta.lastConsolidatedAt === 'string')
+}
+
+function isDialogueState(value: unknown): value is DialogueState {
+  if (!value || typeof value !== 'object') return false
+  const state = value as Record<string, unknown>
+  return state.version === 1
+    && Array.isArray(state.blocks)
+    && state.blocks.every(isDialogueBlock)
+    && isDialogueMeta(state.meta)
 }
 
 export async function appendDialogueBlock(block: DialogueBlock): Promise<void> {
-  const blocks = await loadDialogueBlocks()
-  blocks.push(block)
-  await saveDialogueBlocks(blocks)
+  return serializeMemoryMutation(dialogueStatePath(), async () => {
+    const current = await loadDialogueState()
+    await saveDialogueStateUnlocked({
+      ...current,
+      blocks: [...current.blocks, block],
+    })
+  })
 }
 
 // ---------------------------------------------------------------------------

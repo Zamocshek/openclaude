@@ -46,18 +46,32 @@ const ALL_STANDARD_REASONING: ReasoningEffort[] = [
   'high',
   'xhigh',
 ]
+const REASONING_PRIORITY: ReasoningEffort[] = [
+  'ultra',
+  'max',
+  'xhigh',
+  'high',
+  'medium',
+  'low',
+]
 
 const BUILT_IN_CODEX_MODELS: ProviderModelOption[] = [
-  codexModel('gpt-5.6-sol', 'GPT-5.6 Sol', 'medium', [...ALL_STANDARD_REASONING, 'max', 'ultra'], 372_000),
-  codexModel('gpt-5.6-terra', 'GPT-5.6 Terra', 'medium', [...ALL_STANDARD_REASONING, 'max', 'ultra'], 372_000),
-  codexModel('gpt-5.6-luna', 'GPT-5.6 Luna', 'medium', [...ALL_STANDARD_REASONING, 'max'], 372_000),
-  codexModel('gpt-5.5', 'GPT-5.5', 'medium', ALL_STANDARD_REASONING, 272_000),
-  codexModel('gpt-5.4', 'GPT-5.4', 'medium', ALL_STANDARD_REASONING, 272_000),
-  codexModel('gpt-5.4-mini', 'GPT-5.4 Mini', 'medium', ALL_STANDARD_REASONING, 272_000),
-  codexModel('gpt-5.3-codex-spark', 'GPT-5.3 Codex Spark', 'high', ALL_STANDARD_REASONING, 128_000),
+  codexModel('gpt-5.6-sol', 'GPT-5.6 Sol', [...ALL_STANDARD_REASONING, 'max', 'ultra'], 372_000),
+  codexModel('gpt-5.6-terra', 'GPT-5.6 Terra', [...ALL_STANDARD_REASONING, 'max', 'ultra'], 372_000),
+  codexModel('gpt-5.6-luna', 'GPT-5.6 Luna', [...ALL_STANDARD_REASONING, 'max'], 372_000),
+  codexModel('gpt-5.5', 'GPT-5.5', ALL_STANDARD_REASONING, 272_000),
+  codexModel('gpt-5.4', 'GPT-5.4', ALL_STANDARD_REASONING, 272_000),
+  codexModel('gpt-5.4-mini', 'GPT-5.4 Mini', ALL_STANDARD_REASONING, 272_000),
+  { ...basicModel('gpt-5.3-codex-spark', 'GPT-5.3 Codex Spark'), contextWindow: 128_000 },
 ]
 
 const DEEPSEEK_MODELS: ProviderModelOption[] = [
+  basicModel('deepseek-v4-flash', 'DeepSeek V4 Flash'),
+  basicModel('deepseek-v4-pro', 'DeepSeek V4 Pro'),
+]
+
+const OPENCODE_ZEN_MODELS: ProviderModelOption[] = [
+  basicModel('deepseek-v4-flash-free', 'DeepSeek V4 Flash Free'),
   basicModel('deepseek-v4-flash', 'DeepSeek V4 Flash'),
   basicModel('deepseek-v4-pro', 'DeepSeek V4 Pro'),
 ]
@@ -97,11 +111,22 @@ function basicModel(id: string, label = id): ProviderModelOption {
 function codexModel(
   id: string,
   label: string,
-  defaultReasoning: ReasoningEffort,
   reasoningLevels: ReasoningEffort[],
   contextWindow?: number,
 ): ProviderModelOption {
-  return { id, label, defaultReasoning, reasoningLevels, contextWindow }
+  return {
+    id,
+    label,
+    defaultReasoning: getMaximumSupportedReasoning(reasoningLevels),
+    reasoningLevels,
+    contextWindow,
+  }
+}
+
+export function getMaximumSupportedReasoning(
+  levels: readonly ReasoningEffort[],
+): ReasoningEffort | undefined {
+  return REASONING_PRIORITY.find(level => levels.includes(level))
 }
 
 function parseReasoningEffort(value: unknown): ReasoningEffort | undefined {
@@ -123,11 +148,14 @@ export function parseCodexModelRecords(records: CodexModelRecord[]): ProviderMod
       const levels = (record.supported_reasoning_levels ?? [])
         .map(level => parseReasoningEffort(level.effort))
         .filter((level): level is ReasoningEffort => Boolean(level))
+      const reasoningLevels = [...new Set(levels)]
       return {
         id: record.slug!,
         label: record.display_name || record.slug!,
-        defaultReasoning: parseReasoningEffort(record.default_reasoning_level),
-        reasoningLevels: [...new Set(levels)],
+        defaultReasoning:
+          getMaximumSupportedReasoning(reasoningLevels)
+          ?? parseReasoningEffort(record.default_reasoning_level),
+        reasoningLevels,
         contextWindow:
           typeof record.context_window === 'number'
             ? record.context_window
@@ -139,6 +167,7 @@ export function parseCodexModelRecords(records: CodexModelRecord[]): ProviderMod
 export function getBuiltInProviderModels(provider: string): ProviderModelOption[] {
   if (provider === 'codex') return BUILT_IN_CODEX_MODELS.map(model => ({ ...model }))
   if (provider === 'deepseek') return DEEPSEEK_MODELS.map(model => ({ ...model }))
+  if (provider === 'opencode-zen') return OPENCODE_ZEN_MODELS.map(model => ({ ...model }))
   if (provider === 'openrouter') return OPENROUTER_MODELS.map(model => ({ ...model }))
   if (provider === 'omniroute') return OMNIROUTE_MODELS.map(model => ({ ...model }))
   if (provider === 'lmstudio' || provider === 'lmstudio-lan') {

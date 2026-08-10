@@ -3,10 +3,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = resolve(import.meta.dirname, '..', '..')
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const BASE_COMPOSE = join(ROOT, 'docker-compose.agent-gateway.yml')
 const PROD_COMPOSE = join(ROOT, 'docker-compose.production.yml')
 const ENV_PATH = join(ROOT, '.env')
@@ -23,6 +24,7 @@ export const REQUIRED_BASE_MCP_SERVERS = [
   'codegraph',
   'searxng',
   'context7',
+  'github',
   'pentest',
   'telegram-mcp',
 ]
@@ -68,6 +70,7 @@ export function validateProductionEnv(env) {
     'OPENCLAUDE_AGENT_INFERENCE_API_KEY',
     'OPENCLAUDE_AGENT_WORKER_1_API_KEY',
     'OPENCLAUDE_AGENT_WORKER_2_API_KEY',
+    'GITHUB_MCP_PAT',
     'OMNIROUTE_API_KEY',
     'OMNIROUTE_INITIAL_PASSWORD',
     'OMNIROUTE_STORAGE_ENCRYPTION_KEY',
@@ -76,7 +79,6 @@ export function validateProductionEnv(env) {
     'OMNIROUTE_WS_BRIDGE_SECRET',
     'SEARXNG_SECRET',
     'SESSION_SECRET',
-    'JWT_SIGNING_KEY',
     'OPENRAG_ENCRYPTION_KEY',
     'PENTEST_GATEWAY_AUTH_TOKEN',
   ]) {
@@ -117,13 +119,21 @@ export function validateProductionEnv(env) {
   return errors
 }
 
+export function removeLegacyOpenRagJwtSigningKey(text) {
+  return text.replace(/^JWT_SIGNING_KEY=.*$/gmu, 'JWT_SIGNING_KEY=')
+}
+
 function truthy(value) {
   return /^(1|true|yes|on)$/iu.test(String(value || '').trim())
 }
 
 function readProductionEnv() {
   if (!existsSync(ENV_PATH)) throw new Error(`Missing ${ENV_PATH}`)
-  return { ...process.env, ...parseEnv(readFileSync(ENV_PATH, 'utf8')) }
+  return mergeProductionEnv(readFileSync(ENV_PATH, 'utf8'), process.env)
+}
+
+export function mergeProductionEnv(fileText, runtimeEnv = process.env) {
+  return { ...parseEnv(fileText), ...runtimeEnv }
 }
 
 function run(command, args, options = {}) {
@@ -306,12 +316,42 @@ export function getOpenRagVerificationUrls(env) {
   return urls
 }
 
+export function validateComposeRows(payload, expectedServices = []) {
+  const rows = String(payload || '')
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map(line => JSON.parse(line))
+  const byService = new Map(rows.map(row => [String(row.Service || ''), row]))
+  const errors = []
+  for (const service of expectedServices) {
+    if (!byService.has(service)) errors.push(`${service} was not created`)
+  }
+  for (const row of rows) {
+    const service = String(row.Service || row.Name || 'unknown service')
+    if (String(row.State || '').toLowerCase() !== 'running') {
+      errors.push(`${service} is not running`)
+    }
+    const health = String(row.Health || '').toLowerCase()
+    if (health && health !== 'healthy') {
+      errors.push(`${service} is ${health}`)
+    }
+    const publishers = Array.isArray(row.Publishers) ? row.Publishers : []
+    for (const publisher of publishers) {
+      const bind = String(publisher.URL || '')
+      if (bind && !LOOPBACKS.has(bind)) {
+        errors.push(`${service} publishes ${bind}:${publisher.PublishedPort}`)
+      }
+    }
+  }
+  return errors
+}
+
 export async function verify(options = {}) {
   const env = buildComposeEnv(readProductionEnv())
   const apiPort = env.OPENCLAUDE_AGENT_API_HOST_PORT || '8642'
   const omniPort = env.OMNIROUTE_HOST_PORT || '20128'
   const webUiPort = env.OPENCLAUDE_OPEN_WEBUI_HOST_PORT || '8080'
-  const telegramMcpPort = env.TELEGRAM_MCP_WEB_HOST_PORT || '18765'
+  const telegramMcpPort = env.TELEGRAM_MCP_WEB_HOST_PORT || '19765'
   const searxngPort = env.OPENCLAUDE_SEARXNG_HOST_PORT || '18088'
   const ollamaPort = env.OPENCLAUDE_OLLAMA_HOST_PORT || '11434'
   await requestOk(`http://127.0.0.1:${apiPort}/ready`)
@@ -369,20 +409,17 @@ export async function verify(options = {}) {
   }
 
   const composeArgs = options.composeArgs || COMPOSE_ARGS
+  const expectedServices = docker(
+    [...composeArgs, 'config', '--services'],
+    { capture: true, env },
+  ).split(/\r?\n/u).filter(Boolean)
   const published = docker(
-    [...composeArgs, 'ps', '--format', 'json'],
+    [...composeArgs, 'ps', '--all', '--format', 'json'],
     { capture: true, env },
   )
-  for (const line of published.split(/\r?\n/u).filter(Boolean)) {
-    const row = JSON.parse(line)
-    if (row.State !== 'running') throw new Error(`${row.Service} is not running`)
-    const publishers = Array.isArray(row.Publishers) ? row.Publishers : []
-    for (const publisher of publishers) {
-      const bind = String(publisher.URL || '')
-      if (bind && !LOOPBACKS.has(bind)) {
-        throw new Error(`${row.Service} publishes ${bind}:${publisher.PublishedPort}`)
-      }
-    }
+  const composeErrors = validateComposeRows(published, expectedServices)
+  if (composeErrors.length > 0) {
+    throw new Error(`Compose verification failed:\n- ${composeErrors.join('\n- ')}`)
   }
   docker(
     [
@@ -502,7 +539,8 @@ export async function deploy() {
 }
 
 export function ensureProductionSecrets() {
-  const existing = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : ''
+  const rawExisting = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, 'utf8') : ''
+  const existing = removeLegacyOpenRagJwtSigningKey(rawExisting)
   const env = parseEnv(existing)
   const additions = []
   const secretGenerators = {
@@ -518,7 +556,6 @@ export function ensureProductionSecrets() {
     OMNIROUTE_WS_BRIDGE_SECRET: () => randomBytes(32).toString('hex'),
     SEARXNG_SECRET: () => randomBytes(32).toString('hex'),
     SESSION_SECRET: () => randomBytes(32).toString('hex'),
-    JWT_SIGNING_KEY: () => randomBytes(32).toString('hex'),
     OPENRAG_ENCRYPTION_KEY: () => randomBytes(32).toString('base64'),
     PENTEST_GATEWAY_AUTH_TOKEN: () => randomBytes(32).toString('hex'),
   }
@@ -534,14 +571,16 @@ export function ensureProductionSecrets() {
   if (env.OPENCLAUDE_ROUTER_AUTO_AUTH !== '0') {
     additions.push('OPENCLAUDE_ROUTER_AUTO_AUTH=0')
   }
-  if (additions.length) {
+  if (additions.length || existing !== rawExisting) {
     writeFileSync(
       ENV_PATH,
       `${existing.trimEnd()}\n\n# Production hardening\n${additions.join('\n')}\n`,
       { mode: 0o600 },
     )
   }
-  console.log(`Production secrets ensured (${additions.length} settings added)`)
+  console.log(
+    `Production secrets ensured (${additions.length} settings added, ${existing !== rawExisting ? 1 : 0} legacy settings migrated)`,
+  )
 }
 
 async function main() {

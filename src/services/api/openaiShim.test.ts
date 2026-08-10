@@ -948,6 +948,83 @@ test('preserves mixed text and image tool results as multipart content', async (
   })
 })
 
+test('retries once with text-only messages when a provider rejects image_url', async () => {
+  const requestBodies: Array<Record<string, unknown>> = []
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    requestBodies.push(body)
+    if (requestBodies.length === 1) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message:
+              'messages[3]: unknown variant `image_url`, expected `text`',
+            type: 'invalid_request_error',
+          },
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-text-fallback',
+        model: 'deepseek-v4-pro',
+        choices: [{
+          message: { role: 'assistant', content: 'continued' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'deepseek-v4-pro',
+    messages: [
+      { role: 'user', content: 'Inspect the evidence.' },
+      {
+        role: 'assistant',
+        content: [{
+          type: 'tool_use',
+          id: 'call_image_fallback',
+          name: 'Read',
+          input: { file_path: '/tmp/evidence.png' },
+        }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'call_image_fallback',
+          content: [
+            { type: 'text', text: 'Screenshot captured.' },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: 'ZmFrZQ==',
+              },
+            },
+          ],
+        }],
+      },
+    ],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  expect(requestBodies).toHaveLength(2)
+  expect(JSON.stringify(requestBodies[0])).toContain('image_url')
+  expect(JSON.stringify(requestBodies[1])).not.toContain('image_url')
+  expect(JSON.stringify(requestBodies[1])).toContain(
+    'Image omitted because this provider rejected image input',
+  )
+})
+
 test('uses GEMINI_ACCESS_TOKEN for Gemini OpenAI-compatible requests', async () => {
   let capturedAuthorization: string | null = null
   let capturedProject: string | null = null
@@ -2544,6 +2621,139 @@ test('coalesces consecutive assistant messages preserving tool_calls (issue #202
   const assistantMsgs = sentMessages?.filter(m => m.role === 'assistant')
   expect(assistantMsgs?.length).toBe(1)
   expect(assistantMsgs?.[0]?.tool_calls?.length).toBeGreaterThan(0)
+})
+
+test('coalesces consecutive assistant messages without dropping reasoning replay', async () => {
+  let sentMessages: Array<{
+    role: string
+    reasoning_content?: string
+    tool_calls?: unknown[]
+  }> | undefined
+  globalThis.fetch = (async (_input: unknown, init: RequestInit | undefined) => {
+    sentMessages = JSON.parse(String(init?.body)).messages
+    return makeNonStreamResponse()
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'deepseek-v4-flash-free',
+    system: 'sys',
+    messages: [
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: [{ type: 'thinking', thinking: 'first thought' }] },
+      { role: 'assistant', content: [
+        { type: 'thinking', thinking: 'tool thought' },
+        { type: 'tool_use', id: 'call_1', name: 'Read', input: { file_path: 'a.ts' } },
+      ] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'ok' }] },
+    ],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  const assistant = sentMessages?.find(message => message.role === 'assistant')
+  expect(assistant?.reasoning_content).toBe('first thought\ntool thought')
+  expect(assistant?.tool_calls).toHaveLength(1)
+})
+
+test('replays reasoning_content with assistant tool calls for thinking providers', async () => {
+  let sentMessages: Array<{
+    role: string
+    reasoning_content?: string
+    tool_calls?: unknown[]
+  }> | undefined
+
+  globalThis.fetch = (async (_input: unknown, init: RequestInit | undefined) => {
+    sentMessages = JSON.parse(String(init?.body)).messages
+    return makeNonStreamResponse()
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'deepseek-v4-flash-free',
+    system: 'sys',
+    messages: [
+      { role: 'user', content: 'inspect the target' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'I should use the Telegram profile tool.' },
+          {
+            type: 'tool_use',
+            id: 'call_profile',
+            name: 'content_channel_post_brief',
+            input: { chat_id: '@r7training' },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'call_profile', content: '{"ok":true}' },
+        ],
+      },
+    ],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  const assistant = sentMessages?.find(message => message.role === 'assistant')
+  expect(assistant?.reasoning_content).toBe(
+    'I should use the Telegram profile tool.',
+  )
+  expect(assistant?.tool_calls?.length).toBe(1)
+})
+
+test('replays an empty reasoning_content field for OpenCode Zen tool calls', async () => {
+  let sentMessages: Array<{
+    role: string
+    reasoning_content?: string
+    tool_calls?: unknown[]
+  }> | undefined
+
+  globalThis.fetch = (async (_input: unknown, init: RequestInit | undefined) => {
+    sentMessages = JSON.parse(String(init?.body)).messages
+    return makeNonStreamResponse()
+  }) as FetchType
+
+  const client = createOpenAIShimClient({
+    providerOverride: {
+      model: 'deepseek-v4-flash-free',
+      baseURL: 'https://opencode.ai/zen/v1',
+      apiKey: 'opencode-test-key',
+    },
+  }) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'ignored',
+    system: 'sys',
+    messages: [
+      { role: 'user', content: 'inspect the account' },
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: 'call_account',
+            name: 'check_account',
+            input: { account_id: '18544421149' },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'call_account', content: '{"ok":true}' },
+        ],
+      },
+    ],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  const assistant = sentMessages?.find(message => message.role === 'assistant')
+  expect(assistant?.tool_calls?.length).toBe(1)
+  expect(Object.hasOwn(assistant ?? {}, 'reasoning_content')).toBe(true)
+  expect(assistant?.reasoning_content).toBe('')
 })
 
 test('non-streaming: reasoning_content emitted as thinking block only when content is null', async () => {

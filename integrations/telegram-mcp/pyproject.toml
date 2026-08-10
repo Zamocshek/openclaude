@@ -43,13 +43,14 @@ dependencies = [
 "Upstream" = "https://github.com/chigwell/telegram-mcp"
 
 [tool.setuptools]
-py-modules = ["main", "account_admin", "assistant_memory", "content_workflow", "maton_client", "operator_config", "post_formatting", "runtime_config", "session_string_generator", "stat_report_renderer", "vpromotions_client", "web_app"]
+py-modules = ["main", "account_admin", "assistant_memory", "channel_profiles", "content_workflow", "maton_client", "operator_config", "post_formatting", "runtime_config", "session_string_generator", "stat_report_renderer", "telegram_bot_client", "vpromotions_client", "twiboost_client", "web_app"]
 
 [project.scripts]
 telegram-mcp = "main:main"
 telegram-mcp-generate-session = "session_string_generator:main"
 telegram-mcp-render-stat = "stat_report_renderer:main"
 telegram-mcp-vpromotions = "vpromotions_client:main"
+telegram-mcp-twiboost = "twiboost_client:main"
 telegram-mcp-maton = "maton_client:main"
 telegram-mcp-web = "web_app:main"
 

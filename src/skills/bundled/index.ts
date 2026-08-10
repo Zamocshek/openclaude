@@ -2,6 +2,7 @@ import { feature } from 'bun:bundle'
 import { shouldAutoEnableClaudeInChrome } from 'src/utils/claudeInChrome/setup.js'
 import { registerBatchSkill } from './batch.js'
 import { registerAndroidDeviceSkill } from './androidDevice.js'
+import { registerAgentMigrationSkill } from './agentMigration.js'
 import { registerClaudeInChromeSkill } from './claudeInChrome.js'
 import { registerCodeSkill } from './code.js'
 import { registerDebugSkill } from './debug.js'
@@ -9,6 +10,7 @@ import { registerKeybindingsSkill } from './keybindings.js'
 import { registerLoopSkill } from './loop.js'
 import { registerPentestSkill } from './pentest.js'
 import { registerQwenCollaborationSkill } from './qwenCollaboration.js'
+import { registerServerAccessSkill } from './serverAccess.js'
 import { registerSimplifySkill } from './simplify.js'
 import { registerTelegramMcpSkills } from './telegramMcp.js'
 import { registerUpdateConfigSkill } from './updateConfig.js'
@@ -23,12 +25,14 @@ import { registerUpdateConfigSkill } from './updateConfig.js'
  * 3. Import and call that function here
  */
 export function initBundledSkills(): void {
+  registerAgentMigrationSkill()
   registerUpdateConfigSkill()
   registerKeybindingsSkill()
   registerCodeSkill()
   registerAndroidDeviceSkill()
   registerPentestSkill()
   registerQwenCollaborationSkill()
+  registerServerAccessSkill()
   registerDebugSkill()
   registerSimplifySkill()
   registerBatchSkill()

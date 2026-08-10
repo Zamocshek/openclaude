@@ -1,0 +1,261 @@
+{
+  "version": 1,
+  "description_priority": [
+    "request_override",
+    "confirmed_description",
+    "inferred_description",
+    "channel_name"
+  ],
+  "format_policy": {
+    "telegram_utf16_limit": 4096,
+    "default_mode": "auto",
+    "modes": {
+      "short": {
+        "min_chars": 250,
+        "target_chars": 500,
+        "max_chars": 900,
+        "use_when": "One sharp idea, announcement, reaction, question, or compact call to action."
+      },
+      "standard": {
+        "min_chars": 700,
+        "target_chars": 1300,
+        "max_chars": 2100,
+        "use_when": "A complete argument, practical framework, comparison, or compact story."
+      },
+      "long": {
+        "min_chars": 1600,
+        "target_chars": 2800,
+        "max_chars": 3800,
+        "use_when": "Deep analysis, guide, case study, narrative, breakdown, or multi-step system."
+      }
+    },
+    "auto_rules": [
+      "Choose long when the subject needs evidence, a sequence of steps, a story, or a real breakdown.",
+      "Choose standard for one developed argument with examples and a useful conclusion.",
+      "Choose short only when compression strengthens the idea; never shorten merely to satisfy a campaign template.",
+      "Treat the ranges as editorial guidance, not quotas. Telegram's 4096 UTF-16 limit is the only hard text limit."
+    ]
+  },
+  "quality_rules": [
+    "Match the selected channel profile before optimizing hooks or style.",
+    "Use a confirmed channel description when available; otherwise label and use the inferred description.",
+    "Do not cross-post the same text. Adapt the angle, examples, vocabulary, and depth to each channel.",
+    "Check factual, medical, financial, and performance claims against available sources; do not invent precise numbers.",
+    "Keep natural Russian and Telegram-compatible formatting. A headline is optional, not mandatory.",
+    "Review quality, thematic fit, clarity, and originality independently from post length."
+  ],
+  "channels": [
+    {
+      "id": "ubermensch-front",
+      "name": "Ubermensch FRONT",
+      "group": "main_network",
+      "references": ["https://t.me/+TGVVF9zNyihhY2E0", "1776823101", "-1001776823101"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Philosophy of self-overcoming, autonomy, will, discipline, and personal transformation.",
+      "inference_confidence": "medium",
+      "content_pillars": ["self-overcoming", "philosophy", "will", "discipline", "autonomy"],
+      "topic_keywords": ["воля", "дисциплин", "преодол", "ницше", "автоном", "характер", "philosophy", "will", "discipline"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Direct, philosophical, demanding, and concept-driven."
+    },
+    {
+      "id": "martin-self-development",
+      "name": "Мартин | Саморазвитие",
+      "group": "main_network",
+      "references": ["@slivmartin", "https://t.me/slivmartin", "1683331639", "-1001683331639"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Practical self-development, habits, attention, productivity, learning, and personal systems.",
+      "inference_confidence": "high",
+      "content_pillars": ["habits", "productivity", "attention", "learning", "personal systems"],
+      "topic_keywords": ["привычк", "продуктив", "вниман", "обучен", "саморазвит", "систем", "habits", "productivity", "learning"],
+      "preferred_formats": ["short", "standard", "long"],
+      "tone": "Clear, practical, reflective, and action-oriented."
+    },
+    {
+      "id": "temple-of-strength",
+      "name": "Храм силы",
+      "group": "main_network",
+      "references": ["https://t.me/+Ybjk0FLzpM44Yzgy", "2068482043", "-1002068482043"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Strength, training discipline, physical development, resilience, and gym culture.",
+      "inference_confidence": "high",
+      "content_pillars": ["strength", "training", "discipline", "resilience", "gym culture"],
+      "topic_keywords": ["сил", "трениров", "зал", "дисциплин", "восстанов", "мышц", "strength", "training", "gym"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Strong, grounded, disciplined, and free of empty hype."
+    },
+    {
+      "id": "out-darkness",
+      "name": "Out'Darkness",
+      "group": "main_network",
+      "references": ["https://t.me/+WZL_Aw8zjAtjNTVi", "2107829568", "-1002107829568"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Worldview, independent thinking, anti-conformism, personal agency, and analysis of social systems.",
+      "inference_confidence": "medium",
+      "content_pillars": ["worldview", "independent thinking", "agency", "anti-conformism", "systems"],
+      "topic_keywords": ["мировоззрен", "независим", "конформ", "систем", "общество", "мышлен", "worldview", "agency", "systems"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Dark, analytical, independent, and intellectually confrontational."
+    },
+    {
+      "id": "gosha-miller-looksmaxxing",
+      "name": "Гоша Миллер | Looksmaxxing",
+      "group": "main_network",
+      "references": ["@goshamiller2", "https://t.me/goshamiller2", "2139300359", "-1002139300359"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Looksmaxxing, grooming, style, body composition, appearance routines, and measurable self-presentation improvements.",
+      "inference_confidence": "high",
+      "content_pillars": ["looksmaxxing", "grooming", "style", "body composition", "appearance routines"],
+      "topic_keywords": ["внешност", "кожа", "волос", "стиль", "уход", "композици", "лицо", "looksmax", "grooming"],
+      "preferred_formats": ["short", "standard", "long"],
+      "tone": "Specific, visual, practical, and focused on controllable improvements."
+    },
+    {
+      "id": "wild-street",
+      "name": "Wild Street",
+      "group": "main_network",
+      "references": ["https://t.me/+yILPYk72hYU1YmQy", "2404054990", "-1002404054990"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Street awareness, confidence, social behavior, composure, boundaries, and real-world situations.",
+      "inference_confidence": "medium",
+      "content_pillars": ["street awareness", "confidence", "boundaries", "social behavior", "composure"],
+      "topic_keywords": ["улиц", "уверен", "границ", "общен", "самообладан", "ситуаци", "street", "confidence", "boundaries"],
+      "preferred_formats": ["short", "standard", "long"],
+      "tone": "Observant, concrete, calm, and based on realistic situations."
+    },
+    {
+      "id": "tron-self-defense",
+      "name": "TRON | САМООБОРОНА",
+      "group": "main_network",
+      "references": ["https://t.me/+mZYtqdOEZdY2ZDky", "2424193482", "-1002424193482"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Self-defense, situational awareness, avoidance, de-escalation, physical preparedness, and scenario analysis.",
+      "inference_confidence": "high",
+      "content_pillars": ["self-defense", "situational awareness", "avoidance", "de-escalation", "preparedness"],
+      "topic_keywords": ["самооборон", "деэскалац", "дистанц", "конфликт", "угроз", "избеган", "self-defense", "situational", "de-escalation"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Tactical, sober, scenario-based, and focused on decisions rather than bravado."
+    },
+    {
+      "id": "mass-gym",
+      "name": "Mass & Gym",
+      "group": "main_network",
+      "references": ["https://t.me/+nS0h5CVn-_Q1OTAy", "2464723454", "-1002464723454"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Bodybuilding, hypertrophy, exercise technique, programming, nutrition, recovery, and gym progress.",
+      "inference_confidence": "high",
+      "content_pillars": ["bodybuilding", "hypertrophy", "technique", "programming", "nutrition", "recovery"],
+      "topic_keywords": ["бодибилд", "гипертроф", "техник", "питани", "восстанов", "трениров", "мышц", "bodybuilding", "hypertrophy"],
+      "preferred_formats": ["short", "standard", "long"],
+      "tone": "Technical, motivating, measurable, and training-focused."
+    },
+    {
+      "id": "andrew-tate-library",
+      "name": "Слив Эндрю Тейт",
+      "group": "library_network",
+      "references": ["@endryteytfull", "https://t.me/endryteytfull", "2462843324", "-1002462843324"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Andrew Tate material, masculinity, discipline, business thinking, status, responsibility, and commentary on his ideas.",
+      "inference_confidence": "high",
+      "content_pillars": ["Andrew Tate", "discipline", "business", "masculinity", "responsibility", "commentary"],
+      "topic_keywords": ["тейт", "бизнес", "дисциплин", "ответствен", "мужеств", "статус", "andrew tate", "business", "responsibility"],
+      "preferred_formats": ["short", "standard", "long"],
+      "tone": "Provocative, decisive, structured, and anchored in a concrete idea or source fragment."
+    },
+    {
+      "id": "kirill-sarychev-library",
+      "name": "Слив Курсов Кирилла Сарычева",
+      "group": "library_network",
+      "references": ["@bipolyarkasarych1", "https://t.me/bipolyarkasarych1", "2298829897", "-1002298829897"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Strength sport, powerlifting, training methodology, technique, progression, and course breakdowns associated with Kirill Sarychev.",
+      "inference_confidence": "high",
+      "content_pillars": ["powerlifting", "strength", "technique", "progression", "training methodology", "course breakdowns"],
+      "topic_keywords": ["сарычев", "пауэрлифт", "сил", "жим", "тяга", "присед", "прогресс", "техник", "powerlifting"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Experienced, technical, practical, and respectful of measurable performance."
+    },
+    {
+      "id": "sleepy-library",
+      "name": "Слив Слипи Sleepy",
+      "group": "library_network",
+      "references": ["@sleepyrobot0", "https://t.me/sleepyrobot0", "2335703551", "-1002335703551"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Material associated with Sleepy; exact niche and recurring rubrics require the owner's channel description.",
+      "inference_confidence": "low",
+      "content_pillars": ["creator material", "self-development", "lifestyle"],
+      "topic_keywords": ["sleepy", "слипи", "саморазвит", "образ жизн", "привычк", "creator", "lifestyle"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Use source-aware neutral framing until the owner supplies a confirmed description."
+    },
+    {
+      "id": "one-percent-library",
+      "name": "Слив Один Процент Книга",
+      "group": "library_network",
+      "references": ["@odinprosent2", "https://t.me/odinprosent2", "2182488694", "-1002182488694"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Incremental improvement, habits, discipline, book concepts, consistency, and practical self-development.",
+      "inference_confidence": "high",
+      "content_pillars": ["incremental improvement", "habits", "discipline", "books", "consistency"],
+      "topic_keywords": ["один процент", "привычк", "дисциплин", "книг", "последователь", "улучшен", "habits", "consistency"],
+      "preferred_formats": ["short", "standard", "long"],
+      "tone": "Simple, cumulative, practical, and focused on repeatable actions."
+    },
+    {
+      "id": "r7-training-library",
+      "name": "Слив R7 Программы Тренировок",
+      "group": "library_network",
+      "references": ["@r7training", "https://t.me/r7training", "2497007956", "-1002497007956"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Training programs, exercise selection, progression, tracking, technique, and program analysis.",
+      "inference_confidence": "high",
+      "content_pillars": ["training programs", "progression", "tracking", "technique", "program analysis"],
+      "topic_keywords": ["программ трениров", "прогресс", "подход", "повтор", "техник", "упражнен", "training program", "tracking"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Structured, instructional, measurable, and easy to apply in training."
+    },
+    {
+      "id": "biomachine-library",
+      "name": "Слив BIOMACHINE",
+      "group": "library_network",
+      "references": ["@bmchnka", "https://t.me/bmchnka", "2313703064", "-1002313703064"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Biohacking, recovery, physiology, sleep, nutrition, training science, and critical analysis of protocols.",
+      "inference_confidence": "high",
+      "content_pillars": ["biohacking", "recovery", "physiology", "sleep", "nutrition", "training science"],
+      "topic_keywords": ["биохакинг", "физиолог", "сон", "питани", "восстанов", "анализ", "исследован", "biohacking", "physiology"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Evidence-aware, analytical, practical, and explicit about uncertainty."
+    },
+    {
+      "id": "mogwarts-looksmaxxing-library",
+      "name": "Слив Могвартс 2.0 Гоша Миллер",
+      "group": "library_network",
+      "references": ["@slivmogwarts", "https://t.me/slivmogwarts", "2042861689", "-1002042861689"],
+      "description": null,
+      "description_status": "placeholder",
+      "inferred_description": "Looksmaxxing course material, grooming, appearance systems, routines, style, and practical transformation plans.",
+      "inference_confidence": "high",
+      "publishing_enabled": false,
+      "content_pillars": ["looksmaxxing", "course material", "grooming", "appearance systems", "style", "routines"],
+      "topic_keywords": ["могвартс", "внешност", "уход", "стиль", "лицо", "образ", "looksmax", "grooming", "routine"],
+      "preferred_formats": ["standard", "long"],
+      "tone": "Detailed, practical, visual, and organized as a transformation system.",
+      "operational_note": "Publishing is currently blocked by Telegram platform restriction; content planning remains available."
+    }
+  ]
+}

@@ -4,7 +4,7 @@ import { resolve, join } from 'path'
 import { getClaudeConfigHomeDir } from '../../utils/envUtils.js'
 
 export type AgentGatewayPermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions'
-export type AgentGatewayHarnessMode = 'minimal' | 'adaptive' | 'strict'
+export type AgentGatewayHarnessMode = 'ouroboros'
 
 export type AgentGatewaySubagentRoute = {
   provider: string
@@ -190,7 +190,7 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
       maxTurns: 120,
       timeoutMs: 30 * 60 * 1000,
       permissionMode: 'default',
-      harnessMode: 'adaptive',
+      harnessMode: 'ouroboros',
       disableTools: false,
       availableTools: [],
       disallowedTools: [],
@@ -207,13 +207,13 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
         },
         'gateway-plan': {
           provider: 'codex',
-          model: 'gpt-5.6-sol?reasoning=xhigh',
+          model: 'gpt-5.6-sol?reasoning=ultra',
           baseUrl: 'https://chatgpt.com/backend-api/codex',
           apiKeyEnv: 'CODEX_API_KEY',
         },
         'gateway-implement': {
           provider: 'codex',
-          model: 'gpt-5.6-sol?reasoning=xhigh',
+          model: 'gpt-5.6-sol?reasoning=ultra',
           baseUrl: 'https://chatgpt.com/backend-api/codex',
           apiKeyEnv: 'CODEX_API_KEY',
         },
@@ -225,7 +225,7 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
         },
         'gateway-vision': {
           provider: 'codex',
-          model: 'gpt-5.6-sol?reasoning=medium',
+          model: 'gpt-5.6-sol?reasoning=ultra',
           baseUrl: 'https://chatgpt.com/backend-api/codex',
           apiKeyEnv: 'CODEX_API_KEY',
         },
@@ -261,11 +261,9 @@ function normalizePermissionMode(value: unknown): AgentGatewayPermissionMode {
 }
 
 export function normalizeAgentGatewayHarnessMode(
-  value: unknown,
+  _value: unknown,
 ): AgentGatewayHarnessMode {
-  return value === 'minimal' || value === 'strict' || value === 'adaptive'
-    ? value
-    : 'adaptive'
+  return 'ouroboros'
 }
 
 function normalizeFiniteNumber(

@@ -10,6 +10,7 @@ const previousAuthDir = process.env.OPENCLAUDE_CAMOFOX_AUTH_DIR
 const temporaryDirectories = []
 
 afterEach(() => {
+  bridge.tabIdentityById.clear()
   if (previousAuthDir === undefined) {
     delete process.env.OPENCLAUDE_CAMOFOX_AUTH_DIR
   } else {
@@ -56,5 +57,32 @@ describe('Camofox MCP browser model tools', () => {
     expect(listed).not.toContain('password')
     expect(listed).not.toContain('never-return-this')
     expect(listed).not.toContain('"token"')
+  })
+
+  test('routes known browser-model URLs through their persistent identity', () => {
+    const profile = bridge.browserModelProfileForUrl(
+      'https://chat.qwen.ai/c/existing-conversation',
+    )
+    const payload = bridge.tabPayload({
+      url: 'https://chat.qwen.ai/c/existing-conversation',
+    })
+
+    expect(profile?.id).toBe('qwen')
+    expect(payload).toEqual({
+      userId: 'nova-qwen-max',
+      sessionKey: 'qwen-collaboration',
+    })
+  })
+
+  test('reuses the remembered identity for subsequent tab operations', () => {
+    bridge.tabIdentityById.set('qwen-tab', {
+      userId: 'nova-qwen-max',
+      sessionKey: 'qwen-collaboration',
+    })
+
+    expect(bridge.tabPayload({}, 'qwen-tab')).toEqual({
+      userId: 'nova-qwen-max',
+      sessionKey: 'qwen-collaboration',
+    })
   })
 })

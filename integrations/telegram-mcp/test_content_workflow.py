@@ -129,3 +129,32 @@ def test_import_history_and_role_filter(tmp_path, monkeypatch):
         assert len(imported) == 2
         assert [post["text"] for post in published] == ["First old post"]
         assert [post["text"] for post in drafts] == ["Second old post"]
+
+
+def test_source_reference_resolves_public_and_private_post_links(tmp_path, monkeypatch):
+    with _connect(tmp_path, monkeypatch) as conn:
+        cw.upsert_channel(
+            conn,
+            kind="source",
+            account_id="research-main",
+            chat_id="-100123456789",
+            peer_id="-100123456789",
+            title="Donor",
+            username="donor_channel",
+        )
+        source = cw.store_post(
+            conn,
+            role="source",
+            account_id="research-main",
+            chat_id="-100123456789",
+            peer_id="-100123456789",
+            message_id=42,
+            text="Rich source",
+        )
+        conn.commit()
+
+        public = cw.find_source_post_by_reference(conn, "https://t.me/donor_channel/42")
+        private = cw.find_source_post_by_reference(conn, "https://t.me/c/123456789/42")
+
+        assert public["id"] == source["id"]
+        assert private["id"] == source["id"]

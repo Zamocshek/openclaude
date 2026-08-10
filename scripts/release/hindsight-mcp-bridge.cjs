@@ -218,7 +218,24 @@ async function retain(args) {
 }
 
 async function recall(args) {
-  const data = await hindsightRequest(`/v1/default/banks/${bankId(args)}/memories/recall`, jsonBody(recallPayload(args)))
+  const path = `/v1/default/banks/${bankId(args)}/memories/recall`
+  const payload = recallPayload(args)
+  let data = await hindsightRequest(path, jsonBody(payload))
+
+  // Models may guess tags that were never attached to an otherwise relevant
+  // memory. Preserve explicit tag filtering when it works, but do not let a
+  // speculative tag turn semantic recall into a false "memory missing" result.
+  if (payload.tags?.length && (!Array.isArray(data?.results) || data.results.length === 0)) {
+    const semanticPayload = { ...payload }
+    delete semanticPayload.tags
+    delete semanticPayload.tags_match
+    data = await hindsightRequest(path, jsonBody(semanticPayload))
+    return [
+      'No exact Hindsight tag match; semantic recall retried without tag filtering.',
+      formatRecall(data),
+    ].join('\n')
+  }
+
   return formatRecall(data)
 }
 

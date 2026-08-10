@@ -1,0 +1,58 @@
+{
+  "$schema": "https://openclaude.local/schemas/agent-portability-v1.json",
+  "schemaVersion": 1,
+  "agent": {
+    "id": "nova",
+    "name": "NOVA",
+    "runtime": "openclaude-agent-gateway"
+  },
+  "workspace": {
+    "include": [
+      "Vladimir_Kuplevatskyi",
+      "nova",
+      "docs/BIBLE.md",
+      "docs/ARCHITECTURE.md",
+      "docs/nova-capability-routing.md",
+      "docs/ouroboros-harness.md",
+      "capability-registry.json",
+      "scripts",
+      "integrations/telegram-mcp",
+      ".mcp.json",
+      "package.json",
+      "bun.lock",
+      "Dockerfile",
+      "docker-compose.agent-gateway.yml",
+      "docker-compose.production.yml",
+      "docker-compose.portable.yml"
+    ],
+    "exclude": [
+      "backups",
+      "output",
+      "tmp",
+      "data/session",
+      "camofox-auth",
+      "open-webui-data"
+    ],
+    "maxFileBytes": 536870912
+  },
+  "capabilities": {
+    "mcpConfigs": [
+      ".mcp.json"
+    ],
+    "registry": "capability-registry.json",
+    "components": [
+      {
+        "id": "capability-router",
+        "root": "packages/capability-router"
+      }
+    ],
+    "skillRoots": [
+      "skills",
+      ".agents/skills",
+      ".claude/skills",
+      ".codex/skills",
+      "integrations/telegram-mcp/skills",
+      "integrations/telegram-mcp/maton skills for telegram"
+    ]
+  }
+}

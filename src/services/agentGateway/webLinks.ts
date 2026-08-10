@@ -36,7 +36,7 @@ export function getAgentGatewayWebLinks(
     ),
     telegramMcp: publicUrl(
       process.env.TELEGRAM_MCP_WEB_PUBLIC_URL,
-      `http://localhost:${process.env.TELEGRAM_MCP_WEB_HOST_PORT || '18765'}`,
+      `http://localhost:${process.env.TELEGRAM_MCP_WEB_HOST_PORT || '19765'}`,
     ),
     omniRoute: publicUrl(
       process.env.OMNIROUTE_PUBLIC_URL,

@@ -35,6 +35,14 @@ def test_assistant_memory_smoke(tmp_path):
                 target_label="Test Chat",
                 payload={"message": "ok"},
             )
+            content_action_id = am.create_pending_action(
+                conn,
+                action_type="send_message",
+                account_id="test",
+                target_chat="peer-2",
+                target_label="Content Channel",
+                payload={"message": "post", "content_draft_id": 77},
+            )
             todo_id = am.add_todo(conn, account_id="test", text="finish memory test")
             reminder_id = am.add_reminder(
                 conn,
@@ -46,11 +54,27 @@ def test_assistant_memory_smoke(tmp_path):
 
             hits = am.search_messages(conn, "test", "telegram helper")
             pending = am.get_pending_action(conn, action_id)
+            content_action = am.find_action_for_content_draft(conn, 77)
+            claimed = am.claim_pending_action(conn, action_id)
+            second_claim = am.claim_pending_action(conn, action_id)
+            am.resolve_pending_action(
+                conn,
+                action_id,
+                "sent",
+                result={"message_id": 42},
+            )
+            resolved = am.get_pending_action(conn, action_id)
             todos = am.list_todos(conn, "test")
             reminders = am.list_reminders(conn, "test")
 
         assert len(hits) == 1
         assert pending["id"] == action_id
+        assert content_action["id"] == content_action_id
+        assert claimed["status"] == "executing"
+        assert claimed["attempt_count"] == 1
+        assert second_claim is None
+        assert resolved["status"] == "sent"
+        assert resolved["result_json"] == '{"message_id": 42}'
         assert todos[0]["id"] == todo_id
         assert reminders[0]["id"] == reminder_id
     finally:

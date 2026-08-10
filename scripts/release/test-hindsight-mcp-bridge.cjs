@@ -27,6 +27,7 @@ function writeJson(response, status, value) {
 
 function startMockHindsight() {
   const memories = []
+  const recallBodies = []
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://127.0.0.1')
@@ -47,8 +48,9 @@ function startMockHindsight() {
       }
       if (request.method === 'POST' && url.pathname.endsWith('/memories/recall')) {
         const body = await readJson(request)
+        recallBodies.push(body)
         writeJson(response, 200, {
-          results: memories.map((item, index) => ({
+          results: body.tags?.length ? [] : memories.map((item, index) => ({
             id: `memory-${index + 1}`,
             text: item.content,
             type: 'experience',
@@ -100,6 +102,7 @@ function startMockHindsight() {
       resolve_({
         server,
         url: `http://127.0.0.1:${address.port}`,
+        recallBodies,
       })
     })
   })
@@ -151,6 +154,24 @@ async function main() {
       arguments: { query: 'What should OpenClaude remember about Camofox?' },
     }))
     if (!recall.includes('Camofox')) throw new Error(`Unexpected recall result: ${recall}`)
+
+    const taggedRecall = textContent(await client.callTool({
+      name: 'hindsight_recall',
+      arguments: {
+        query: 'What should OpenClaude remember about Camofox?',
+        tags: ['guessed-tag'],
+      },
+    }))
+    if (!taggedRecall.includes('semantic recall retried')) {
+      throw new Error(`Tagged recall did not report semantic fallback: ${taggedRecall}`)
+    }
+    if (!taggedRecall.includes('Camofox')) {
+      throw new Error(`Tagged recall fallback missed the memory: ${taggedRecall}`)
+    }
+    const fallbackBodies = mock.recallBodies.slice(-2)
+    if (fallbackBodies.length !== 2 || !fallbackBodies[0].tags?.length || fallbackBodies[1].tags) {
+      throw new Error(`Unexpected tagged recall fallback requests: ${JSON.stringify(fallbackBodies)}`)
+    }
 
     const reflect = textContent(await client.callTool({
       name: 'hindsight_reflect',

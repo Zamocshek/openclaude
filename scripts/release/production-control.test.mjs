@@ -4,9 +4,12 @@ import {
   PRODUCTION_BUILD_SERVICES,
   buildComposeEnv,
   getOpenRagVerificationUrls,
+  mergeProductionEnv,
   parseEnv,
+  removeLegacyOpenRagJwtSigningKey,
   validateRequiredBaseMcpServers,
   validateProductionEnv,
+  validateComposeRows,
   validateRequiredTelegramCapabilities,
 } from './production-control.mjs'
 
@@ -18,6 +21,25 @@ describe('production control', () => {
     })
   })
 
+  test('lets runtime environment override dotenv defaults', () => {
+    expect(mergeProductionEnv(
+      'MODEL=file-model\nONLY_FILE=present\n',
+      { MODEL: 'runtime-model', ONLY_RUNTIME: 'present' },
+    )).toEqual({
+      MODEL: 'runtime-model',
+      ONLY_FILE: 'present',
+      ONLY_RUNTIME: 'present',
+    })
+  })
+
+  test('migrates legacy symmetric OpenRAG JWT signing keys to RSA defaults', () => {
+    expect(removeLegacyOpenRagJwtSigningKey(
+      'SESSION_SECRET=session\nJWT_SIGNING_KEY=legacy-hs256\nOPENRAG_ENCRYPTION_KEY=encryption\n',
+    )).toBe(
+      'SESSION_SECRET=session\nJWT_SIGNING_KEY=\nOPENRAG_ENCRYPTION_KEY=encryption\n',
+    )
+  })
+
   test('rejects weak keys, public binds, and an unbounded Telegram bot', () => {
     const errors = validateProductionEnv({
       OPENCLAUDE_AGENT_API_KEY: 'change-me',
@@ -25,7 +47,6 @@ describe('production control', () => {
       OMNIROUTE_API_KEY: 'sk_omniroute',
       OPENCLAUDE_ROUTER_AUTO_AUTH: '1',
       SESSION_SECRET: '',
-      JWT_SIGNING_KEY: '',
       OPENRAG_ENCRYPTION_KEY: '',
       OPENCLAUDE_DOCKER_TELEGRAM_ENABLED: '1',
       OPENCLAUDE_DOCKER_TELEGRAM_BOT_TOKEN: 'configured',
@@ -40,6 +61,7 @@ describe('production control', () => {
       OPENCLAUDE_AGENT_INFERENCE_API_KEY: 'inference-secret',
       OPENCLAUDE_AGENT_WORKER_1_API_KEY: 'worker-one-secret',
       OPENCLAUDE_AGENT_WORKER_2_API_KEY: 'worker-two-secret',
+      GITHUB_MCP_PAT: 'github-mcp-secret',
       OMNIROUTE_API_KEY: 'omni-secret',
       OMNIROUTE_INITIAL_PASSWORD: 'initial-password',
       OMNIROUTE_STORAGE_ENCRYPTION_KEY: 'storage-secret',
@@ -49,7 +71,6 @@ describe('production control', () => {
       SEARXNG_SECRET: 'searxng-secret',
       OPENCLAUDE_ROUTER_AUTO_AUTH: '0',
       SESSION_SECRET: 'session-secret',
-      JWT_SIGNING_KEY: 'jwt-secret',
       OPENRAG_ENCRYPTION_KEY: 'encryption-secret',
       PENTEST_GATEWAY_AUTH_TOKEN: 'pentest-gateway-secret',
       OPENCLAUDE_DOCKER_TELEGRAM_ENABLED: '1',
@@ -80,6 +101,7 @@ describe('production control', () => {
   })
 
   test('requires every base MCP server to remain enabled', () => {
+    expect(REQUIRED_BASE_MCP_SERVERS).toContain('github')
     const servers = REQUIRED_BASE_MCP_SERVERS.map(name => ({
       name,
       enabled: true,
@@ -108,6 +130,25 @@ describe('production control', () => {
       'http://127.0.0.1:7861/health',
       'http://127.0.0.1:5001/docs',
     ])
+  })
+
+  test('detects missing, stopped, unhealthy, and publicly bound services', () => {
+    const payload = [
+      JSON.stringify({ Service: 'agent', State: 'running', Health: 'healthy', Publishers: [] }),
+      JSON.stringify({
+        Service: 'router',
+        State: 'exited',
+        Health: 'unhealthy',
+        Publishers: [{ URL: '0.0.0.0', PublishedPort: 8768 }],
+      }),
+    ].join('\n')
+    expect(validateComposeRows(payload, ['agent', 'router', 'telegram-mcp']))
+      .toEqual([
+        'telegram-mcp was not created',
+        'router is not running',
+        'router is unhealthy',
+        'router publishes 0.0.0.0:8768',
+      ])
   })
 
   test('accepts an enabled Telegram MCP with all bundled skills', () => {

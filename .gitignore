@@ -18,3 +18,10 @@ logs/
 .codegraph/
 .webui_secret_key
 tmp/
+/backups/
+/output/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+/integrations/telegram-mcp/data/
+/landing/data/

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://openclaude.local/schemas/capability-registry-v1.json",
+  "schemaVersion": 1,
+  "skillRoots": [
+    "skills",
+    ".agents/skills",
+    ".claude/skills",
+    ".codex/skills",
+    "integrations/telegram-mcp/skills",
+    "integrations/telegram-mcp/maton skills for telegram"
+  ],
+  "servers": {
+    "mcp-router": {
+      "description": "Manage and proxy externally registered MCP servers.",
+      "tags": ["mcp", "integration", "configuration", "router"],
+      "intents": ["add mcp server", "configure integration", "manage tools"]
+    },
+    "openrag": {
+      "description": "Search and ingest the OpenRAG knowledge base.",
+      "tags": ["rag", "documents", "retrieval", "knowledge"],
+      "intents": ["search documents", "ingest document", "ground answer"]
+    },
+    "camofox": {
+      "description": "Persistent browser automation, page snapshots, screenshots, and authenticated web sessions.",
+      "tags": ["browser", "web", "screenshot", "login", "automation", "vision"],
+      "intents": ["open website", "use browser", "take screenshot", "interact with page"]
+    },
+    "hindsight": {
+      "description": "Durable long-term memory recall, retention, reflection, and consolidation.",
+      "tags": ["memory", "recall", "retain", "long term", "context"],
+      "intents": ["remember this", "recall history", "store memory", "forget memory"]
+    },
+    "codegraph": {
+      "description": "Explore code symbols, dependencies, references, and change impact.",
+      "tags": ["code", "coding", "repository", "symbols", "dependencies", "refactor"],
+      "intents": ["write code", "review code", "find symbol", "analyze repository", "refactor"]
+    },
+    "searxng": {
+      "description": "Private metasearch for current web research and source discovery.",
+      "tags": ["search", "web", "research", "current", "sources"],
+      "intents": ["search web", "research topic", "find sources", "latest information"]
+    },
+    "context7": {
+      "description": "Version-aware official library and framework documentation retrieval.",
+      "tags": ["documentation", "library", "framework", "sdk", "api", "coding"],
+      "intents": ["read documentation", "use library api", "verify framework version", "write code"]
+    },
+    "github": {
+      "description": "GitHub repositories, pull requests, issues, Actions, commits, and authenticated operations.",
+      "tags": ["github", "git", "repository", "pull request", "issues", "ci"],
+      "intents": ["inspect github", "create pull request", "read issue", "check actions"]
+    },
+    "pentest": {
+      "description": "Stateful tooling for explicitly authorized security assessment scopes.",
+      "tags": ["security", "pentest", "audit", "vulnerability", "report"],
+      "intents": ["authorized pentest", "security review", "vulnerability assessment"]
+    },
+    "telegram-mcp": {
+      "description": "Telegram account and Bot API operations, Maton workflows, channels, messages, media, and posting.",
+      "tags": ["telegram", "channel", "message", "media", "posting", "maton"],
+      "intents": ["send telegram message", "publish channel post", "read telegram", "manage telegram account"]
+    }
+  },
+  "components": [
+    {
+      "id": "capability-router",
+      "name": "Capability Router",
+      "kind": "mcp-router",
+      "root": "packages/capability-router",
+      "mcpEntrypoint": "src/mcp.mjs",
+      "webEntrypoint": "src/http.mjs",
+      "description": "Agent-neutral lazy MCP facade, Skill Store, routing control center, and file manager."
+    },
+    {
+      "id": "omniroute",
+      "name": "OmniRoute",
+      "kind": "provider-router",
+      "image": "diegosouzapw/omniroute:latest",
+      "port": 20128,
+      "description": "OpenAI-compatible provider and model router deployed as an independent service."
+    }
+  ]
+}

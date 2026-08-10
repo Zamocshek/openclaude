@@ -15,6 +15,9 @@ services:
         source: "${OPENCLAUDE_HOST_CODEX_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.codex}"
         target: /run/codex
       - type: bind
+        source: "${OPENCLAUDE_HOST_SSH_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude/ssh}"
+        target: /root/.ssh
+      - type: bind
         source: "${OPENCLAUDE_HOST_WORKSPACE_DIR:-.}"
         target: /workspace
     labels:
@@ -26,6 +29,7 @@ services:
     privileged: false
     volumes: !override
       - openclaude-worker-1-config:/home/node/.openclaude
+      - "${OPENCLAUDE_HOST_SSH_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude/ssh}:/root/.ssh"
       - type: bind
         source: "${OPENCLAUDE_HOST_WORKSPACE_DIR:-.}"
         target: /workspace
@@ -35,6 +39,7 @@ services:
     privileged: false
     volumes: !override
       - openclaude-worker-2-config:/home/node/.openclaude
+      - "${OPENCLAUDE_HOST_SSH_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude/ssh}:/root/.ssh"
       - type: bind
         source: "${OPENCLAUDE_HOST_WORKSPACE_DIR:-.}"
         target: /workspace
@@ -42,6 +47,18 @@ services:
   omniroute:
     environment:
       REQUIRE_API_KEY: "true"
+
+  capability-router:
+    image: "openclaude-agent:${OPENCLAUDE_RELEASE_TAG:-production}"
+    privileged: false
+    environment:
+      CAPABILITY_ROUTER_API_KEY: "${CAPABILITY_ROUTER_API_KEY:-${OPENCLAUDE_AGENT_API_KEY:?set OPENCLAUDE_AGENT_API_KEY}}"
+
+  telegram-mcp:
+    image: "openclaude-telegram-mcp:${OPENCLAUDE_RELEASE_TAG:-production}"
+
+  telegram-mcp-web:
+    image: "openclaude-telegram-mcp:${OPENCLAUDE_RELEASE_TAG:-production}"
 
   open-webui:
     environment:

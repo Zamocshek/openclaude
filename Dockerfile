@@ -27,7 +27,7 @@ RUN bun install --frozen-lockfile
 
 # Copy source code
 COPY src/ src/
-COPY scripts/ scripts/
+COPY scripts/build.ts scripts/no-telemetry-plugin.ts scripts/
 COPY bin/ bin/
 COPY tsconfig.json ./
 
@@ -38,6 +38,39 @@ RUN bun run build
 FROM node:22-slim@sha256:f3a68cf41a855d227d1b0ab832bed9749469ef38cf4f58182fb8c893bc462383
 
 WORKDIR /app
+
+# System and Python toolchains are independent of application source. Keep
+# them before app COPY layers so ordinary code edits retain the expensive cache.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      adb \
+      ca-certificates \
+      curl \
+      dnsutils \
+      git \
+      gosu \
+      iputils-ping \
+      jq \
+      netcat-openbsd \
+      nmap \
+      openssh-client \
+      procps \
+      ripgrep \
+      python3 \
+      python3-pip \
+      python3-venv \
+      sshpass \
+      whois \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG UV_VERSION=0.11.32
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_TOOL_DIR=/opt/uv/tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
+    && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
+    && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx \
+    && uv python install 3.13 \
+    && uv tool install --python 3.13 "android-mcp==0.2.0"
 
 # Copy only what's needed to run
 COPY --from=build /app/dist/cli.mjs dist/cli.mjs
@@ -60,47 +93,33 @@ COPY scripts/run-project-mcp.cjs scripts/run-project-mcp.cjs
 COPY scripts/run-npx-mcp.cjs scripts/run-npx-mcp.cjs
 COPY scripts/pentest-mcp.cjs scripts/pentest-mcp.cjs
 
-# Install git and ripgrep - many CLI tool operations depend on them
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      adb \
-      ca-certificates \
-      curl \
-      dnsutils \
-      git \
-      gosu \
-      iputils-ping \
-      jq \
-      netcat-openbsd \
-      nmap \
-      ripgrep \
-      python3 \
-      python3-pip \
-      python3-venv \
-      whois \
-    && rm -rf /var/lib/apt/lists/*
-
 # Keep runtime script edits after the expensive system-package layer so MCP
 # changes do not trigger a fresh apt install during every Docker rebuild.
 COPY scripts/gateway-control-mcp.mjs scripts/gateway-control-mcp.mjs
 COPY scripts/android-mcp-launcher.cjs scripts/android-mcp-launcher.cjs
 
-ARG UV_VERSION=0.11.32
-ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
-    UV_TOOL_DIR=/opt/uv/tools \
-    UV_TOOL_BIN_DIR=/usr/local/bin
-RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
-    && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
-    && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx \
-    && uv python install 3.13 \
-    && uv tool install --python 3.13 "android-mcp==0.2.0"
-
-COPY --from=build /app/scripts/release/test-research-mcp.cjs scripts/release/test-research-mcp.cjs
+COPY scripts/release/test-research-mcp.cjs scripts/release/test-research-mcp.cjs
 COPY scripts/release/test-pentest-mcp.cjs scripts/release/test-pentest-mcp.cjs
 COPY scripts/release/check-base-mcp.cjs scripts/release/check-base-mcp.cjs
 COPY scripts/release/test-android-mcp.cjs scripts/release/test-android-mcp.cjs
+COPY scripts/release/ssh-doctor.mjs scripts/release/ssh-doctor.mjs
+COPY scripts/release/ssh-access.sh scripts/release/ssh-access.sh
+COPY scripts/release/vps-ssh-bootstrap.sh scripts/release/vps-ssh-bootstrap.sh
+COPY scripts/agent-migration/ scripts/agent-migration/
+COPY capability-registry.json capability-registry.json
+COPY packages/capability-router/ packages/capability-router/
+COPY skills/agent-migration/ skills/agent-migration/
+COPY skills/server-access/ skills/server-access/
 
 RUN chmod +x scripts/docker-entrypoint.sh \
     && chmod +x scripts/android-mcp-launcher.cjs \
+    && chmod +x scripts/release/ssh-doctor.mjs \
+    && chmod +x scripts/release/ssh-access.sh \
+    && chmod +x scripts/release/vps-ssh-bootstrap.sh \
+    && chmod +x scripts/agent-migration/cli.mjs \
+    && ln -sf /app/scripts/release/ssh-doctor.mjs /usr/local/bin/openclaude-ssh-doctor \
+    && ln -sf /app/scripts/release/ssh-access.sh /usr/local/bin/openclaude-ssh \
+    && ln -sf /app/scripts/agent-migration/cli.mjs /usr/local/bin/openclaude-migrate \
     && ln -sf /app/node_modules/@colbymchenry/codegraph/npm-shim.js /usr/local/bin/codegraph \
     && ln -sf /app/node_modules/mcp-searxng/dist/cli.js /usr/local/bin/mcp-searxng \
     && ln -sf /app/node_modules/@upstash/context7-mcp/dist/index.js /usr/local/bin/context7-mcp \

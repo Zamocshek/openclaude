@@ -13,8 +13,13 @@ import { mkdir, readFile, writeFile, appendFile } from 'fs/promises'
 import { join } from 'path'
 import { getAgentGatewayStateDir } from './config.js'
 import type { AgentGatewayConfig } from './config.js'
-import { runOpenClaudeAgent } from './agentRunner.js'
+import {
+  runOpenClaudeAgent,
+  type AgentRunObserverContext,
+  type AgentRunResult,
+} from './agentRunner.js'
 import { updatePatternRegister } from './consolidation.js'
+import { redactAgentText } from './redaction.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -75,6 +80,9 @@ const ERROR_MARKERS = new Set([
 function reflectionsPath(): string {
   return join(getAgentGatewayStateDir(), 'logs', 'task_reflections.jsonl')
 }
+
+let reflectionWriteTail: Promise<void> = Promise.resolve()
+let reflectionProcessTail: Promise<void> = Promise.resolve()
 
 // ---------------------------------------------------------------------------
 // Detection
@@ -145,7 +153,12 @@ export async function generateReflection(
     .replace('{error_details}', errorDetails)
 
   try {
-    const result = await runOpenClaudeAgent({ prompt, config, suppressObservers: true })
+    const result = await runOpenClaudeAgent({
+      prompt,
+      config,
+      suppressObservers: true,
+      executionClass: 'maintenance',
+    })
     if (result.exitCode !== 0) return null
 
     const reflectionText = result.text.trim()
@@ -169,9 +182,53 @@ export async function generateReflection(
 
 export async function appendReflection(reflection: TaskReflection): Promise<void> {
   const path = reflectionsPath()
-  await mkdir(join(getAgentGatewayStateDir(), 'logs'), { recursive: true })
-  const line = JSON.stringify(reflection) + '\n'
-  await appendFile(path, line)
+  const previous = reflectionWriteTail
+  reflectionWriteTail = previous.catch(() => {}).then(async () => {
+    await mkdir(join(getAgentGatewayStateDir(), 'logs'), { recursive: true })
+    await appendFile(path, JSON.stringify(reflection) + '\n')
+  })
+  await reflectionWriteTail
+}
+
+export function buildTaskTraceFromAgentRun(
+  context: AgentRunObserverContext,
+  result: AgentRunResult,
+): TaskTrace {
+  const activity = result.activity || []
+  const toolCalls = activity
+    .filter(event => isReflectionEvent(event))
+    .map(event => ({
+      tool: extractActivityTool(event),
+      args: {},
+      result: redactAgentText(event),
+      isError: isErrorActivity(event),
+    }))
+
+  if (result.exitCode !== 0 && !toolCalls.some(call => call.isError)) {
+    toolCalls.push({
+      tool: 'agent-runtime',
+      args: {},
+      result: [
+        'AGENT_FAILED',
+        result.failureKind || 'execution',
+        redactAgentText(result.diagnostic || result.stderr || 'Agent exited unsuccessfully.'),
+      ].join(': '),
+      isError: true,
+    })
+  }
+
+  return {
+    taskId: `${context.startedAt}-${Math.max(0, result.durationMs || 0)}`,
+    taskType: result.taskRoute?.taskKind || result.failureKind || 'agent',
+    goal: redactAgentText(context.prompt),
+    rounds: countActivityRounds(activity),
+    costUsd: result.costUsd || 0,
+    toolCalls,
+    finalText: redactAgentText(result.text),
+    exitCode: result.exitCode,
+    stderr: redactAgentText(result.stderr),
+    durationMs: result.durationMs || Math.max(0, Date.now() - context.startedAt),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +240,17 @@ export async function processTaskReflection(
   config: AgentGatewayConfig,
 ): Promise<void> {
   if (!shouldGenerateReflection(trace)) return
+
+  const previous = reflectionProcessTail
+  reflectionProcessTail = previous.catch(() => {}).then(() =>
+    processTaskReflectionUnlocked(trace, config))
+  await reflectionProcessTail
+}
+
+async function processTaskReflectionUnlocked(
+  trace: TaskTrace,
+  config: AgentGatewayConfig,
+): Promise<void> {
 
   const reflection = await generateReflection(trace, config)
   if (!reflection) return
@@ -287,4 +355,24 @@ function buildTraceSummary(trace: TaskTrace): string {
 function truncate(text: string, limit: number): string {
   if (!text || text.length <= limit) return text
   return text.slice(0, limit) + `... [+${text.length - limit} chars]`
+}
+
+function isReflectionEvent(event: string): boolean {
+  return /^(?:tool\b|recovered tool warning\b|runtime (?:error|failed)\b|api (?:error|retry)\b|result:\s*(?:error|failed)\b)/i.test(event)
+}
+
+function isErrorActivity(event: string): boolean {
+  return /(?:tool result error|recovered tool warning|timed out|runtime (?:error|failed)|api (?:error|retry)|result:\s*(?:error|failed)|\b(?:error|failed)\b)/i.test(event)
+}
+
+function extractActivityTool(event: string): string {
+  const parenthesized = event.match(/\(([^:(]+)(?::|\))/)?.[1]?.trim()
+  if (parenthesized) return parenthesized
+  return event.split(/[:(]/, 1)[0]?.trim() || 'agent-runtime'
+}
+
+function countActivityRounds(activity: string[]): number {
+  const explicit = activity.filter(event =>
+    /^(?:thinking|assistant response|recovery attempt)\b/i.test(event)).length
+  return Math.max(1, explicit)
 }

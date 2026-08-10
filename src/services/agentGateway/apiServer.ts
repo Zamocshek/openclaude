@@ -15,6 +15,7 @@ import {
   hasCodingMutationIntent,
   normalizeMessageContent,
   runOpenClaudeAgent,
+  type AgentRunOptions,
   type AgentRunResult,
 } from './agentRunner.js'
 import {
@@ -48,6 +49,10 @@ import {
   CuratedMemoryError,
   type CuratedMemoryKind,
 } from './memory.js'
+import {
+  extractCurrentUserRequest,
+  frameCurrentUserRequest,
+} from './capabilityRouting.js'
 import {
   getConversationContextMaxChars,
   getConversationContextTurnLimit,
@@ -119,6 +124,88 @@ type ApiAgentQueueItem = {
   startedAt?: number
 }
 
+function createAbortError(message: string): Error {
+  const error = new Error(message)
+  error.name = 'AbortError'
+  return error
+}
+
+type ApiAgentRunner = (options: AgentRunOptions) => Promise<AgentRunResult>
+
+function parseBoundedInteger(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const parsed = Number.parseInt(String(raw ?? ''), 10)
+  return Number.isFinite(parsed)
+    ? Math.min(max, Math.max(min, parsed))
+    : fallback
+}
+
+async function runApiAgentWithRecovery(
+  runner: ApiAgentRunner,
+  options: AgentRunOptions,
+): Promise<AgentRunResult> {
+  const maxRecoveryAttempts = parseBoundedInteger(
+    process.env.OPENCLAUDE_API_AGENT_RECOVERY_ATTEMPTS,
+    2,
+    0,
+    5,
+  )
+  const baseBackoffMs = parseBoundedInteger(
+    process.env.OPENCLAUDE_API_AGENT_RECOVERY_BACKOFF_MS,
+    1_000,
+    0,
+    30_000,
+  )
+  const originalPrompt = options.prompt
+  const currentRequest = extractCurrentUserRequest(originalPrompt)
+  let currentPrompt = originalPrompt
+  let taskRoute = options.taskRoute
+  let recoveryAttempt = 0
+
+  while (true) {
+    const result = await runner({
+      ...options,
+      prompt: currentPrompt,
+      taskRoute,
+    })
+    taskRoute ||= result.taskRoute
+    if (
+      result.exitCode === 0
+      || result.failureKind !== 'transient_network'
+      || recoveryAttempt >= maxRecoveryAttempts
+      || options.signal?.aborted
+    ) {
+      return result
+    }
+
+    recoveryAttempt += 1
+    const backoffMs = Math.min(30_000, baseBackoffMs * (2 ** (recoveryAttempt - 1)))
+    if (backoffMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, backoffMs))
+      if (options.signal?.aborted) return result
+    }
+    const recentActivity = (result.activity || []).slice(-12).join('\n- ')
+    currentPrompt = [
+      `API recovery attempt ${recoveryAttempt}/${maxRecoveryAttempts} after a transient provider/network failure.`,
+      'Continue the original task. Preserve completed work and change strategy only where the failed step requires it.',
+      'Before any external write, inspect pending/action status and target history. Never repeat an already claimed or completed external action.',
+      '',
+      'Original task:',
+      originalPrompt,
+      '',
+      'Previous run diagnostic:',
+      result.diagnostic || result.stderr || 'transient network failure',
+      ...(recentActivity ? ['', 'Recent activity:', `- ${recentActivity}`] : []),
+      '',
+      frameCurrentUserRequest(currentRequest),
+    ].join('\n')
+  }
+}
+
 type QueuedApiAgentExecution<T> = {
   id: string
   position: number
@@ -159,43 +246,61 @@ function shouldUseJsonKeepalive(
 
 type SseEvent = Record<string, unknown> | null
 
-class SseQueue {
-  private readonly events: SseEvent[] = []
-  private waiters: Array<(event: SseEvent) => void> = []
+type BufferedSseEvent = {
+  id: number
+  event: SseEvent
+}
+
+class SseEventLog {
+  private readonly events: BufferedSseEvent[] = []
+  private readonly waiters = new Set<() => void>()
+  private nextId = 1
 
   push(event: SseEvent): void {
-    const waiter = this.waiters.shift()
-    if (waiter) {
-      waiter(event)
-      return
-    }
     if (this.events.length >= getApiRunMaxBufferedEvents()) {
       this.events.shift()
     }
-    this.events.push(event)
+    this.events.push({ id: this.nextId++, event })
+    for (const waiter of this.waiters) waiter()
+    this.waiters.clear()
   }
 
-  next(timeoutMs: number): Promise<SseEvent | 'timeout'> {
-    const event = this.events.shift()
-    if (event !== undefined) return Promise.resolve(event)
+  next(
+    afterId: number,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<BufferedSseEvent | 'timeout' | 'aborted'> {
+    const event = this.events.find(candidate => candidate.id > afterId)
+    if (event) return Promise.resolve(event)
+    if (signal?.aborted) return Promise.resolve('aborted')
 
     return new Promise(resolve => {
-      const timer = setTimeout(() => {
-        const index = this.waiters.indexOf(waiter)
-        if (index !== -1) this.waiters.splice(index, 1)
-        resolve('timeout')
-      }, timeoutMs)
-      const waiter = (nextEvent: SseEvent) => {
+      let settled = false
+      const finish = (value: BufferedSseEvent | 'timeout' | 'aborted') => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
-        resolve(nextEvent)
+        signal?.removeEventListener('abort', onAbort)
+        this.waiters.delete(waiter)
+        resolve(value)
       }
-      this.waiters.push(waiter)
+      const timer = setTimeout(() => {
+        finish('timeout')
+      }, timeoutMs)
+      const waiter = () => {
+        const nextEvent = this.events.find(candidate => candidate.id > afterId)
+        if (nextEvent) finish(nextEvent)
+      }
+      const onAbort = () => finish('aborted')
+      this.waiters.add(waiter)
+      signal?.addEventListener('abort', onAbort, { once: true })
     })
   }
 }
 
 type ManagedRun = {
-  queue: SseQueue
+  queue: SseEventLog
+  controller: AbortController
   cleanupTimer?: ReturnType<typeof setTimeout>
 }
 
@@ -226,6 +331,8 @@ export class AgentApiServer {
   private apiAgentQueueWaiting = 0
   private apiAgentQueueSequence = 0
   private apiAgentQueueCompleted = 0
+  private apiAgentQueueCancelled = 0
+  private apiQueueShutdownController = new AbortController()
 
   constructor(options: AgentApiServerOptions) {
     this.config = options.config
@@ -238,6 +345,9 @@ export class AgentApiServer {
 
   async start(): Promise<void> {
     if (this.server) return
+    if (this.apiQueueShutdownController.signal.aborted) {
+      this.apiQueueShutdownController = new AbortController()
+    }
     this.validateExposure()
 
     this.server = createServer((request, response) => {
@@ -268,8 +378,10 @@ export class AgentApiServer {
   }
 
   async stop(): Promise<void> {
+    this.apiQueueShutdownController.abort()
     for (const run of this.runs.values()) {
       if (run.cleanupTimer) clearTimeout(run.cleanupTimer)
+      run.controller.abort()
       run.queue.push(null)
     }
     this.runs.clear()
@@ -455,7 +567,7 @@ export class AgentApiServer {
 
     const runMatch = apiPath.match(/^\/runs\/([^/]+)\/events$/)
     if (runMatch && method === 'GET') {
-      await this.handleRunEvents(runMatch[1]!, response)
+      await this.handleRunEvents(runMatch[1]!, request, response)
       return
     }
 
@@ -628,7 +740,7 @@ export class AgentApiServer {
             this.writeJson(
               response,
               400,
-              openAiError("Expected 'mode' to be minimal, adaptive, or strict"),
+              openAiError("The gateway uses the fixed 'ouroboros' harness"),
             )
             return
           }
@@ -1225,6 +1337,7 @@ export class AgentApiServer {
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> {
+    const requestAbort = this.trackRequestAbort(request, response)
     const body = await this.readJson(request)
     const messages = Array.isArray(body.messages) ? body.messages : null
     if (!messages) {
@@ -1261,11 +1374,10 @@ export class AgentApiServer {
       return
     }
 
-    const requestAbort = this.trackRequestAbort(request, response)
     const queued = this.enqueueAgentExecution(
       `chat.completions:${sessionId}`,
-      async () => {
-        if (requestAbort.signal.aborted) {
+      async signal => {
+        if (signal.aborted) {
           return {
             result: buildClientDisconnectedAgentResult(
               'Client disconnected before queued API run started.',
@@ -1287,11 +1399,14 @@ export class AgentApiServer {
           sessionId,
           text: chatInput.currentUser.content,
         })
-        const result = await runOpenClaudeAgentWithCompletionGate({
-          prompt: runnerPrompt,
-          config: this.config,
-          signal: requestAbort.signal,
-        })
+        const result = await runApiAgentWithRecovery(
+          runOpenClaudeAgentWithCompletionGate,
+          {
+            prompt: runnerPrompt,
+            config: this.config,
+            signal,
+          },
+        )
         if (result.exitCode !== 0) {
           return { result, responseText: '', history }
         }
@@ -1313,6 +1428,7 @@ export class AgentApiServer {
         await this.onAgentResponse?.(responseText, 'api')
         return { result, responseText, history }
       },
+      requestAbort.signal,
     )
     const responseHeaders = {
       'X-Hermes-Session-Id': sessionId,
@@ -1343,6 +1459,7 @@ export class AgentApiServer {
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model,
+      openclaude_status: result.completionStatus || 'completed',
       choices: [
         {
           index: 0,
@@ -1393,6 +1510,7 @@ export class AgentApiServer {
     const runnerPrompt = await this.buildRunnerPromptWithMemory(
       baseRunnerPrompt,
       input.contextModel,
+      input.chatInput.currentUser.content,
     )
     if (!runnerPrompt.trim()) {
       throw new AgentApiHttpError(400, 'No user message found')
@@ -1439,8 +1557,8 @@ export class AgentApiServer {
     const memoryDirectiveStripper = createMemoryDirectiveStreamStripper()
     const queued = this.enqueueAgentExecution(
       `chat.completions.stream:${options.sessionId || id}`,
-      async () => {
-        if (abortController.signal.aborted) {
+      async signal => {
+        if (signal.aborted) {
           return {
             text: '',
             stderr: 'Client disconnected before queued API run started.',
@@ -1473,7 +1591,7 @@ export class AgentApiServer {
         const result = await runner({
           prompt: run.runnerPrompt,
           config: this.config,
-          signal: abortController.signal,
+          signal,
           onStdout: chunk => {
             fullText += chunk
             if (response.destroyed) return
@@ -1510,6 +1628,7 @@ export class AgentApiServer {
         await this.onAgentResponse?.(responseText, 'api')
         return { ...result, history: run.history, responseText }
       },
+      abortController.signal,
     )
 
     response.writeHead(200, {
@@ -1582,6 +1701,7 @@ export class AgentApiServer {
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> {
+    const requestAbort = this.trackRequestAbort(request, response)
     const body = await this.readJson(request)
     if (body.stream === true) {
       this.writeJson(
@@ -1614,11 +1734,10 @@ export class AgentApiServer {
     const explicitHistory = normalizeConversationHistory(body.conversation_history)
     const model = String(body.model || this.config.api.modelName)
     const contextModel = resolveApiContextModel(model, this.config)
-    const requestAbort = this.trackRequestAbort(request, response)
     const queued = this.enqueueAgentExecution(
       `responses:${conversation || 'default'}`,
-      async () => {
-        if (requestAbort.signal.aborted) {
+      async signal => {
+        if (signal.aborted) {
           return {
             result: buildClientDisconnectedAgentResult(
               'Client disconnected before queued API run started.',
@@ -1656,6 +1775,7 @@ export class AgentApiServer {
         const runnerPrompt = await this.buildRunnerPromptWithMemory(
           baseRunnerPrompt,
           contextModel,
+          instructions ? `${instructions}\n\n${prompt}` : prompt,
         )
         recordApiChatLog({
           direction: 'in',
@@ -1665,11 +1785,14 @@ export class AgentApiServer {
           previousResponseId: previousResponseId || undefined,
           text: prompt,
         })
-        const result = await runOpenClaudeAgentWithCompletionGate({
-          prompt: runnerPrompt,
-          config: this.config,
-          signal: requestAbort.signal,
-        })
+        const result = await runApiAgentWithRecovery(
+          runOpenClaudeAgentWithCompletionGate,
+          {
+            prompt: runnerPrompt,
+            config: this.config,
+            signal,
+          },
+        )
         if (result.exitCode !== 0) {
           return { result, data: undefined }
         }
@@ -1684,10 +1807,19 @@ export class AgentApiServer {
         })
 
         const responseId = `resp_${randomUUID().replace(/-/g, '')}`
+        const blocked = result.completionStatus === 'blocked'
         const data = {
           id: responseId,
           object: 'response',
-          status: 'completed',
+          status: blocked ? 'incomplete' : 'completed',
+          ...(blocked
+            ? {
+                incomplete_details: {
+                  reason: 'required_input_or_access',
+                },
+                openclaude_status: 'blocked',
+              }
+            : { openclaude_status: 'completed' }),
           created_at: Math.floor(Date.now() / 1000),
           model,
           previous_response_id: previousResponseId || null,
@@ -1720,6 +1852,7 @@ export class AgentApiServer {
         await this.onAgentResponse?.(responseText, 'api')
         return { result, data }
       },
+      requestAbort.signal,
     )
     const { result, data } = await queued.promise
     if (requestAbort.signal.aborted && response.destroyed) {
@@ -1753,8 +1886,9 @@ export class AgentApiServer {
     }
 
     const runId = `run_${randomUUID().replace(/-/g, '')}`
-    const queue = new SseQueue()
-    this.runs.set(runId, { queue })
+    const queue = new SseEventLog()
+    const runController = new AbortController()
+    this.runs.set(runId, { queue, controller: runController })
     const materializedInput = await materializeVisionInput(input)
     const prompt = normalizeResponsesInput(materializedInput.value)
     const instructions =
@@ -1773,7 +1907,7 @@ export class AgentApiServer {
       text: prompt,
     })
 
-    const queued = this.enqueueAgentExecution(`runs:${runId}`, async () => {
+    const queued = this.enqueueAgentExecution(`runs:${runId}`, async signal => {
       queue.push({
         event: 'run.started',
         run_id: runId,
@@ -1787,6 +1921,7 @@ export class AgentApiServer {
       return runner({
         prompt: runnerPrompt,
         config: this.config,
+        signal,
         onStdout: chunk => {
           queue.push({
             event: 'message.delta',
@@ -1796,7 +1931,7 @@ export class AgentApiServer {
           })
         },
       })
-    })
+    }, runController.signal)
     if (queued.position > 1) {
       queue.push({
         event: 'run.queued',
@@ -1819,13 +1954,14 @@ export class AgentApiServer {
             runId,
             text: responseText,
           })
-          queue.push({
+          const terminalEvent = {
             event: 'run.completed',
             run_id: runId,
             timestamp: Date.now() / 1000,
             output: responseText,
             usage: emptyUsage(),
-          })
+          }
+          queue.push(terminalEvent)
           try {
             await this.onAgentResponse?.(responseText, 'run')
           } catch (error) {
@@ -1837,21 +1973,23 @@ export class AgentApiServer {
             })
           }
         } else {
-          queue.push({
+          const terminalEvent = {
             event: 'run.failed',
             run_id: runId,
             timestamp: Date.now() / 1000,
             error: formatAgentFailureForApi(result),
-          })
+          }
+          queue.push(terminalEvent)
         }
       })
       .catch(error => {
-        queue.push({
+        const terminalEvent = {
           event: 'run.failed',
           run_id: runId,
           timestamp: Date.now() / 1000,
           error: String(error),
-        })
+        }
+        queue.push(terminalEvent)
       })
       .finally(() => {
         queue.push(null)
@@ -1868,6 +2006,7 @@ export class AgentApiServer {
 
   private async handleRunEvents(
     runId: string,
+    request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> {
     const run = this.runs.get(runId)
@@ -1884,25 +2023,32 @@ export class AgentApiServer {
       Connection: 'keep-alive',
     })
 
+    const disconnected = new AbortController()
+    response.once('close', () => disconnected.abort())
+    const rawLastEventId = Array.isArray(request.headers['last-event-id'])
+      ? request.headers['last-event-id'][0]
+      : request.headers['last-event-id']
+    let lastEventId = Math.max(0, Number.parseInt(String(rawLastEventId || '0'), 10) || 0)
     while (!response.destroyed) {
-      const event = await queue.next(30_000)
-      if (event === 'timeout') {
+      const buffered = await queue.next(lastEventId, 30_000, disconnected.signal)
+      if (buffered === 'aborted') break
+      if (buffered === 'timeout') {
         response.write(': keepalive\n\n')
         continue
       }
-      if (event === null) {
+      lastEventId = buffered.id
+      if (buffered.event === null) {
         response.write(': stream closed\n\n')
         break
       }
-      response.write(`data: ${JSON.stringify(event)}\n\n`)
+      response.write(`id: ${buffered.id}\n`)
+      response.write(`data: ${JSON.stringify(buffered.event)}\n\n`)
     }
 
-    if (run.cleanupTimer) clearTimeout(run.cleanupTimer)
-    this.runs.delete(runId)
-    response.end()
+    if (!response.destroyed) response.end()
   }
 
-  private scheduleRunCleanup(runId: string, queue: SseQueue): void {
+  private scheduleRunCleanup(runId: string, queue: SseEventLog): void {
     const run = this.runs.get(runId)
     if (!run || run.queue !== queue) return
     if (run.cleanupTimer) clearTimeout(run.cleanupTimer)
@@ -2231,6 +2377,7 @@ export class AgentApiServer {
   private async buildRunnerPromptWithMemory(
     prompt: string,
     model?: string,
+    currentRequest = prompt,
   ): Promise<string> {
     const memory = await this.loadMemoryContext(model)
     const instructions = buildCuratedMemorySystemInstructions({
@@ -2238,16 +2385,20 @@ export class AgentApiServer {
       userProfileEnabled: this.config.memory.userProfileEnabled,
       writeApproval: this.config.memory.writeApproval,
     })
-    if (!memory && !instructions) return prompt
+    const framedCurrentRequest = frameCurrentUserRequest(currentRequest)
+    const requestContext = prompt === currentRequest
+      ? ''
+      : `Request context:\n${prompt}`
+    if (!memory && !instructions && !requestContext) return framedCurrentRequest
 
     return [
       memory ? 'Persistent memory context:' : '',
       memory,
       instructions ? 'Persistent memory write protocol:' : '',
       instructions,
+      requestContext,
       '',
-      'Current request:',
-      prompt,
+      framedCurrentRequest,
     ].filter(part => part !== '').join('\n')
   }
 
@@ -2374,7 +2525,8 @@ export class AgentApiServer {
 
   private enqueueAgentExecution<T>(
     label: string,
-    run: () => Promise<T>,
+    run: (signal: AbortSignal) => Promise<T>,
+    externalSignal?: AbortSignal,
   ): QueuedApiAgentExecution<T> {
     const item: ApiAgentQueueItem = {
       id: `apiq_${++this.apiAgentQueueSequence}`,
@@ -2387,18 +2539,59 @@ export class AgentApiServer {
     })
     this.apiAgentQueueWaiting += 1
 
+    const controller = new AbortController()
+    const sourceSignals = [
+      this.apiQueueShutdownController.signal,
+      externalSignal,
+    ].filter((signal): signal is AbortSignal => signal !== undefined)
+    let countedAsWaiting = true
+    let cancellationCounted = false
+    const leaveWaiting = () => {
+      if (!countedAsWaiting) return
+      countedAsWaiting = false
+      this.apiAgentQueueWaiting = Math.max(0, this.apiAgentQueueWaiting - 1)
+    }
+    const abort = () => {
+      controller.abort()
+      if (item.startedAt === undefined) {
+        leaveWaiting()
+        if (!cancellationCounted) {
+          cancellationCounted = true
+          this.apiAgentQueueCancelled += 1
+        }
+      }
+    }
+    for (const signal of sourceSignals) {
+      if (signal.aborted) abort()
+      else signal.addEventListener('abort', abort, { once: true })
+    }
+
     const previous = this.apiAgentQueueTail.catch(() => {})
     const promise = previous.then(async () => {
-      this.apiAgentQueueWaiting = Math.max(0, this.apiAgentQueueWaiting - 1)
+      leaveWaiting()
+      if (controller.signal.aborted) {
+        throw createAbortError('API agent execution was cancelled before it started.')
+      }
       item.startedAt = Date.now()
       this.apiAgentQueueActive = item
       try {
-        return await run()
+        return await run(controller.signal)
       } finally {
         if (this.apiAgentQueueActive?.id === item.id) {
           this.apiAgentQueueActive = undefined
         }
-        this.apiAgentQueueCompleted += 1
+        if (controller.signal.aborted) {
+          if (!cancellationCounted) {
+            cancellationCounted = true
+            this.apiAgentQueueCancelled += 1
+          }
+        } else {
+          this.apiAgentQueueCompleted += 1
+        }
+      }
+    }).finally(() => {
+      for (const signal of sourceSignals) {
+        signal.removeEventListener('abort', abort)
       }
     })
 
@@ -2435,6 +2628,7 @@ export class AgentApiServer {
       active,
       waiting: this.apiAgentQueueWaiting,
       completed: this.apiAgentQueueCompleted,
+      cancelled: this.apiAgentQueueCancelled,
     }
   }
 
@@ -2471,15 +2665,45 @@ export class AgentApiServer {
     const abort = () => {
       if (!completed) controller.abort()
     }
+    const requestClosed = () => {
+      if (!request.complete || request.socket.destroyed || response.destroyed) {
+        abort()
+      }
+    }
     request.on('aborted', abort)
+    request.on('close', requestClosed)
+    request.on('error', abort)
     response.on('close', abort)
+    response.on('error', abort)
+    request.socket.on('end', abort)
+    request.socket.on('close', abort)
+    request.socket.on('error', abort)
+    const disconnectPoll = setInterval(() => {
+      // IncomingMessage.destroyed can become true after the request body has
+      // been consumed even while the response socket remains connected.
+      if (request.aborted || response.destroyed || request.socket.destroyed) {
+        abort()
+      }
+    }, 100)
+    disconnectPoll.unref?.()
+    const complete = () => {
+      if (completed) return
+      completed = true
+      clearInterval(disconnectPoll)
+      request.off('aborted', abort)
+      request.off('close', requestClosed)
+      request.off('error', abort)
+      response.off('close', abort)
+      response.off('error', abort)
+      response.off('finish', complete)
+      request.socket.off('end', abort)
+      request.socket.off('close', abort)
+      request.socket.off('error', abort)
+    }
+    response.once('finish', complete)
     return {
       signal: controller.signal,
-      complete: () => {
-        completed = true
-        request.off('aborted', abort)
-        response.off('close', abort)
-      },
+      complete,
     }
   }
 
@@ -2997,7 +3221,7 @@ function buildChatPromptMessages(input: {
 function isAgentGatewayHarnessMode(
   value: unknown,
 ): value is AgentGatewayHarnessMode {
-  return value === 'minimal' || value === 'adaptive' || value === 'strict'
+  return value === 'ouroboros'
 }
 
 function findLastIndex<T>(

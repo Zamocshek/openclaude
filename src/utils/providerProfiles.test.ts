@@ -491,6 +491,17 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.apiKey).toBe('lm-studio')
     expect(defaults.requiresApiKey).toBe(false)
   })
+
+  test('OpenCode Zen preset uses the free DeepSeek V4 Flash model', async () => {
+    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
+
+    const defaults = getProviderPresetDefaults('opencode-zen')
+
+    expect(defaults.provider).toBe('openai')
+    expect(defaults.baseUrl).toBe('https://opencode.ai/zen/v1')
+    expect(defaults.model).toBe('deepseek-v4-flash-free')
+    expect(defaults.requiresApiKey).toBe(true)
+  })
 })
 
 describe('deleteProviderProfile', () => {

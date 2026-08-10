@@ -19,8 +19,18 @@ import {
   type AgentRunResult,
 } from './agentRunner.js'
 import {
+  AgentInteractionRegistry,
+  buildAgentInteractionRoutingContext,
+} from './agentInteractions.js'
+import {
+  continueAgentInteraction,
+  hasAgentInteractionAdapter,
+  type AgentInteractionPrivateState,
+} from './agentInteractionAdapters.js'
+import {
   buildCodingCompletionFailure,
   buildCodingVerificationPrompt,
+  attachCodingCompletionDisposition,
   getCodingCompletionGap,
   getCodingVerificationAttemptLimit,
   mergeAgentRunResults,
@@ -153,6 +163,12 @@ type TelegramUpdate = {
   callback_query?: TelegramCallbackQuery
 }
 
+type PendingTelegramTextSplit = {
+  update: TelegramUpdate
+  lastPart: TelegramMessage
+  timer: ReturnType<typeof setTimeout>
+}
+
 type TelegramCallbackQuery = {
   id: string
   from?: { id: number | string; username?: string; first_name?: string }
@@ -245,7 +261,7 @@ export type TelegramSendDirective = {
 }
 
 export type TelegramCronCreateDirective = {
-  action: 'create' | 'update'
+  action: 'create' | 'update' | 'delete'
   name: string
   schedule?: string
   prompt?: string
@@ -421,31 +437,31 @@ const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
   {
     command: '/sol',
     provider: 'codex',
-    model: 'gpt-5.6-sol?reasoning=medium',
+    model: 'gpt-5.6-sol?reasoning=ultra',
     description: 'switch to Codex GPT-5.6 Sol',
   },
   {
     command: '/terra',
     provider: 'codex',
-    model: 'gpt-5.6-terra?reasoning=medium',
+    model: 'gpt-5.6-terra?reasoning=ultra',
     description: 'switch to Codex GPT-5.6 Terra',
   },
   {
     command: '/luna',
     provider: 'codex',
-    model: 'gpt-5.6-luna?reasoning=medium',
+    model: 'gpt-5.6-luna?reasoning=max',
     description: 'switch to Codex GPT-5.6 Luna',
   },
   {
     command: '/gpt55',
     provider: 'codex',
-    model: 'gpt-5.5?reasoning=medium',
+    model: 'gpt-5.5?reasoning=xhigh',
     description: 'switch to Codex GPT-5.5',
   },
   {
     command: '/codex',
     provider: 'codex',
-    model: 'gpt-5.6-sol?reasoning=medium',
+    model: 'gpt-5.6-sol?reasoning=ultra',
     description: 'switch to Codex GPT-5.6 Sol',
   },
   {
@@ -453,6 +469,12 @@ const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
     provider: 'deepseek',
     model: 'deepseek-v4-flash',
     description: 'switch to DeepSeek V4 Flash',
+  },
+  {
+    command: '/zenflash',
+    provider: 'opencode-zen',
+    model: 'deepseek-v4-flash-free',
+    description: 'switch to OpenCode Zen DeepSeek V4 Flash Free',
   },
   {
     command: '/dspro',
@@ -614,7 +636,6 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/evolution [on|off|status]', description: 'control scheduled evolution cycles' },
       { syntax: '/evolve [on|off|now|status]', description: 'control evolution or run one cycle' },
       { syntax: '/tools [on|off|list|enable NAME|disable NAME]', description: 'toggle model tools', botDescription: 'Control model tools' },
-      { syntax: '/harness [minimal|adaptive|strict|status]', description: 'set gateway steering level', botDescription: 'Set agent harness mode' },
       { syntax: '/review', description: 'run a deep architecture review cycle' },
       { syntax: '/infinite <goal>', description: 'run a persistent task loop' },
     ],
@@ -737,6 +758,8 @@ export class TelegramAgentBridge {
   /** FIFO agent task queue per chatId. Commands still run immediately. */
   private taskQueues = new Map<string, Promise<void>>()
   private queuedTaskCounts = new Map<string, number>()
+  /** Telegram clients split long text near 4096 chars; reassemble it first. */
+  private pendingTextSplits = new Map<string, PendingTelegramTextSplit>()
   private chatQueueEpochs = new Map<string, number>()
   private queueEpoch = 0
   private chatModes = new Map<string, TelegramResearchMode>()
@@ -751,6 +774,8 @@ export class TelegramAgentBridge {
   private chatSessionsWrite = Promise.resolve()
   private chatModesLoaded: Promise<void> | undefined
   private chatModesWrite = Promise.resolve()
+  /** Tool continuations are transport-scoped; secret state remains volatile. */
+  private pendingInteractions = new AgentInteractionRegistry<AgentInteractionPrivateState>()
 
   constructor(config: AgentGatewayConfig) {
     this.config = config
@@ -803,6 +828,11 @@ export class TelegramAgentBridge {
     this.stopped = true
     this.queueEpoch++
     this.pollAbortController?.abort()
+    for (const pending of this.pendingTextSplits.values()) {
+      clearTimeout(pending.timer)
+    }
+    this.pendingTextSplits.clear()
+    this.pendingInteractions.clear()
     for (const task of this.activeTasks.values()) {
       task.progress?.dispose()
       task.controller.abort()
@@ -906,6 +936,7 @@ export class TelegramAgentBridge {
     this.invalidateChatQueue(chatId)
     await this.setChatMode(chatId, undefined)
     this.lastPrompts.delete(chatId)
+    this.pendingInteractions.clear(chatId)
 
     if (task) {
       task.controller.abort()
@@ -1069,6 +1100,69 @@ export class TelegramAgentBridge {
     })
   }
 
+  private async tryHandleAgentInteractionContinuation(
+    chatId: string,
+    text: string,
+    attachments: TelegramAttachment[],
+  ): Promise<boolean> {
+    const lookup = this.pendingInteractions.lookup(chatId)
+    if (lookup.status === 'missing') return false
+    if (lookup.status === 'expired') {
+      await this.sendMessage(chatId, 'The pending tool interaction expired. Start that operation again.')
+      return true
+    }
+    const pending = lookup.stored
+    const { interaction } = pending
+    if (!hasAgentInteractionAdapter(interaction.handler)) {
+      if (interaction.input.kind === 'secret' || interaction.input.kind === 'otp') {
+        await this.sendMessage(
+          chatId,
+          'This tool requested protected input, but no trusted continuation adapter is installed. The value was not sent to the model. Use /newchat to cancel.',
+        )
+        return true
+      }
+      return false
+    }
+    if (attachments.length > 0) {
+      await this.sendMessage(chatId, `${interaction.input.prompt} Use /newchat to cancel this operation.`)
+      return true
+    }
+
+    const value = text.trim()
+    if (!value || value.startsWith('/')) return false
+
+    try {
+      const result = await continueAgentInteraction(pending, value)
+      if (result.status === 'unsupported') return false
+      if (result.status === 'advanced') {
+        this.pendingInteractions.set(
+          chatId,
+          result.interaction,
+          result.privateState,
+        )
+        await this.sendMessage(chatId, result.message)
+        return true
+      }
+      if (result.status === 'completed') {
+        this.pendingInteractions.clear(chatId)
+        await this.sendMessage(chatId, result.message)
+        return true
+      }
+      if (result.status === 'retry') {
+        await this.sendMessage(chatId, `${result.message} Use /newchat to cancel this operation.`)
+        return true
+      }
+
+      this.pendingInteractions.clear(chatId)
+      await this.sendMessage(chatId, result.message)
+      return true
+    } catch (error) {
+      await recordTelegramError(chatId, 'telegram-mcp-auth-continuation', error)
+      await this.sendMessage(chatId, 'Telegram MCP is temporarily unavailable. The pending login remains active; retry shortly or use /newchat to cancel.')
+      return true
+    }
+  }
+
   private async runAgentWithProgress(
     chatId: string,
     prompt: string,
@@ -1141,6 +1235,8 @@ export class TelegramAgentBridge {
 
     if (controller.signal.aborted) {
       progress.dispose()
+    } else if (result.completionStatus === 'blocked') {
+      await progress.finish('blocked', 'Waiting for required input or access.')
     } else if (result.exitCode === 0) {
       await progress.finish('completed', 'Done. Sending response.')
     } else {
@@ -1158,6 +1254,7 @@ export class TelegramAgentBridge {
     progress: TelegramTaskProgress
     suppressObservers?: boolean
     toolPolicy?: 'pentest'
+    routingContext?: string
   }): Promise<AgentRunResult> {
     const recovery = getTelegramAgentRecoveryAttemptLimit()
     let recoveryAttempt = 0
@@ -1167,8 +1264,8 @@ export class TelegramAgentBridge {
     let verificationAttempts = 0
     let verificationPending = false
     const completionPasses: AgentRunResult[] = []
-    const harnessMode = this.config.runner.harnessMode ?? 'adaptive'
-    const maxVerificationAttempts = getCodingVerificationAttemptLimit(harnessMode)
+    const maxVerificationAttempts = getCodingVerificationAttemptLimit()
+    let taskRoute: AgentRunResult['taskRoute']
 
     while (true) {
       const isRecovery = recoveryAttempt > 0
@@ -1192,14 +1289,18 @@ export class TelegramAgentBridge {
       const startedAt = Date.now()
       let result = await runOpenClaudeAgent({
         prompt: currentPrompt,
+        routingContext: input.routingContext,
         config: this.config,
         signal: input.controller.signal,
         suppressObservers: input.suppressObservers,
         toolPolicy: input.toolPolicy,
+        taskRoute,
         streamEvents: true,
         onProgress: event => input.progress.addEvent(event),
         onStdout: chunk => input.progress.observeStdout(chunk),
       }).catch(error => buildAgentExceptionResult(error, Date.now() - startedAt))
+      if (isVerification) result = attachCodingCompletionDisposition(result)
+      taskRoute ||= result.taskRoute
 
       if (input.controller.signal.aborted) {
         return result
@@ -1211,7 +1312,6 @@ export class TelegramAgentBridge {
           input.prompt,
           result,
           process.env,
-          harnessMode,
         )
         if (completionGap) {
           if (verificationAttempts < maxVerificationAttempts) {
@@ -1265,9 +1365,6 @@ export class TelegramAgentBridge {
       }
 
       recoveryAttempt += 1
-      if (result.failureKind === 'quality_gate') {
-        verificationAttempts = 0
-      }
       const backoffMs = getTelegramRecoveryBackoffMs(
         result,
         recoveryAttempt,
@@ -1428,6 +1525,61 @@ export class TelegramAgentBridge {
   }
 
   private handleMessageUpdateInBackground(update: TelegramUpdate): void {
+    const message = update.message
+    const chatId = message?.chat?.id === undefined ? '' : String(message.chat.id)
+    if (!message || !chatId) {
+      this.dispatchMessageUpdateInBackground(update)
+      return
+    }
+
+    const pending = this.pendingTextSplits.get(chatId)
+    if (pending && canMergeTelegramTextSplit(pending.lastPart, message)) {
+      clearTimeout(pending.timer)
+      pending.update = {
+        ...pending.update,
+        update_id: Math.max(pending.update.update_id, update.update_id),
+        message: mergeTelegramTextSplit(pending.update.message!, message),
+      }
+      pending.lastPart = message
+      if (isLikelyTelegramTextSplitStart(message)) {
+        pending.timer = this.scheduleTelegramTextSplitFlush(chatId)
+      } else {
+        this.pendingTextSplits.delete(chatId)
+        this.dispatchMessageUpdateInBackground(pending.update)
+      }
+      return
+    }
+
+    if (pending) this.flushPendingTelegramTextSplit(chatId)
+    if (isLikelyTelegramTextSplitStart(message)) {
+      this.pendingTextSplits.set(chatId, {
+        update,
+        lastPart: message,
+        timer: this.scheduleTelegramTextSplitFlush(chatId),
+      })
+      return
+    }
+
+    this.dispatchMessageUpdateInBackground(update)
+  }
+
+  private scheduleTelegramTextSplitFlush(chatId: string): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(() => {
+      this.flushPendingTelegramTextSplit(chatId)
+    }, getTelegramTextSplitCoalesceMs())
+    timer.unref()
+    return timer
+  }
+
+  private flushPendingTelegramTextSplit(chatId: string): void {
+    const pending = this.pendingTextSplits.get(chatId)
+    if (!pending) return
+    clearTimeout(pending.timer)
+    this.pendingTextSplits.delete(chatId)
+    this.dispatchMessageUpdateInBackground(pending.update)
+  }
+
+  private dispatchMessageUpdateInBackground(update: TelegramUpdate): void {
     void this.handleUpdate(update).catch(error => {
       void this.reportMessageUpdateError(update, error).catch(() => {})
     })
@@ -1847,7 +1999,9 @@ export class TelegramAgentBridge {
 
     await this.enqueueChatTask(
       chatId,
-      buildTelegramQueueLabel(text, message),
+      this.pendingInteractions.has(chatId)
+        ? 'Tool interaction continuation'
+        : buildTelegramQueueLabel(text, message),
       () => this.handleQueuedTextMessage(chatId, message, text),
     )
   }
@@ -1890,6 +2044,10 @@ export class TelegramAgentBridge {
     const attachments = await this.collectAttachments(message, chatId)
     if (!effectiveText && attachments.length === 0) return
 
+    if (await this.tryHandleAgentInteractionContinuation(chatId, effectiveText, attachments)) {
+      return
+    }
+
     const providerProfile = await loadProviderProfile()
     const replyContext = buildTelegramReplyContext(message)
     const sessionId = await this.getChatSessionId(chatId)
@@ -1898,6 +2056,13 @@ export class TelegramAgentBridge {
       model: providerProfile.model,
       sessionId,
     })
+    const interactionContext = buildAgentInteractionRoutingContext(
+      this.pendingInteractions.get(chatId),
+    )
+    const routingContext = [
+      buildTelegramSemanticRoutingContext(conversationTranscript, replyContext),
+      interactionContext,
+    ].filter(Boolean).join('\n\n')
 
     // Log the incoming message to chat log (for dialogue consolidation)
     await appendChatLog({
@@ -1917,7 +2082,7 @@ export class TelegramAgentBridge {
         : {}),
     }).catch(() => {})
 
-    const bridgeHandled = await this.tryHandleCronStyleFeedback(
+    const bridgeHandled = await this.tryHandleCronFeedback(
       chatId,
       effectiveText,
       conversationTranscript,
@@ -2005,6 +2170,7 @@ export class TelegramAgentBridge {
       model: providerProfile.model,
       conversationTranscript,
       replyContext,
+      interactionContext,
     })
 
     // Save for /retry
@@ -2024,6 +2190,7 @@ export class TelegramAgentBridge {
         controller,
         progress,
         toolPolicy,
+        routingContext,
       })
     } finally {
       if (this.activeTasks.get(chatId)?.taskId === taskId) {
@@ -2036,7 +2203,13 @@ export class TelegramAgentBridge {
       return
     }
 
-    if (result.exitCode === 0) {
+    for (const interaction of result.pendingInteractions || []) {
+      this.pendingInteractions.set(chatId, interaction)
+    }
+
+    if (result.completionStatus === 'blocked') {
+      await progress.finish('blocked', 'Waiting for required input or access.')
+    } else if (result.exitCode === 0) {
       await progress.finish('completed', 'Done. Sending response.')
     } else {
       await progress.finish('failed', formatAgentFailurePhase(result))
@@ -2674,40 +2847,19 @@ export class TelegramAgentBridge {
 
   private async handleHarnessCommand(
     chatId: string,
-    commandBody: string,
+    _commandBody: string,
   ): Promise<void> {
-    const action = commandBody.trim().toLowerCase() || 'status'
-    if (action === 'status') {
-      await this.sendMessageWithKeyboard(
-        chatId,
-        `Harness mode: ${this.config.runner.harnessMode}`,
-        buildTelegramRuntimeKeyboard({
-          harnessMode: this.config.runner.harnessMode,
-          toolsEnabled: !this.config.runner.disableTools,
-          cronEnabled: this.config.cron.enabled,
-          consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
-          evolutionEnabled: (await loadEvolutionState()).enabled,
-        }),
-      )
-      return
-    }
-    if (!isTelegramHarnessMode(action)) {
-      await this.sendMessage(
-        chatId,
-        'Usage: /harness [minimal|adaptive|strict|status]',
-      )
-      return
-    }
-
-    const updates = { OPENCLAUDE_AGENT_HARNESS_MODE: action }
-    await updateProjectEnvFile(updates)
-    applyRuntimeEnvUpdates(updates)
-    await updateAgentGatewayConfig(current => ({
-      ...current,
-      runner: { ...current.runner, harnessMode: action },
-    }))
-    this.config.runner.harnessMode = action
-    await this.sendMessage(chatId, `Harness mode: ${action}`)
+    await this.sendMessageWithKeyboard(
+      chatId,
+      'Harness: Ouroboros (fixed best mode)',
+      buildTelegramRuntimeKeyboard({
+        harnessMode: this.config.runner.harnessMode,
+        toolsEnabled: !this.config.runner.disableTools,
+        cronEnabled: this.config.cron.enabled,
+        consciousnessEnabled: Boolean(getAgentGatewayRuntime()?.consciousness),
+        evolutionEnabled: (await loadEvolutionState()).enabled,
+      }),
+    )
   }
 
   private async editRuntimeMenu(query: TelegramCallbackQuery): Promise<void> {
@@ -4347,15 +4499,6 @@ export class TelegramAgentBridge {
         return
       }
 
-      if (data === 'runtime:harness') {
-        await this.handleHarnessCommand(
-          chatId,
-          nextTelegramHarnessMode(this.config.runner.harnessMode),
-        )
-        await this.editRuntimeMenu(query)
-        return
-      }
-
       if (data === 'runtime:consciousness') {
         await this.handleBgCommand(
           chatId,
@@ -4960,13 +5103,15 @@ export class TelegramAgentBridge {
     return applyTelegramCronDirectivesForChat(chatId, text)
   }
 
-  private async tryHandleCronStyleFeedback(
+  private async tryHandleCronFeedback(
     chatId: string,
     text: string,
     conversationTranscript: string,
     replyContext?: TelegramReplyContext,
   ): Promise<string | undefined> {
-    if (!isEmojiRemovalFeedback(text)) return undefined
+    const emojiRemoval = isEmojiRemovalFeedback(text)
+    const cronRemoval = !emojiRemoval && isCronRemovalFeedback(text)
+    if (!emojiRemoval && !cronRemoval) return undefined
 
     const jobName = extractLastCronJobName(
       [replyContext?.text, conversationTranscript].filter(Boolean).join('\n'),
@@ -4980,6 +5125,11 @@ export class TelegramAgentBridge {
       && job.state !== 'completed'
     )
     if (!existing) return undefined
+
+    if (cronRemoval) {
+      const deleted = await deleteCronJob(existing.id)
+      return deleted ? `Cron ${existing.name} удалён.` : undefined
+    }
 
     const prompt = reminderMessageWithoutEmoji(existing)
     const updated = await updateCronJob(existing.id, {
@@ -5296,6 +5446,17 @@ function getTelegramShutdownTimeoutMs(): number {
   )
 }
 
+export function getTelegramAuthContinuationTtlMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return boundedPositiveInteger(
+    env.OPENCLAUDE_TELEGRAM_AUTH_CONTINUATION_TTL_MS,
+    10 * 60_000,
+    60_000,
+    30 * 60_000,
+  )
+}
+
 function boundedPositiveInteger(
   value: string | undefined,
   fallback: number,
@@ -5309,6 +5470,62 @@ function boundedPositiveInteger(
 
 function combineAbortSignals(signal: AbortSignal, timeoutMs: number): AbortSignal {
   return AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+}
+
+const TELEGRAM_TEXT_SPLIT_MIN_CHARS = 4_000
+const TELEGRAM_TEXT_SPLIT_MAX_GAP_SECONDS = 5
+const DEFAULT_TELEGRAM_TEXT_SPLIT_COALESCE_MS = 750
+
+export function getTelegramTextSplitCoalesceMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return boundedPositiveInteger(
+    env.OPENCLAUDE_TELEGRAM_TEXT_SPLIT_COALESCE_MS,
+    DEFAULT_TELEGRAM_TEXT_SPLIT_COALESCE_MS,
+    100,
+    3_000,
+  )
+}
+
+export function isLikelyTelegramTextSplitStart(message: TelegramMessage): boolean {
+  return typeof message.text === 'string'
+    && message.text.length >= TELEGRAM_TEXT_SPLIT_MIN_CHARS
+    && !message.caption
+    && !message.reply_to_message
+    && getAttachmentCandidates(message).length === 0
+    && !message.text.trimStart().startsWith('/')
+}
+
+export function canMergeTelegramTextSplit(
+  previous: TelegramMessage,
+  next: TelegramMessage,
+): boolean {
+  if (!isLikelyTelegramTextSplitStart(previous)) return false
+  if (typeof next.text !== 'string' || next.text.length === 0) return false
+  if (next.caption || next.reply_to_message || getAttachmentCandidates(next).length > 0) {
+    return false
+  }
+  if (next.message_id !== previous.message_id + 1) return false
+  if (String(next.chat?.id ?? '') !== String(previous.chat?.id ?? '')) return false
+  if (String(next.from?.id ?? '') !== String(previous.from?.id ?? '')) return false
+  if (
+    previous.date !== undefined
+    && next.date !== undefined
+    && Math.abs(next.date - previous.date) > TELEGRAM_TEXT_SPLIT_MAX_GAP_SECONDS
+  ) {
+    return false
+  }
+  return true
+}
+
+export function mergeTelegramTextSplit(
+  first: TelegramMessage,
+  next: TelegramMessage,
+): TelegramMessage {
+  return {
+    ...first,
+    text: `${first.text || ''}${next.text || ''}`,
+  }
 }
 
 export function isTelegramActorAllowed(input: {
@@ -5329,7 +5546,7 @@ export function isTelegramActorAllowed(input: {
   return Boolean(input.userId && allowedUsers.has(input.userId))
 }
 
-type TelegramProgressStatus = 'running' | 'completed' | 'failed' | 'stopped'
+type TelegramProgressStatus = 'running' | 'completed' | 'blocked' | 'failed' | 'stopped'
 
 export function getTelegramQueuePosition(input: {
   active: boolean
@@ -5476,7 +5693,6 @@ export function shouldRetryTelegramAgentFailure(result: AgentRunResult): boolean
     || result.failureKind === 'max_turns'
     || result.failureKind === 'timeout'
     || result.failureKind === 'transient_network'
-    || result.failureKind === 'quality_gate'
 }
 
 export function getTelegramRecoveryBackoffMs(
@@ -5740,6 +5956,7 @@ function buildAgentChatLogOutput(
     timedOut: result.timedOut,
     durationMs: result.durationMs,
     failureKind: result.failureKind,
+    completionStatus: result.completionStatus,
     diagnostic: result.diagnostic?.slice(0, 2000),
     stderr: result.stderr.slice(0, 2000),
     activity,
@@ -6211,17 +6428,6 @@ export function parseTelegramSkillCreateInput(
   }
 }
 
-function isTelegramHarnessMode(value: string): value is AgentGatewayHarnessMode {
-  return value === 'minimal' || value === 'adaptive' || value === 'strict'
-}
-
-function nextTelegramHarnessMode(
-  current: AgentGatewayHarnessMode,
-): AgentGatewayHarnessMode {
-  if (current === 'adaptive') return 'minimal'
-  return current === 'minimal' ? 'strict' : 'adaptive'
-}
-
 function formatTelegramRuntimePanel(state: TelegramRuntimePanelState): string {
   return [
     'Runtime controls',
@@ -6238,9 +6444,6 @@ export function buildTelegramRuntimeKeyboard(
   state: TelegramRuntimePanelState,
 ): TelegramInlineKeyboard {
   return [
-    [
-      { text: `Harness ${state.harnessMode}`, callback_data: 'runtime:harness' },
-    ],
     [
       { text: `Tools ${state.toolsEnabled ? 'ON' : 'OFF'}`, callback_data: 'runtime:tools' },
       { text: `Cron ${state.cronEnabled ? 'ON' : 'OFF'}`, callback_data: 'runtime:cron' },
@@ -6382,6 +6585,7 @@ const TELEGRAM_PROVIDER_PRESETS: ProviderInfo[] = [
   { value: 'onlysq', flag: 'openai', baseUrl: 'https://api.onlysq.ru/ai/openai' },
   { value: 'openai', flag: 'openai', baseUrl: 'https://api.openai.com/v1' },
   { value: 'openrouter', flag: 'openai', baseUrl: 'https://openrouter.ai/api/v1' },
+  { value: 'opencode-zen', flag: 'openai', baseUrl: 'https://opencode.ai/zen/v1' },
   { value: 'omniroute', flag: 'openai', baseUrl: 'http://omniroute:20128/v1' },
   { value: 'deepseek', flag: 'openai', baseUrl: 'https://api.deepseek.com/v1' },
   { value: 'groq', flag: 'openai', baseUrl: 'https://api.groq.com/openai/v1' },
@@ -6398,6 +6602,7 @@ const TELEGRAM_PROVIDER_BUTTONS = [
   { provider: 'deepseek', label: 'DeepSeek' },
   { provider: 'codex', label: 'Codex / ChatGPT' },
   { provider: 'openrouter', label: 'OpenRouter' },
+  { provider: 'opencode-zen', label: 'OpenCode Zen' },
   { provider: 'omniroute', label: 'OmniRoute' },
   { provider: 'lmstudio-lan', label: 'LM Studio' },
 ] as const
@@ -6793,9 +6998,9 @@ function chooseLiveFallbackModel(
   }))
 
   const preferredNeedles =
-    provider === 'deepseek' && requested.includes('pro')
+    (provider === 'deepseek' || provider === 'opencode-zen') && requested.includes('pro')
       ? ['pro', 'reasoner', 'chat']
-      : provider === 'deepseek' && requested.includes('flash')
+      : (provider === 'deepseek' || provider === 'opencode-zen') && requested.includes('flash')
         ? ['flash', 'chat']
         : requested.includes('coder')
           ? ['coder', 'code']
@@ -6819,6 +7024,9 @@ function providerSpecificApiKey(provider: string, env: Record<string, string | u
   }
   if (provider === 'openrouter') {
     return env.OPENROUTER_API_KEY || ''
+  }
+  if (provider === 'opencode-zen') {
+    return env.OPENCODE_ZEN_API_KEY || ''
   }
   if (provider === 'omniroute') {
     return env.OMNIROUTE_API_KEY || ''
@@ -6871,6 +7079,9 @@ function providerProfileEnv(profile: AgentProviderProfile): Record<string, strin
     }
     if (profile.provider === 'openrouter' && profile.apiKey) {
       updates.OPENROUTER_API_KEY = profile.apiKey
+    }
+    if (profile.provider === 'opencode-zen' && profile.apiKey) {
+      updates.OPENCODE_ZEN_API_KEY = profile.apiKey
     }
     if (profile.provider === 'omniroute' && profile.apiKey) {
       updates.OMNIROUTE_API_KEY = profile.apiKey
@@ -7007,6 +7218,7 @@ function normalizeSubagentRole(value: string): string | undefined {
 function defaultSubagentApiKeyEnv(provider: string): string | undefined {
   if (provider === 'deepseek') return 'DEEPSEEK_API_KEY'
   if (provider === 'openrouter') return 'OPENROUTER_API_KEY'
+  if (provider === 'opencode-zen') return 'OPENCODE_ZEN_API_KEY'
   if (provider === 'omniroute') return 'OMNIROUTE_API_KEY'
   if (provider === 'codex') return 'CODEX_API_KEY'
   if (provider === 'lmstudio' || provider === 'lmstudio-lan' || provider === 'ollama') return undefined
@@ -7466,6 +7678,7 @@ export function buildTelegramAgentPrompt(input: {
   memoryWriteProtocol?: string
   reflectionContext?: string
   cronContext?: string
+  interactionContext?: string
 }): string {
   const lines = [
     'Telegram request received by the OpenClaude agent bridge.',
@@ -7486,6 +7699,15 @@ export function buildTelegramAgentPrompt(input: {
     'Do not turn a plan, reminder, concern, missing detail, or earlier assistant statement into a past event. If the source is absent or ambiguous, ask a concise clarifying question instead of writing to personal markdown files, persistent memory, or derived RPG statistics.',
     'Keep proposals and templates clearly separate from historical records. A user request to correct or delete a record is authoritative; do not preserve an inferred claim merely because it appears in another agent-generated file.',
   )
+
+  if (input.interactionContext) {
+    lines.push(
+      '',
+      '## Active tool interaction',
+      input.interactionContext,
+      'Continue this workflow only when the current user message semantically answers the pending prompt. Otherwise treat the message as a new request. Do not invent missing input or replay completed tool calls.',
+    )
+  }
 
   // Inject memory context (scratchpad, identity, patterns) if available
   if (input.memoryContext) {
@@ -7547,14 +7769,15 @@ export function buildTelegramAgentPrompt(input: {
   const telegramCronTimezone = getTelegramCronTimezone()
   lines.push(
     '',
-    'If the Telegram user asks to create, update, or remember a reminder, alarm, cron job, recurring task, or scheduled notification for this Telegram chat, emit a standalone bridge control line.',
+    'If the Telegram user asks to create, update, delete, or remember a reminder, alarm, cron job, recurring task, or scheduled notification for this Telegram chat, emit a standalone bridge control line.',
     `Create static reminder example: [TELEGRAM_CRON_CREATE name="short-stable-name" schedule="0 22 * * *" timezone="${telegramCronTimezone}" mode="message" prompt="22:00 - reminder text without emojis unless requested."]`,
     'Update existing reminder example: [TELEGRAM_CRON_UPDATE name="existing-job-name" mode="message" prompt="Updated reminder text without emojis unless requested."]',
+    'Delete existing reminder example: [TELEGRAM_CRON_DELETE name="existing-job-name"]',
     'TELEGRAM_CRON_CREATE is idempotent for this chat: if a live job with the same name exists, the gateway updates it; if it does not exist, the gateway creates it. Prefer CREATE with the full schedule when creating, rescheduling, repairing, or recreating a reminder.',
     'Use mode="message" for normal reminders so the gateway sends the text directly without running an LLM or tools. Use mode="agent" only for genuinely dynamic scheduled research/status tasks.',
     'Use standard 5-field cron in the timezone attribute. Use the exact minute/hour the user requested; do not invent offsets such as :07 unless the user asked for them. Recurring Telegram cron jobs are persistent and do not have a 7-day limit.',
-    'If the user reacts to a Cronjob Response and asks to change wording, style, emojis, time, or content, update the matching existing job by name with [TELEGRAM_CRON_UPDATE ...] only when that job name is visible in the replied-to message or cron jobs list. If you are unsure the job exists, emit TELEGRAM_CRON_CREATE with the full schedule instead of UPDATE.',
-    'Do not call the built-in CronCreate tool for Telegram reminders. Do not read, edit, write, cat, tee, sed, or redirect into /agent-gateway/cron-jobs.json or any cron-jobs.json file. Never claim a Telegram reminder was created or updated unless a TELEGRAM_CRON_CREATE or TELEGRAM_CRON_UPDATE directive was emitted for the bridge to apply.',
+    'If the user reacts to a Cronjob Response and asks to change wording, style, emojis, time, or content, update the matching existing job by name with [TELEGRAM_CRON_UPDATE ...] only when that job name is visible in the replied-to message or cron jobs list. If the user explicitly asks to remove that job, emit [TELEGRAM_CRON_DELETE name="visible-job-name"]. If you are unsure the job exists for an update, emit TELEGRAM_CRON_CREATE with the full schedule instead of UPDATE.',
+    'Do not call the built-in CronCreate tool for Telegram reminders. Do not read, edit, write, cat, tee, sed, or redirect into /agent-gateway/cron-jobs.json or any cron-jobs.json file. Never claim a Telegram reminder was created, updated, or deleted unless the corresponding TELEGRAM_CRON_CREATE, TELEGRAM_CRON_UPDATE, or TELEGRAM_CRON_DELETE directive was emitted for the bridge to apply.',
   )
 
   lines.push(
@@ -7601,6 +7824,7 @@ export async function buildTelegramAgentPromptWithMemory(input: {
   model?: string
   conversationTranscript?: string
   replyContext?: TelegramReplyContext
+  interactionContext?: string
 }): Promise<string> {
   const memoryOptions = input.config
     ? {
@@ -7673,6 +7897,17 @@ export function formatTelegramReplyContext(context: TelegramReplyContext): strin
   lines.push('Replied-to text:')
   lines.push(context.text || '(no text)')
   return lines.join('\n')
+}
+
+export function buildTelegramSemanticRoutingContext(
+  conversationTranscript?: string,
+  replyContext?: TelegramReplyContext,
+): string {
+  const blocks = [
+    replyContext ? formatTelegramReplyContext(replyContext) : '',
+    conversationTranscript || '',
+  ].filter(Boolean)
+  return selectTextBlocksWithinCharBudget(blocks, 6_000).join('\n\n')
 }
 
 async function buildTelegramConversationTranscript(
@@ -7767,14 +8002,13 @@ function getTelegramConversationMaxChars(model?: string): number {
   })
 }
 
-async function buildTelegramCronContext(chatId: string): Promise<string> {
+export async function buildTelegramCronContext(chatId: string): Promise<string> {
   const jobs = (await listCronJobs(true))
     .filter(job =>
       job.origin?.platform === 'telegram'
       && job.origin.chatId === chatId
       && job.state !== 'completed'
     )
-    .slice(0, 20)
   if (jobs.length === 0) return ''
 
   return [
@@ -7801,6 +8035,15 @@ function isEmojiRemovalFeedback(text: string): boolean {
   const normalized = text.toLowerCase()
   return /(смайл|эмодз|emoji)/i.test(normalized)
     && /(убер|удал|без|заеб|достал|надоел|не\s+надо|не\s+нужн)/i.test(normalized)
+}
+
+export function isCronRemovalFeedback(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim()
+  if (!normalized) return false
+  if (/(?:^|\s)не\s+(?:убирай|убери|удаляй|удали|снимай|сними|отменяй|отмени|remove|delete|cancel)(?:\s|$)/i.test(normalized)) {
+    return false
+  }
+  return /(?:^|\s)(?:убирай|убери|удаляй|удали|снимай|сними|отменяй|отмени|remove|delete|cancel)(?:\s|[.,!?]|$)/i.test(normalized)
 }
 
 function extractLastCronJobName(text: string): string | undefined {
@@ -7858,6 +8101,24 @@ export async function applyTelegramCronDirectivesForChat(
   for (const directive of processed.directives) {
     try {
       const existing = await findActiveTelegramCronJob(chatId, directive.name)
+
+      if (directive.action === 'delete') {
+        if (!existing) {
+          messages.push([
+            'Telegram cron delete skipped:',
+            `${directive.name} was not found for this Telegram chat.`,
+          ].join('\n'))
+          continue
+        }
+        const deleted = await deleteCronJob(existing.id)
+        if (!deleted) throw new Error(`cron job ${directive.name} was not deleted`)
+        messages.push([
+          'Telegram cron deleted:',
+          `${existing.name} (${existing.id})`,
+        ].join('\n'))
+        continue
+      }
+
       const timezone = directive.timezone || (existing ? undefined : getTelegramCronTimezone())
 
       if (!existing && directive.action === 'update' && !directive.schedule) {
@@ -7920,7 +8181,7 @@ export function extractTelegramCronDirectives(text: string): {
 } {
   const directives: TelegramCronCreateDirective[] = []
   const cleanedLines: string[] = []
-  const controlPattern = /^\s*\[TELEGRAM_CRON_(CREATE|UPDATE)\s+(.+)\]\s*$/i
+  const controlPattern = /^\s*\[TELEGRAM_CRON_(CREATE|UPDATE|DELETE)\s+(.+)\]\s*$/i
 
   for (const line of text.split(/\r?\n/)) {
     const controlMatch = line.match(controlPattern)
@@ -7929,16 +8190,19 @@ export function extractTelegramCronDirectives(text: string): {
       continue
     }
 
-    const action = String(controlMatch[1] || '').toLowerCase() === 'update'
+    const actionToken = String(controlMatch[1] || '').toLowerCase()
+    const action = actionToken === 'update'
       ? 'update'
-      : 'create'
+      : actionToken === 'delete'
+        ? 'delete'
+        : 'create'
     const attrs = parseTelegramControlAttributes(controlMatch[2] || '')
     const schedule = (attrs.schedule || attrs.cron || '').trim()
     const prompt = (attrs.prompt || attrs.text || '').trim()
     const name = (attrs.name || prompt.slice(0, 50) || 'telegram reminder').trim()
     const timezone = (attrs.timezone || attrs.tz || '').trim()
     const mode = normalizeTelegramCronDirectiveMode(attrs.mode || attrs.kind || attrs.direct)
-    if (name && (schedule || prompt || timezone || mode)) {
+    if (name && (action === 'delete' || schedule || prompt || timezone || mode)) {
       directives.push({
         action,
         name,

@@ -224,21 +224,56 @@ Runtime data is stored in `TELEGRAM_MCP_CONTENT_DB` (default:
 - **content_add_source(chat_id, account_id?, title?)**: register source channels/chats.
 - **content_add_target(chat_id, account_id?, title?)**: register publishing targets.
 - **content_sync_sources(limit_per_source)**: cache recent text posts from sources.
+- **content_capture_source_post(chat_id, message_id, account_id?)**: capture one
+  Telegram source with canonical HTML, UTF-16 entities, hidden links, and
+  custom emoji before reusing it.
 - **content_research_context(limit, unused_only?)**: return source posts, targets,
   recent drafts, and published history for the agent.
+- **content_channel_profiles(group?)**: list registered target themes, confirmed
+  or placeholder descriptions, content pillars, tones, and preferred formats.
+- **content_channel_post_brief(chat_id, requested_format?, objective?, description_override?)**:
+  resolve one target and return the editorial brief that must guide its draft.
+- **content_quality_review(chat_id, text, requested_format?, format_mode?)**:
+  run the managed-channel quality gate for thematic fit, encoding, depth,
+  readability, and Telegram limits without storing or publishing anything.
 - **content_similarity_check(text, threshold?, roles?, format_mode?)**: check any candidate text
   against stored `source`, `draft`, and `published` posts while ignoring presentation markup.
-- **content_create_draft(text, target_chat_id?, source_post_id?, format_mode?)**: store a draft only
+- **content_create_draft(text, target_chat_id?, source_post_id?, format_mode?, allow_formatting_loss?)**: store a draft only
   when it is not identical or strongly similar to previous content, preserving its formatting.
 - **content_prepare_publish(draft_id, target_chat_id?, format_mode?, silent?, link_preview?, send_as?)**:
-  create a pending formatted send action.
+  revalidate quality and create one idempotent pending formatted send action.
+- **content_prepare_publish_batch(items_json)**: prepare up to 50 drafts
+  sequentially and return a durable per-item receipt without transport scripts.
+- **assistant_action_status_batch(action_ids_json)**: reconcile multiple actions
+  without retrying or repeating their sends.
 - **assistant_confirm_action(action_id)**: send after explicit approval and mark the
   content draft as published.
 
 Recommended flow:
 `content_sync_sources` -> `content_research_context` -> agent rewrites ->
-`content_create_draft` -> `content_prepare_publish` -> approve ->
-`assistant_confirm_action`.
+`content_channel_post_brief` -> `content_quality_review` ->
+`content_create_draft` -> `content_prepare_publish` (or one batch prepare) ->
+approve each exact action -> `assistant_confirm_action` once ->
+`assistant_action_status_batch`.
+
+For a specific old or donor message, use `content_capture_source_post` before
+drafting and pass the returned numeric `source_post.id`. Telegram links and
+formatting are entities, not part of the visible text. Exact source reuse
+inherits them automatically; edited drafts must preserve retained hidden links
+in HTML. Draft and publish preflights block silent formatting loss. An external
+`source_reference` is accepted only when it resolves to a captured source.
+
+Do not call the MCP HTTP transport directly or persist MCP session IDs,
+connection IDs, or tokens in temporary publishing scripts. Those values are
+ephemeral and bypass the workflow's quality, idempotency, and reconciliation
+guarantees.
+
+The bundled registry is `channel_profiles.json`. Owner-confirmed descriptions
+take precedence over inferred placeholders. Request-specific descriptions take
+precedence for that request. Format `auto` lets the agent choose useful depth;
+explicit `short`, `standard`, and `long` modes are also available. There is no
+global 350-900 character restriction. Text posts must remain within Telegram's
+4096 UTF-16-unit limit and media captions within 1024 units.
 
 ### Rich Telegram Posts
 
@@ -443,6 +478,43 @@ telegram-mcp-vpromotions config
 telegram-mcp-vpromotions balance
 telegram-mcp-vpromotions services --search telegram --limit 10
 telegram-mcp-vpromotions status --order 23501
+```
+
+### TwiBoost API Control
+
+The MCP server also supports TwiBoost promotion services through
+`https://twiboost.com/api/v2`. Configure the key only in the deployment-local
+Telegram MCP `.env`:
+
+```env
+TWIBOOST_API_URL=https://twiboost.com/api/v2
+TWIBOOST_API_KEY=your_api_key_here
+TWIBOOST_TIMEOUT=30
+```
+
+MCP tools:
+
+- **twiboost_config_status()**: show the endpoint and masked key status.
+- **twiboost_balance()**: read the account balance.
+- **twiboost_services(search?, category?, service_type?, limit?)**: inspect and filter the service catalog.
+- **twiboost_add_order(...)**: preview or create a like, subscribe, comment, repost, follow, or related service order.
+- **twiboost_order_status(order_id?, order_ids?)**: inspect one or many orders.
+- **twiboost_create_refill(order_id, confirm?)**: preview or request an eligible refill.
+- **twiboost_cancel_order(order_id, confirm?)**: preview or cancel an order.
+
+Paid actions are guarded: add, refill, and cancellation calls return a preview
+until `confirm=true` is passed after explicit approval. Provider-specific add
+fields can be supplied through `extra_json`. See
+[skills/twiboost/SKILL.md](skills/twiboost/SKILL.md) for the workflow and
+[TWIBOOST.md](TWIBOOST.md) for CLI examples.
+
+CLI:
+
+```bash
+telegram-mcp-twiboost config
+telegram-mcp-twiboost balance
+telegram-mcp-twiboost services --search Instagram --limit 10
+telegram-mcp-twiboost status --orders 1,2,3
 ```
 
 ### Maton API Gateway

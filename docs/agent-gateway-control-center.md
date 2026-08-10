@@ -195,9 +195,11 @@ Inference and providers:
 - `/provider models` - load models from the active OpenAI-compatible endpoint.
 - `/provider set <provider> <model> [base_url] [api_key]` - switch
   provider/model for next agent runs.
-- `/gpt55`, `/codex`, `/dsflash`, `/dspro`, `/gemma`, `/gemmacoder` - quick
-  switches for Codex GPT-5.5, DeepSeek V4 Flash/Pro, and the LM Studio Gemma
-  profiles.
+- `/gpt55`, `/codex`, `/dsflash`, `/dspro`, `/zenflash`, `/gemma`,
+  `/gemmacoder` - quick switches for Codex GPT-5.5, DeepSeek V4 Flash/Pro,
+  OpenCode Zen DeepSeek V4 Flash Free, and the LM Studio Gemma profiles.
+- `/zenflash` uses the OpenAI-compatible OpenCode Zen endpoint and the
+  `OPENCODE_ZEN_API_KEY` credential without overwriting the direct DeepSeek key.
 - `/provider set lmstudio-lan gemma-4-12b-obliterated` - switch to the LAN
   LM Studio preset at `http://192.168.187.1:1234/v1` and enable no-tools
   runner mode for models whose LM Studio template rejects OpenAI tool schemas.
@@ -231,7 +233,8 @@ Telegram commands are optional operator shortcuts, not phrase-based routing.
 
 The protected Gateway API also provides `GET` and `PATCH /api/subagents` for
 automation. It never returns API keys; routes can use an existing environment
-variable such as `DEEPSEEK_API_KEY` through `apiKeyEnv`.
+variable such as `DEEPSEEK_API_KEY` or `OPENCODE_ZEN_API_KEY` through
+`apiKeyEnv`.
 
 Tasks and files:
 

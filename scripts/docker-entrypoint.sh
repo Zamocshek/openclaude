@@ -7,6 +7,22 @@ LEGACY_CONFIG_FILE="${CLAUDE_LEGACY_CONFIG_FILE:-/home/node/.claude.json}"
 mkdir -p "$CONFIG_DIR"
 export CLAUDE_CONFIG_DIR="$CONFIG_DIR"
 
+# Seed operational skills once. Existing user-edited copies win.
+seed_skill() {
+  name="$1"
+  for source in "/app/skills/$name" "/workspace/skills/$name"; do
+    target="$CONFIG_DIR/skills/$name"
+    if [ -d "$source" ] && [ ! -e "$target" ]; then
+      mkdir -p "$(dirname "$target")"
+      cp -R "$source" "$target"
+      break
+    fi
+  done
+}
+
+seed_skill agent-migration
+seed_skill server-access
+
 is_truthy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|y|on) return 0 ;;
@@ -17,6 +33,15 @@ is_truthy() {
 RUN_AS_ROOT="${OPENCLAUDE_DOCKER_RUN_AS_ROOT:-0}"
 if ! is_truthy "$RUN_AS_ROOT"; then
   chown node:node "$CONFIG_DIR" 2>/dev/null || true
+  chown -R node:node "$CONFIG_DIR/skills/agent-migration" "$CONFIG_DIR/skills/server-access" 2>/dev/null || true
+fi
+
+if is_truthy "${OPENCLAUDE_SSH_AUTO_RECOVER:-0}" && command -v openclaude-ssh >/dev/null 2>&1; then
+  mkdir -p "$CONFIG_DIR/logs"
+  OPENCLAUDE_SSH_STATE_DIR="${OPENCLAUDE_SSH_STATE_DIR:-/root/.ssh}" \
+    OPENCLAUDE_SSH_RETRY_SECONDS="${OPENCLAUDE_SSH_RETRY_SECONDS:-300}" \
+    openclaude-ssh watch "${OPENCLAUDE_SSH_PROFILE:-nova-vps}" \
+    >> "$CONFIG_DIR/logs/ssh-access.log" 2>&1 &
 fi
 
 unset_empty_env() {
@@ -52,7 +77,7 @@ normalize_provider_env() {
   provider="$(printf '%s' "${OPENCLAUDE_PROVIDER:-}" | tr '[:upper:]' '[:lower:]')"
 
   case "$provider" in
-    openai|openai-compatible|codex|onlysq|ollama|lmstudio|lm-studio|lmstudio-lan|openrouter|deepseek|groq|together|fireworks|nvidia-nim|minimax|atomic-chat)
+    openai|openai-compatible|codex|onlysq|ollama|lmstudio|lm-studio|lmstudio-lan|openrouter|opencode-zen|deepseek|groq|together|fireworks|nvidia-nim|minimax|atomic-chat)
       export CLAUDE_CODE_USE_OPENAI="${CLAUDE_CODE_USE_OPENAI:-1}"
       export_if_missing OPENAI_BASE_URL "${OPENCLAUDE_BASE_URL:-}"
       export_if_missing OPENAI_MODEL "${OPENCLAUDE_MODEL:-}"
@@ -99,12 +124,18 @@ bootstrap_codegraph() {
   fi
 
   export CODEGRAPH_TELEMETRY="${CODEGRAPH_TELEMETRY:-0}"
+  codegraph_timeout="${OPENCLAUDE_CODEGRAPH_INIT_TIMEOUT_SECONDS:-300}"
+  case "$codegraph_timeout" in
+    ''|*[!0-9]*) codegraph_timeout=300 ;;
+  esac
   printf '[codegraph] initializing index for %s\n' "$codegraph_project" >&2
   if [ "$(id -u)" = "0" ] && ! is_truthy "$RUN_AS_ROOT"; then
-    if ! HOME=/home/node gosu node node "$codegraph_shim" init "$codegraph_project" >&2; then
+    if ! HOME=/home/node timeout --signal=TERM --kill-after=10s "${codegraph_timeout}s" \
+      gosu node node "$codegraph_shim" init "$codegraph_project" >&2; then
       printf '[codegraph] initial index failed; gateway will continue without it\n' >&2
     fi
-  elif ! node "$codegraph_shim" init "$codegraph_project" >&2; then
+  elif ! timeout --signal=TERM --kill-after=10s "${codegraph_timeout}s" \
+    node "$codegraph_shim" init "$codegraph_project" >&2; then
     printf '[codegraph] initial index failed; gateway will continue without it\n' >&2
   fi
 }

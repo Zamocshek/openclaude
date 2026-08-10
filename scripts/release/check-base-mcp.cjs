@@ -8,9 +8,11 @@ const { tmpdir } = require('node:os')
 const { resolve } = require('node:path')
 
 const REQUIRED_SERVERS = [
+  'capability-router',
   'codegraph',
   'searxng',
   'context7',
+  'github',
   'pentest',
   'telegram-mcp',
 ]
@@ -19,9 +21,23 @@ const MCP_OPERATION_TIMEOUT_MS = 30_000
 const SEARXNG_PREFLIGHT_ATTEMPTS = 5
 const REQUIRED_TELEGRAM_TOOLS = [
   'list_accounts',
+  'check_account',
+  'authorize_send_code',
+  'authorize_complete',
   'assistant_sync_memory',
   'assistant_get_chat_context',
+  'assistant_confirm_action',
+  'maton_config_status',
+  'maton_connections',
+  'maton_telegram_get_me',
+  'maton_telegram_get_chat',
+  'maton_telegram_prepare_send_message',
+  'maton_telegram_prepare_send_animation',
 ]
+const REQUIRED_TELEGRAM_TOOL_SCHEMAS = {
+  maton_telegram_prepare_send_message: ['chat_id', 'text'],
+  maton_telegram_prepare_send_animation: ['animation', 'chat_id'],
+}
 const REQUIRED_PENTEST_TOOLS = [
   'pentest_health',
   'pentest_engagement_create',
@@ -31,6 +47,18 @@ const REQUIRED_PENTEST_TOOLS = [
   'pentest_nmap_parse',
   'pentest_nmap_run',
   'pentest_report_generate',
+]
+const REQUIRED_GITHUB_TOOLS = [
+  'get_me',
+  'get_file_contents',
+  'search_repositories',
+]
+const REQUIRED_CAPABILITY_ROUTER_TOOLS = [
+  'capability_route',
+  'capability_call',
+  'capability_registry',
+  'skill_store',
+  'workspace_files',
 ]
 
 function readConfig(path) {
@@ -97,14 +125,100 @@ async function checkTelegramMcp(server) {
       {},
       { signal: AbortSignal.timeout(MCP_OPERATION_TIMEOUT_MS) },
     )
-    const names = new Set(tools.tools.map(tool => tool.name))
+    const toolMap = new Map(tools.tools.map(tool => [tool.name, tool]))
+    const names = new Set(toolMap.keys())
     const missing = REQUIRED_TELEGRAM_TOOLS.filter(name => !names.has(name))
     if (missing.length > 0) {
       throw new Error(`missing required tools: ${missing.join(', ')}`)
     }
+    for (const [name, expected] of Object.entries(REQUIRED_TELEGRAM_TOOL_SCHEMAS)) {
+      const actual = [...(toolMap.get(name)?.inputSchema?.required || [])].sort()
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        throw new Error(
+          `${name} required fields changed: expected ${expected.join(', ')}, got ${actual.join(', ') || 'none'}`,
+        )
+      }
+    }
   } catch (error) {
     throw new Error(
       `Telegram MCP tool check failed at ${target}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  } finally {
+    await client.close().catch(() => {})
+  }
+}
+
+async function checkCapabilityRouter(server, projectRoot) {
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
+  const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js')
+  const configuredEnv = Object.fromEntries(Object.entries(server?.env || {}).map(([name, value]) => {
+    const text = String(value)
+    const match = text.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/u)
+    return [name, match ? (process.env[match[1]] || '') : text]
+  }))
+  const transport = new StdioClientTransport({
+    command: server?.command || process.execPath,
+    args: Array.isArray(server?.args) ? server.args.map(String) : ['packages/capability-router/src/mcp.mjs'],
+    cwd: projectRoot,
+    env: { ...process.env, ...configuredEnv },
+    stderr: 'pipe',
+  })
+  const client = new Client({ name: 'openclaude-capability-router-preflight', version: '1.0.0' }, { capabilities: {} })
+  try {
+    await client.connect(transport, { signal: AbortSignal.timeout(MCP_OPERATION_TIMEOUT_MS) })
+    const listed = await client.listTools({}, { signal: AbortSignal.timeout(MCP_OPERATION_TIMEOUT_MS) })
+    const names = new Set(listed.tools.map(tool => tool.name))
+    const missing = REQUIRED_CAPABILITY_ROUTER_TOOLS.filter(name => !names.has(name))
+    if (missing.length) throw new Error(`missing required tools: ${missing.join(', ')}`)
+  } catch (error) {
+    throw new Error(`Capability Router MCP check failed: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    await client.close().catch(() => {})
+  }
+}
+
+async function checkGithubMcp(server) {
+  if (process.argv.includes('--offline')) return
+  const target = server && typeof server.url === 'string'
+    ? server.url
+    : 'https://api.githubcopilot.com/mcp/'
+  const token = process.env.GITHUB_MCP_PAT || ''
+  if (!token.trim()) throw new Error('GITHUB_MCP_PAT is not configured')
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
+  const { StreamableHTTPClientTransport } = await import(
+    '@modelcontextprotocol/sdk/client/streamableHttp.js'
+  )
+  const transport = new StreamableHTTPClientTransport(new URL(target), {
+    requestInit: {
+      headers: { Authorization: `Bearer ${token.trim()}` },
+    },
+  })
+  const client = new Client({
+    name: 'openclaude-base-github-preflight',
+    version: '1.0.0',
+  })
+  try {
+    await client.connect(transport, {
+      signal: AbortSignal.timeout(MCP_OPERATION_TIMEOUT_MS),
+    })
+    const tools = await client.listTools(
+      {},
+      { signal: AbortSignal.timeout(MCP_OPERATION_TIMEOUT_MS) },
+    )
+    const names = new Set(tools.tools.map(tool => tool.name))
+    const missing = REQUIRED_GITHUB_TOOLS.filter(name => !names.has(name))
+    if (missing.length > 0) {
+      throw new Error(`missing required tools: ${missing.join(', ')}`)
+    }
+    const me = await client.callTool(
+      { name: 'get_me', arguments: {} },
+      undefined,
+      { signal: AbortSignal.timeout(MCP_OPERATION_TIMEOUT_MS) },
+    )
+    if (me.isError) throw new Error('get_me returned an error')
+  } catch (error) {
+    throw new Error(
+      `GitHub MCP tool check failed at ${target}: ${error instanceof Error ? error.message : String(error)}`,
     )
   } finally {
     await client.close().catch(() => {})
@@ -294,8 +408,10 @@ async function main() {
   }
 
   await checkSearxng()
+  await checkCapabilityRouter(config.mcpServers['capability-router'], projectRoot)
   await checkAndroidMcp(projectRoot)
   await checkPentestMcp(config.mcpServers.pentest, projectRoot)
+  await checkGithubMcp(config.mcpServers.github)
   await checkTelegramMcp(config.mcpServers['telegram-mcp'])
   console.log(`BASE_MCP_PREFLIGHT_OK ${REQUIRED_SERVERS.join(',')}`)
 }

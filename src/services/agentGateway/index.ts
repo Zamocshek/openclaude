@@ -18,6 +18,10 @@ import {
 } from './consciousness.js'
 import { ensureMemoryFiles } from './memory.js'
 import { shouldConsolidateDialogue, consolidateDialogue, shouldConsolidateScratchpad, consolidateScratchpad } from './consolidation.js'
+import {
+  buildTaskTraceFromAgentRun,
+  processTaskReflection,
+} from './reflection.js'
 
 export type AgentGatewayRuntime = {
   config: AgentGatewayConfig
@@ -149,7 +153,7 @@ async function startAgentGatewayRuntime(): Promise<AgentGatewayRuntime | null> {
             `Task started in ${context.cwd}: ${context.prompt.slice(0, 300)}`,
           )
         },
-        onFinish: async (_context, result) => {
+        onFinish: async (context, result) => {
           try {
             nextRuntime.consciousness?.injectObservation(
               result.exitCode === 0
@@ -170,6 +174,13 @@ async function startAgentGatewayRuntime(): Promise<AgentGatewayRuntime | null> {
                 consolidationRunning = false
               }
             }
+
+            const trace = buildTaskTraceFromAgentRun(context, result)
+            void processTaskReflection(trace, config).catch(error => {
+              logForDebugging(
+                `[agent-gateway] task reflection failed: ${error instanceof Error ? error.message : String(error)}`,
+              )
+            })
           } catch {
             // Lifecycle memory is non-critical; agent responses must not fail because of it.
           } finally {

@@ -14,9 +14,14 @@ prompts, skill files, or chat output.
 
 1. Call `list_accounts` and `check_account` when a Telegram account matters.
 2. Use an explicit `account_id` for multi-account work. Do not guess one.
-3. Read first: use `assistant_get_chat_context`, `content_research_context`, or
+3. Before channel publication, call `check_posting_access` for one target or
+   `check_posting_access_batch` once for a multi-channel campaign. Both accept
+   numeric IDs, usernames, public links, and private invite links. Never fan out
+   many single-target checks in parallel through one Telegram session. A note
+   in memory or a successful read is not proof of `post_messages` rights.
+4. Read first: use `assistant_get_chat_context`, `content_research_context`, or
    `maton_connections`/`maton_get` before creating external changes.
-4. State the selected account, chat/channel, connection, and intended outcome
+5. State the selected account, chat/channel, connection, and intended outcome
    before preparing a visible or external action.
 
 Read `references/tool-contract.md` only when choosing tools or integrating the
@@ -42,9 +47,11 @@ Use the content database so new posts do not repeat prior content:
 ```text
 content_workflow_config
 -> content_add_source / content_add_target
--> content_sync_sources
+-> content_sync_sources OR content_capture_source_post(chat_id, message_id)
 -> content_research_context
+-> content_channel_post_brief(target, requested_format="auto")
 -> write a transformed draft
+-> content_quality_review
 -> content_create_draft
 -> content_prepare_publish
 -> explicit approval
@@ -56,6 +63,35 @@ and target channel explicit. Do not copy source text verbatim; create an origina
 rewrite and let `content_create_draft` block identical or strongly similar text.
 If it returns a similarity warning, revise the text instead of setting
 `allow_similar=true` unless the human explicitly asks for that exception.
+
+A Telegram post is not a plain string: hidden links, mentions, custom emoji,
+and styling live in UTF-16 `entities`. For a specific old or donor post, call
+`content_capture_source_post` and pass its numeric `source_post.id` to
+`content_create_draft`. Never copy only the visible text or use an uncaptured
+`source_reference`. An exact source text automatically inherits the complete
+entity set. For an edited source, retain hidden links explicitly with HTML
+`<a href="URL">label</a>`. The draft and publish preflights reject silent entity
+loss. Use `allow_formatting_loss=true` only when the human intentionally asks
+to remove that formatting.
+
+`content_quality_review` is mandatory for a managed network channel. It checks
+the exact text for channel fit, broken encoding, Telegram limits, depth, and
+readability. `content_create_draft` and `content_prepare_publish` enforce the
+same gate again, so do not work around a failed review with a generic send tool.
+
+Before drafting for each target, call `content_channel_post_brief`. It resolves
+the channel by numeric ID, username, public link, or invite link and returns the
+effective description, content pillars, tone, and format guidance. Description
+priority is: a request-specific override, a confirmed owner description, then
+the explicitly marked inferred placeholder. Never present an inferred
+description as confirmed metadata.
+
+Use `requested_format="auto"` unless the human selects `short`, `standard`, or
+`long`. Auto means choose the depth from the topic and channel profile; it does
+not force one character range. Long text posts are valid when the subject needs
+depth. There is no universal 350-900 character rule. Stay within Telegram's
+4096 UTF-16-unit text limit; media captions remain limited to 1024 units. Split
+only when the text cannot be edited below the applicable Telegram limit.
 
 ### Rich Telegram messages and posts
 
@@ -84,6 +120,87 @@ captions have a 1024 UTF-16-character limit, so preview the exact caption before
 requesting approval. `link_preview` applies only to text posts, not media
 captions.
 
+### Telegram Bot API through Maton
+
+Use this path when the requested publisher is the bot connected to Maton. Do not
+search the filesystem for Maton configuration, bot tokens, Telegram sessions,
+or channel metadata. The MCP tools are the source of truth and keep credentials
+out of model context.
+
+```text
+maton_config_status
+-> maton_connections(app="telegram", status="ACTIVE")
+-> maton_telegram_get_me(connection_id)
+-> maton_telegram_get_chat(chat_id, connection_id)
+-> maton_telegram_prepare_send_message(...) OR
+   maton_telegram_prepare_send_animation(...)
+-> explicit approval
+-> assistant_confirm_action(pending_action_id)
+```
+
+Use an `@channel` username or numeric chat ID exactly as supplied. Prefer the
+short Telegram tools above over generic `maton_get` and
+`maton_prepare_request`: they validate Telegram limits, build the correct
+`:token/...` route, and require only the relevant fields. An animation must be
+an HTTPS URL reachable by Telegram or an existing Bot API `file_id`.
+
+Completion requires a Maton response with HTTP 200, Telegram `ok: true`, and a
+returned `message_id`. Return the public `https://t.me/<channel>/<message_id>`
+link when the target has a public username. A successful prepare action alone is
+not a published post.
+
+If Maton returns an error, reconcile the target history before any new action.
+When the configured local bot has posting rights, use the explicit fallback:
+
+```text
+telegram_bot_config_status
+-> telegram_bot_check_posting_access(chat_id)
+-> telegram_bot_prepare_send_message(...)
+-> assistant_confirm_action(pending_action_id) exactly once
+-> assistant_action_status(pending_action_id)
+```
+
+Do not retry the failed Maton action. The local Bot API publisher uses the same
+configured NOVA bot identity, keeps its token outside model context, and returns
+the authoritative `message_id` plus Telegram-returned text for verification.
+The access check also performs an MTProto restriction preflight because Bot API
+can report `can_post_messages=true` for a channel that Telegram has globally
+restricted. A restricted target must be unblocked or replaced; do not retry it.
+
+### Multi-channel campaigns
+
+Treat every channel as an independently resumable item. Before the first send,
+save a manifest containing the channel reference, account, exact approved text,
+text fingerprint, profile description source, and chosen format. For each item
+use this sequence:
+
+```text
+check_posting_access
+-> content_channel_post_brief
+-> content_quality_review
+-> content_capture_source_post for every reused Telegram source
+-> content_create_draft
+-> content_prepare_publish_batch once for the approved draft set
+-> assistant_confirm_action exactly once
+-> assistant_action_status_batch
+-> read the published message back and compare its text
+-> save action_id + message_id + verification result in the manifest
+```
+
+Use the high-level MCP tools directly. Never create temporary `publish_*.py`
+files, call the MCP HTTP transport with `curl`/`urllib`, or copy MCP session IDs,
+Maton connection IDs, bot tokens, or Telegram sessions into source files. Those
+transport details are ephemeral and bypass validation, idempotency, redaction,
+and durable action reconciliation. `content_prepare_publish_batch` processes
+items sequentially and returns one receipt per draft; resume from that receipt.
+
+Never repeat `assistant_confirm_action` after a timeout or tool error. The action
+is claimed atomically before network I/O. Inspect it with
+`assistant_action_status`; if its status is `needs_reconciliation`, read recent
+outgoing posts in the target and reconcile the receipt before creating another
+action. Resume only campaign items that do not already have a verified
+`message_id`.
+
 ### Google, Notion, and other Maton services
 
 Use Maton only after the human names the app, the intended connected account, and
@@ -98,8 +215,9 @@ language outcome. Wait for explicit approval, then call
 `assistant_confirm_action` once.
 
 Use `content_prepare_publish` for Telegram publishing from personal or
-multi-account Telethon sessions. Maton Telegram routes are only for a separately
-connected Bot API account and do not replace the main Telegram workflow.
+multi-account Telethon sessions. Use the dedicated Maton Telegram workflow above
+for the separately connected Bot API account; it does not replace the main
+Telegram workflow.
 
 ### YouTube through Maton
 

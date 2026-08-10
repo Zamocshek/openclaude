@@ -141,6 +141,16 @@ function formatRetryAfterHint(response: Response): string {
   return ra ? ` (Retry-After: ${ra})` : ''
 }
 
+function requiresToolCallReasoningReplay(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl)
+    return url.hostname.toLowerCase() === 'opencode.ai'
+      && /^\/zen(?:\/|$)/u.test(url.pathname)
+  } catch {
+    return false
+  }
+}
+
 function sleepMs(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -156,6 +166,7 @@ function sleepMs(ms: number): Promise<void> {
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content?: string | Array<{ type: string; text?: string; image_url?: { url: string } }>
+  reasoning_content?: string
   tool_calls?: Array<{
     id: string
     type: 'function'
@@ -174,6 +185,37 @@ interface OpenAITool {
     parameters: Record<string, unknown>
     strict?: boolean
   }
+}
+
+const TEXT_ONLY_IMAGE_MARKER =
+  '[Image omitted because this provider rejected image input. Use gateway-vision or a text snapshot for visual evidence.]'
+
+function hasOpenAIImageContent(messages: OpenAIMessage[]): boolean {
+  return messages.some(message =>
+    Array.isArray(message.content)
+    && message.content.some(part => part.type === 'image_url'),
+  )
+}
+
+function messagesWithoutOpenAIImages(messages: OpenAIMessage[]): OpenAIMessage[] {
+  return messages.map(message => {
+    if (!Array.isArray(message.content)) return message
+    const text = message.content
+      .filter(part => part.type === 'text' && typeof part.text === 'string')
+      .map(part => part.text || '')
+      .filter(Boolean)
+    if (message.content.some(part => part.type === 'image_url')) {
+      text.push(TEXT_ONLY_IMAGE_MARKER)
+    }
+    return { ...message, content: text.join('\n') }
+  })
+}
+
+function isUnsupportedImageRequest(status: number, errorBody: string): boolean {
+  if (status !== 400 && status !== 422) return false
+  return /(?:unknown\s+variant\s+[`'"]?image_url|image_url.{0,160}(?:expected\s+[`'"]?text|unsupported|not\s+supported|invalid)|(?:vision|image).{0,120}not\s+supported)/isu.test(
+    errorBody,
+  )
 }
 
 function convertSystemPrompt(
@@ -370,6 +412,14 @@ function convertMessages(
           })(),
         }
 
+        // Providers that emit reasoning_content (DeepSeek/OpenCode-compatible
+        // thinking mode) require the exact reasoning payload on the assistant
+        // tool-call message when the conversation continues with tool results.
+        const reasoningContent = (thinkingBlock as { thinking?: unknown } | undefined)?.thinking
+        if (typeof reasoningContent === 'string' && reasoningContent) {
+          assistantMsg.reasoning_content = reasoningContent
+        }
+
         if (toolUses.length > 0) {
           assistantMsg.tool_calls = toolUses.map(
             (tu: {
@@ -461,6 +511,11 @@ function convertMessages(
 
       if (msg.tool_calls?.length) {
         prev.tool_calls = [...(prev.tool_calls ?? []), ...msg.tool_calls]
+      }
+      if (msg.reasoning_content !== undefined) {
+        prev.reasoning_content = [prev.reasoning_content, msg.reasoning_content]
+          .filter((value): value is string => typeof value === 'string')
+          .join('\n')
       }
     } else {
       coalesced.push(msg)
@@ -1316,6 +1371,17 @@ class OpenAIShimMessages {
       }>,
       params.system,
     )
+    if (requiresToolCallReasoningReplay(request.baseUrl)) {
+      for (const message of openaiMessages) {
+        if (
+          message.role === 'assistant'
+          && message.tool_calls?.length
+          && message.reasoning_content === undefined
+        ) {
+          message.reasoning_content = ''
+        }
+      }
+    }
 
     const body: Record<string, unknown> = {
       model: request.resolvedModel,
@@ -1493,7 +1559,27 @@ class OpenAIShimMessages {
       }
       // Read body exactly once here — Response body is a stream that can only
       // be consumed a single time.
-      const errorBody = await response.text().catch(() => 'unknown error')
+      let errorBody = await response.text().catch(() => 'unknown error')
+
+      if (
+        hasOpenAIImageContent(openaiMessages)
+        && isUnsupportedImageRequest(response.status, errorBody)
+      ) {
+        logForDebugging(
+          `[openai-shim] ${request.resolvedModel} rejected image_url content; retrying once with text-only messages`,
+          { level: 'warn' },
+        )
+        response = await fetch(chatCompletionsUrl, {
+          ...fetchInit,
+          body: JSON.stringify({
+            ...body,
+            messages: messagesWithoutOpenAIImages(openaiMessages),
+          }),
+        })
+        if (response.ok) return response
+        errorBody = await response.text().catch(() => 'unknown error')
+      }
+
       const rateHint =
         isGithub && response.status === 429 ? formatRetryAfterHint(response) : ''
 

@@ -237,21 +237,39 @@ async function executeEvolution(
   config: AgentGatewayConfig,
   options?: EvolutionRunOptions,
 ): Promise<EvolutionResult | null> {
+  const analysisConfig = buildEvolutionAnalysisConfig(config)
   switch (type) {
     case 'identity_evolution':
-      return evolveIdentity(config, options)
+      return evolveIdentity(analysisConfig, options)
     case 'code_review':
-      return reviewOwnCode(config, options)
+      return reviewOwnCode(analysisConfig, options)
     case 'prompt_evolution':
-      return evolvePrompts(config, options)
+      return evolvePrompts(analysisConfig, options)
     case 'pattern_extraction':
-      return extractPatterns(config, options)
+      return extractPatterns(analysisConfig, options)
     case 'tool_analysis':
-      return analyzeTools(config, options)
+      return analyzeTools(analysisConfig, options)
     case 'architecture_review':
-      return reviewArchitecture(config, options)
+      return reviewArchitecture(analysisConfig, options)
     default:
       return null
+  }
+}
+
+function buildEvolutionAnalysisConfig(
+  config: AgentGatewayConfig,
+): AgentGatewayConfig {
+  return {
+    ...config,
+    runner: {
+      ...config.runner,
+      disableTools: true,
+      disallowedTools: [],
+    },
+    subagents: {
+      ...config.subagents,
+      enabled: false,
+    },
   }
 }
 
@@ -302,6 +320,7 @@ async function evolveIdentity(
       prompt,
       config,
       suppressObservers: true,
+      executionClass: 'maintenance',
       signal: options?.signal,
       streamEvents: Boolean(options?.onProgress || options?.onStdout),
       onProgress: options?.onProgress,
@@ -378,6 +397,7 @@ async function reviewOwnCode(
       prompt,
       config,
       suppressObservers: true,
+      executionClass: 'maintenance',
       signal: options?.signal,
       streamEvents: Boolean(options?.onProgress || options?.onStdout),
       onProgress: options?.onProgress,
@@ -433,6 +453,7 @@ async function evolvePrompts(
       prompt,
       config,
       suppressObservers: true,
+      executionClass: 'maintenance',
       signal: options?.signal,
       streamEvents: Boolean(options?.onProgress || options?.onStdout),
       onProgress: options?.onProgress,
@@ -487,6 +508,7 @@ async function extractPatterns(
       prompt,
       config,
       suppressObservers: true,
+      executionClass: 'maintenance',
       signal: options?.signal,
       streamEvents: Boolean(options?.onProgress || options?.onStdout),
       onProgress: options?.onProgress,
@@ -536,6 +558,7 @@ async function analyzeTools(
       prompt,
       config,
       suppressObservers: true,
+      executionClass: 'maintenance',
       signal: options?.signal,
       streamEvents: Boolean(options?.onProgress || options?.onStdout),
       onProgress: options?.onProgress,
@@ -591,6 +614,7 @@ async function reviewArchitecture(
       prompt,
       config,
       suppressObservers: true,
+      executionClass: 'maintenance',
       signal: options?.signal,
       streamEvents: Boolean(options?.onProgress || options?.onStdout),
       onProgress: options?.onProgress,

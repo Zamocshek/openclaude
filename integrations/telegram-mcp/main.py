@@ -10,6 +10,9 @@ import random
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import List, Dict, Optional, Union, Any
+from urllib.parse import urlencode
+
+from interaction_protocol import format_agent_interaction_envelope
 
 # Third-party libraries
 import nest_asyncio
@@ -47,11 +50,14 @@ from runtime_config import (
 )
 import assistant_memory as am
 import content_workflow as cw
+import channel_profiles as cp
 import post_formatting as pf
 import operator_config as oc
 import stat_report_renderer as sr
 import maton_client as mt
+import telegram_bot_client as tbot
 import vpromotions_client as vp
+import twiboost_client as tb
 import account_admin as aa
 
 _orig_normalize_secret = _TcpMTProxy.normalize_secret
@@ -108,6 +114,121 @@ def get_entity_filter_type(entity: Any) -> Optional[str]:
     if entity_type == "Channel":
         return "channel"
     return None
+
+
+_TG_INVITE_REFERENCE_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?t\.me/(?:joinchat/|\+)([A-Za-z0-9_-]+)(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+_TG_PUBLIC_REFERENCE_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?t\.me/([A-Za-z0-9_]{5,})(?:[/?#].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_chat_reference(value: Union[int, str]) -> tuple[str, Union[int, str]]:
+    """Normalize Telegram IDs, usernames, public links, and invite links."""
+    if isinstance(value, int):
+        if not (-(2**63) <= value <= 2**63 - 1):
+            raise ValueError("chat_id is out of the valid integer range")
+        return "entity", value
+    if not isinstance(value, str):
+        raise ValueError("chat_id must be an integer or string")
+
+    text = value.strip()
+    if not text:
+        raise ValueError("chat_id is required")
+    try:
+        numeric = int(text)
+    except ValueError:
+        numeric = None
+    if numeric is not None:
+        if not (-(2**63) <= numeric <= 2**63 - 1):
+            raise ValueError("chat_id is out of the valid integer range")
+        return "entity", numeric
+
+    invite = _TG_INVITE_REFERENCE_RE.match(text)
+    if invite:
+        return "invite", invite.group(1)
+    public = _TG_PUBLIC_REFERENCE_RE.match(text)
+    if public:
+        return "entity", public.group(1)
+    if re.fullmatch(r"@?[A-Za-z0-9_]{5,}", text):
+        return "entity", text
+    raise ValueError(
+        "chat_id must be an integer, username, public t.me link, or Telegram invite link"
+    )
+
+
+async def _resolve_chat_reference(c: TelegramClient, value: Union[int, str]):
+    kind, reference = _normalize_chat_reference(value)
+    if kind == "entity":
+        return await c.get_entity(reference)
+
+    invite = await c(functions.messages.CheckChatInviteRequest(hash=str(reference)))
+    entity = getattr(invite, "chat", None)
+    if entity is None:
+        title = getattr(invite, "title", "this chat")
+        raise ValueError(
+            f"The selected Telegram account is not a member of '{title}'. "
+            "Use join_chat_by_link first if joining is authorized."
+        )
+    return entity
+
+
+def _channel_posting_access(entity: Any) -> Dict[str, Any]:
+    creator = bool(getattr(entity, "creator", False))
+    admin_rights = getattr(entity, "admin_rights", None)
+    is_broadcast = bool(getattr(entity, "broadcast", False))
+    is_megagroup = bool(getattr(entity, "megagroup", False))
+    restricted = bool(getattr(entity, "restricted", False))
+    restriction_reasons = [
+        {
+            "platform": getattr(reason, "platform", None),
+            "reason": getattr(reason, "reason", None),
+            "text": getattr(reason, "text", None),
+        }
+        for reason in (getattr(entity, "restriction_reason", None) or [])
+    ]
+
+    if restricted:
+        can_post = False
+        basis = "channel is restricted by Telegram"
+    elif creator:
+        can_post = True
+        basis = "creator"
+    elif is_broadcast:
+        can_post = bool(admin_rights and getattr(admin_rights, "post_messages", False))
+        basis = "admin_rights.post_messages" if can_post else "missing post_messages right"
+    elif is_megagroup or isinstance(entity, Chat):
+        banned_rights = getattr(entity, "banned_rights", None)
+        blocked = bool(banned_rights and getattr(banned_rights, "send_messages", False))
+        can_post = bool(admin_rights) or not blocked
+        basis = "admin/member send permission" if can_post else "send_messages is restricted"
+    else:
+        can_post = False
+        basis = "entity is not a channel or group"
+
+    return {
+        "can_post": can_post,
+        "basis": basis,
+        "creator": creator,
+        "restricted": restricted,
+        "restriction_reasons": restriction_reasons,
+        "broadcast": is_broadcast,
+        "megagroup": is_megagroup,
+        "admin_rights": {
+            "post_messages": bool(
+                admin_rights and getattr(admin_rights, "post_messages", False)
+            ),
+            "edit_messages": bool(
+                admin_rights and getattr(admin_rights, "edit_messages", False)
+            ),
+            "delete_messages": bool(
+                admin_rights and getattr(admin_rights, "delete_messages", False)
+            ),
+        },
+    }
 
 
 ensure_runtime_dirs()
@@ -415,6 +536,7 @@ def get_engagement_info(message) -> str:
 SESSION_DIR = str(get_session_dir())
 START_SESSION_TIMEOUT = 10
 TOOL_OPERATION_TIMEOUT = 25
+BATCH_TOOL_OPERATION_TIMEOUT = 180
 
 MULTI_ACCOUNT_CLIENTS: Dict[str, TelegramClient] = {}
 _session_configs: Dict[str, Dict[str, Any]] = {}
@@ -873,7 +995,7 @@ async def check_account(account_id: str) -> str:
                 if me:
                     proxy = _resolve_proxy(account_id)
                     proxy_str = _proxy_display(proxy)
-                    return f"{_format_me(me)} | proxy: {proxy_str}"
+                    return f"ok: {_format_me(me)} | proxy: {proxy_str}"
             except Exception:
                 _started_accounts.discard(account_id)
 
@@ -909,7 +1031,7 @@ async def check_account(account_id: str) -> str:
         _started_accounts.add(account_id)
         _failed_accounts.discard(account_id)
         proxy_str = _proxy_display(proxy)
-        return f"{_format_me(me)} | proxy: {proxy_str}"
+        return f"ok: {_format_me(me)} | proxy: {proxy_str}"
     except asyncio.TimeoutError:
         await _safe_disconnect(tmp)
         return f"error: connect/auth timeout [api_id={api_id}]"
@@ -1039,6 +1161,11 @@ async def delete_all_sessions(confirm: bool = False) -> str:
         return "Confirmation required. Call delete_all_sessions with confirm=true."
 
     clients = list(MULTI_ACCOUNT_CLIENTS.values())
+    clients.extend(
+        pending["client"]
+        for pending in _pending_auth.values()
+        if pending.get("client") is not None
+    )
     if client not in clients:
         clients.append(client)
     await asyncio.gather(
@@ -1085,6 +1212,50 @@ async def delete_all_sessions(confirm: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 _pending_auth: Dict[str, Dict[str, Any]] = {}
+_PENDING_AUTH_TTL_SECONDS = 10 * 60
+
+
+async def _discard_pending_auth(session_name: str) -> bool:
+    pending = _pending_auth.pop(session_name, None)
+    if not pending:
+        return False
+    pending_client = pending.get("client")
+    if pending_client is not None:
+        await _safe_disconnect(pending_client)
+    return True
+
+
+async def _purge_expired_pending_auth(now: Optional[float] = None) -> set[str]:
+    current = time.monotonic() if now is None else now
+    expired = {
+        name
+        for name, pending in _pending_auth.items()
+        if float(pending.get("expires_at", 0)) <= current
+    }
+    for name in expired:
+        await _discard_pending_auth(name)
+    return expired
+
+
+def _authorization_interaction_envelope(session_name: str) -> str:
+    """Machine-readable continuation metadata; never includes phone or secrets."""
+    safe_id = "".join(
+        char if char.isalnum() or char in "._-" else "_"
+        for char in session_name
+    )[:120]
+    return format_agent_interaction_envelope(
+        interaction_id=f"telegram-auth:{safe_id}",
+        handler="telegram.session.authorize",
+        stage="code",
+        prompt="Send the Telegram confirmation code.",
+        input_name="code",
+        input_kind="otp",
+        input_prompt="Send the 5-digit Telegram confirmation code.",
+        min_length=5,
+        max_length=5,
+        state={"sessionName": session_name},
+        expires_in_ms=600_000,
+    )
 
 
 @mcp.tool(
@@ -1109,6 +1280,9 @@ async def authorize_send_code(
     aid = api_id or TELEGRAM_API_ID
     ahash = api_hash or TELEGRAM_API_HASH
 
+    await _purge_expired_pending_auth()
+    await _discard_pending_auth(name)
+
     session_path = os.path.join(SESSION_DIR, name)
     tmp = TelegramClient(session_path, aid, ahash, timeout=10, connection_retries=2)
 
@@ -1129,10 +1303,12 @@ async def authorize_send_code(
             "phone_code_hash": sent.phone_code_hash,
             "api_id": aid,
             "api_hash": ahash,
+            "expires_at": time.monotonic() + _PENDING_AUTH_TTL_SECONDS,
         }
         return (
             f"Code sent to {phone}. Session name: '{name}'.\n"
-            f"Now call authorize_complete(session_name='{name}', code=<the code you received>)."
+            f"Now call authorize_complete(session_name='{name}', code=<the code you received>).\n"
+            f"{_authorization_interaction_envelope(name)}"
         )
     except Exception as e:
         await _safe_disconnect(tmp)
@@ -1154,8 +1330,14 @@ async def authorize_complete(
         code: The auth code received via SMS or Telegram.
         password: 2FA password if enabled on the account.
     """
+    expired = await _purge_expired_pending_auth()
     pending = _pending_auth.pop(session_name, None)
     if not pending:
+        if session_name in expired:
+            return (
+                f"Authorization for '{session_name}' expired. "
+                "Call authorize_send_code again."
+            )
         return (
             f"No pending authorization for '{session_name}'. "
             "Call authorize_send_code first."
@@ -1177,8 +1359,9 @@ async def authorize_complete(
                 if not password:
                     _pending_auth[session_name] = pending
                     return (
-                        "2FA password required. Call authorize_complete again with the password parameter.\n"
-                        f"authorize_complete(session_name='{session_name}', code='{code}', password='your_2fa_password')"
+                        "2FA password required. Call authorize_complete again with "
+                        "the password parameter. The confirmation code is never "
+                        "echoed in tool output."
                     )
                 await tmp.sign_in(password=password)
             else:
@@ -1212,6 +1395,9 @@ async def authorize_complete(
             f"Session '{session_name}' saved and added to active pool."
         )
     except Exception as e:
+        if "PASSWORD_HASH_INVALID" in str(e) or "PasswordHashInvalidError" in type(e).__name__:
+            _pending_auth[session_name] = pending
+            return "Authorization failed: invalid 2FA password. Try authorize_complete again."
         await _safe_disconnect(tmp)
         return f"Authorization failed: {e}"
 
@@ -1717,6 +1903,175 @@ async def vpromotions_refill_status(refill_id: str) -> str:
 
 
 @mcp.tool(
+    annotations=ToolAnnotations(title="TwiBoost Config", openWorldHint=False, readOnlyHint=True)
+)
+def twiboost_config_status() -> str:
+    """Show TwiBoost API configuration status without exposing the API key."""
+    try:
+        return _json({"ok": True, **tb.config_status()})
+    except Exception as e:
+        return log_and_format_error("twiboost_config_status", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="TwiBoost Balance", openWorldHint=True, readOnlyHint=True)
+)
+async def twiboost_balance() -> str:
+    """Read the TwiBoost account balance."""
+    try:
+        return _json({"ok": True, "balance": await tb.TwiBoostClient().balance()})
+    except Exception as e:
+        return log_and_format_error("twiboost_balance", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="TwiBoost Services", openWorldHint=True, readOnlyHint=True)
+)
+async def twiboost_services(
+    search: str = "",
+    category: str = "",
+    service_type: str = "",
+    limit: int = 50,
+) -> str:
+    """List and filter TwiBoost services by name, category, or service type."""
+    try:
+        services = await tb.TwiBoostClient().services()
+        filtered = tb.filter_services(
+            services,
+            search=search,
+            category=category,
+            service_type=service_type,
+            limit=max(0, limit),
+        )
+        return _json(
+            {
+                "ok": True,
+                "total": len(services),
+                "returned": len(filtered),
+                "filters": {
+                    "search": search,
+                    "category": category,
+                    "service_type": service_type,
+                    "limit": limit,
+                },
+                "services": filtered,
+            }
+        )
+    except Exception as e:
+        return log_and_format_error("twiboost_services", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="TwiBoost Add Order", openWorldHint=True, destructiveHint=True)
+)
+async def twiboost_add_order(
+    service: int,
+    link: str,
+    quantity: Optional[int] = None,
+    extra_json: Optional[str] = None,
+    confirm: bool = False,
+) -> str:
+    """Preview or create a paid TwiBoost order."""
+    try:
+        payload = tb.build_add_order_payload(
+            service=service,
+            link=link,
+            quantity=quantity,
+            extra_json=extra_json,
+        )
+        if not confirm:
+            return _json(
+                {
+                    "ok": True,
+                    "preview": True,
+                    "action": "add",
+                    "payload": payload,
+                    "next_step": "Call again with confirm=true only after explicit approval.",
+                }
+            )
+        result = await tb.TwiBoostClient().add_order(
+            service=service,
+            link=link,
+            quantity=quantity,
+            extra_json=extra_json,
+        )
+        return _json({"ok": True, "order": result})
+    except Exception as e:
+        return log_and_format_error("twiboost_add_order", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="TwiBoost Order Status", openWorldHint=True, readOnlyHint=True)
+)
+async def twiboost_order_status(
+    order_id: Optional[int] = None,
+    order_ids: Optional[str] = None,
+) -> str:
+    """Get one or multiple TwiBoost order statuses."""
+    try:
+        client = tb.TwiBoostClient()
+        if order_ids:
+            return _json({"ok": True, "orders": await client.orders_status(order_ids)})
+        if not order_id:
+            raise ValueError("order_id or order_ids is required")
+        return _json(
+            {
+                "ok": True,
+                "order_id": order_id,
+                "status": await client.order_status(order_id),
+            }
+        )
+    except Exception as e:
+        return log_and_format_error("twiboost_order_status", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="TwiBoost Refill", openWorldHint=True, destructiveHint=True)
+)
+async def twiboost_create_refill(order_id: int, confirm: bool = False) -> str:
+    """Preview or request a TwiBoost refill for an eligible order."""
+    try:
+        if not confirm:
+            return _json(
+                {
+                    "ok": True,
+                    "preview": True,
+                    "action": "refill",
+                    "payload": {"order": order_id},
+                    "next_step": "Call again with confirm=true only after explicit approval.",
+                }
+            )
+        return _json(
+            {"ok": True, "refill": await tb.TwiBoostClient().refill(order_id)}
+        )
+    except Exception as e:
+        return log_and_format_error("twiboost_create_refill", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="TwiBoost Cancel Order", openWorldHint=True, destructiveHint=True)
+)
+async def twiboost_cancel_order(order_id: int, confirm: bool = False) -> str:
+    """Preview or cancel a TwiBoost order."""
+    try:
+        if not confirm:
+            return _json(
+                {
+                    "ok": True,
+                    "preview": True,
+                    "action": "cancel",
+                    "payload": {"order": order_id},
+                    "next_step": "Call again with confirm=true only after explicit approval.",
+                }
+            )
+        return _json(
+            {"ok": True, "cancel": await tb.TwiBoostClient().cancel(order_id)}
+        )
+    except Exception as e:
+        return log_and_format_error("twiboost_cancel_order", e)
+
+
+@mcp.tool(
     annotations=ToolAnnotations(title="Maton Gateway Config", openWorldHint=False, readOnlyHint=True)
 )
 def maton_config_status() -> str:
@@ -1800,6 +2155,417 @@ async def maton_get(
         return log_and_format_error("maton_get", e, app=app, connection_id=connection_id)
 
 
+def _maton_pending_request(
+    *,
+    app: str,
+    connection_id: str,
+    method: str,
+    path: str,
+    summary: str,
+    body: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    with am.connect() as conn:
+        action_id = am.create_pending_action(
+            conn,
+            action_type="maton_request",
+            account_id=f"maton:{connection_id}",
+            target_chat=None,
+            target_label=f"Maton {app} / {connection_id}",
+            payload={
+                "app": app,
+                "connection_id": connection_id,
+                "method": method,
+                "path": path,
+                "summary": summary,
+                "body": body or {},
+                "headers": headers or {},
+            },
+        )
+        conn.commit()
+    return {
+        "ok": True,
+        "pending_action_id": action_id,
+        "action_type": "maton_request",
+        "request": {
+            "app": app,
+            "connection_id": connection_id,
+            "method": method,
+            "path": path,
+            "headers": headers or {},
+            "body": body or {},
+            "expected_outcome": summary,
+        },
+        "next_step": "Call assistant_confirm_action only after explicit human approval of this exact request.",
+    }
+
+
+def _maton_telegram_chat_id(value: str) -> str:
+    chat_id = str(value or "").strip()
+    if not chat_id or len(chat_id) > 256 or any(ord(char) < 32 for char in chat_id):
+        raise ValueError("chat_id must be a Telegram numeric id or @channel username")
+    return chat_id
+
+
+def _maton_telegram_parse_mode(value: Optional[str]) -> Optional[str]:
+    if value is None or not str(value).strip():
+        return None
+    normalized = str(value).strip().lower()
+    modes = {"html": "HTML", "markdown": "Markdown", "markdownv2": "MarkdownV2"}
+    if normalized not in modes:
+        raise ValueError("parse_mode must be HTML, Markdown, MarkdownV2, or empty")
+    return modes[normalized]
+
+
+def _maton_telegram_text(value: str, field: str, max_utf16_length: int) -> str:
+    text = str(value or "")
+    if not text.strip():
+        raise ValueError(f"{field} is required")
+    if len(text.encode("utf-16-le")) // 2 > max_utf16_length:
+        raise ValueError(f"{field} exceeds Telegram's {max_utf16_length}-character limit")
+    return text
+
+
+def _maton_telegram_error(operation: str, error: Exception, **context: Any) -> str:
+    if isinstance(error, ValueError):
+        return _json(
+            {
+                "ok": False,
+                "error_type": "validation_error",
+                "error": str(error),
+                "operation": operation,
+            }
+        )
+    return log_and_format_error(operation, error, **context)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Telegram Bot Publisher Status", openWorldHint=True, readOnlyHint=True
+    )
+)
+def telegram_bot_config_status() -> str:
+    """Show local Bot API publisher readiness without exposing its token."""
+    try:
+        return _json({"ok": True, **tbot.config_status()})
+    except Exception as e:
+        return log_and_format_error("telegram_bot_config_status", e)
+
+
+async def _telegram_platform_restriction(chat_id: str) -> Dict[str, Any]:
+    """Best-effort MTProto preflight for restrictions hidden by Bot API."""
+    try:
+        client, _ = await _get_assistant_client_and_account(None)
+        entity = await _resolve_chat_reference(client, chat_id)
+    except Exception as error:
+        return {
+            "checked": False,
+            "restricted": False,
+            "check_error": f"{type(error).__name__}: {error}",
+        }
+    access = _channel_posting_access(entity)
+    return {
+        "checked": True,
+        "restricted": access["restricted"],
+        "restriction_reasons": access["restriction_reasons"],
+    }
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Telegram Bot Posting Access", openWorldHint=True, readOnlyHint=True
+    )
+)
+async def telegram_bot_check_posting_access(chat_id: str) -> str:
+    """Check whether the configured local bot can publish to a channel."""
+    try:
+        target = _maton_telegram_chat_id(chat_id)
+        access = await tbot.TelegramBotClient().check_posting_access(target)
+        platform = await _telegram_platform_restriction(target)
+        access["platform_restriction"] = platform
+        if platform["restricted"]:
+            access["can_post"] = False
+            access["basis"] = "channel is restricted by Telegram"
+        return _json(access)
+    except Exception as e:
+        return _maton_telegram_error(
+            "telegram_bot_check_posting_access", e, chat_id=chat_id
+        )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Telegram Bot Prepare Message", openWorldHint=True, destructiveHint=True
+    )
+)
+async def telegram_bot_prepare_send_message(
+    chat_id: str,
+    text: str,
+    parse_mode: Optional[str] = None,
+    silent: bool = False,
+    link_preview: bool = True,
+    protect_content: bool = False,
+) -> str:
+    """Prepare a local Bot API send; confirmation performs the publish once."""
+    try:
+        if not tbot.TelegramBotConfig.from_env().configured:
+            raise tbot.TelegramBotError("TELEGRAM_MCP_BOT_TOKEN is not configured")
+        target = _maton_telegram_chat_id(chat_id)
+        platform = await _telegram_platform_restriction(target)
+        if platform["restricted"]:
+            reason = next(
+                (
+                    item.get("text")
+                    for item in platform.get("restriction_reasons", [])
+                    if item.get("text")
+                ),
+                "Telegram has restricted this channel",
+            )
+            raise ValueError(f"Cannot publish: {reason}")
+        message = _maton_telegram_text(text, "text", 4096)
+        mode = _maton_telegram_parse_mode(parse_mode)
+        body: Dict[str, Any] = {
+            "chat_id": target,
+            "text": message,
+            "disable_notification": bool(silent),
+            "link_preview_options": {"is_disabled": not bool(link_preview)},
+            "protect_content": bool(protect_content),
+        }
+        if mode:
+            body["parse_mode"] = mode
+        with am.connect() as conn:
+            action_id = am.create_pending_action(
+                conn,
+                action_type="telegram_bot_send_message",
+                account_id="telegram-bot:configured",
+                target_chat=target,
+                target_label=f"Telegram Bot API {target}",
+                payload={"body": body},
+            )
+            conn.commit()
+        return _json(
+            {
+                "ok": True,
+                "pending_action_id": action_id,
+                "action_type": "telegram_bot_send_message",
+                "target": target,
+                "preview": {
+                    "text": message,
+                    "parse_mode": mode,
+                    "silent": bool(silent),
+                    "link_preview": bool(link_preview),
+                    "protect_content": bool(protect_content),
+                },
+                "next_step": (
+                    f"Call assistant_confirm_action(action_id={action_id}) only after "
+                    "explicit approval."
+                ),
+            }
+        )
+    except Exception as e:
+        return _maton_telegram_error(
+            "telegram_bot_prepare_send_message", e, chat_id=chat_id
+        )
+
+
+class _MatonTelegramOperationError(mt.MatonAPIError):
+    """Telegram rejected a Maton-proxied operation before delivery."""
+
+
+def _require_maton_telegram_success(
+    response: Dict[str, Any], path: str
+) -> Any:
+    if not isinstance(response, dict):
+        raise _MatonTelegramOperationError("Maton Telegram response is not an object")
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise _MatonTelegramOperationError(
+            "Maton Telegram response has no structured data object"
+        )
+    if data.get("ok") is not True:
+        detail = str(data.get("description") or data.get("error") or "unknown error")
+        raise _MatonTelegramOperationError(
+            f"Telegram API rejected {path}: {detail[:500]}"
+        )
+    if "result" not in data:
+        raise _MatonTelegramOperationError(
+            f"Telegram API returned no result for {path}"
+        )
+
+    method = path.split("?", 1)[0].rsplit("/", 1)[-1].lower()
+    result = data["result"]
+    if method in {"sendmessage", "sendanimation"}:
+        if not isinstance(result, dict) or not result.get("message_id"):
+            raise _MatonTelegramOperationError(
+                f"Telegram API returned no message_id for {path}"
+            )
+    return result
+
+
+async def _maton_telegram_connection_id(connection_id: Optional[str] = None) -> str:
+    client = mt.MatonClient()
+    if connection_id:
+        selected_id = mt.validate_connection_id(connection_id)
+        response = await client.get_connection(selected_id)
+        connection = response.get("connection", response)
+        if not isinstance(connection, dict):
+            raise mt.MatonAPIError("Maton connection response has invalid connection data")
+        if str(connection.get("app", "")).lower() != "telegram":
+            raise ValueError("connection_id is not a Telegram Maton connection")
+        if str(connection.get("status", "")).upper() != "ACTIVE":
+            raise ValueError("Telegram Maton connection is not active")
+        return selected_id
+
+    response = await client.list_connections(app="telegram", status="ACTIVE")
+    connections = response.get("connections", [])
+    active = [
+        item
+        for item in connections
+        if isinstance(item, dict)
+        and str(item.get("app", "")).lower() == "telegram"
+        and str(item.get("status", "")).upper() == "ACTIVE"
+        and item.get("connection_id")
+    ]
+    if not active:
+        raise ValueError("no active Telegram Maton connection; call maton_connections first")
+    if len(active) > 1:
+        raise ValueError("multiple active Telegram Maton connections; pass connection_id explicitly")
+    return mt.validate_connection_id(str(active[0]["connection_id"]))
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Maton Telegram Get Me", openWorldHint=True, readOnlyHint=True)
+)
+async def maton_telegram_get_me(connection_id: Optional[str] = None) -> str:
+    """Get the connected Telegram bot identity, auto-selecting the only active connection."""
+    try:
+        selected_id = await _maton_telegram_connection_id(connection_id)
+        result = await mt.MatonClient().request(
+            method="GET", app="telegram", connection_id=selected_id, path=":token/getMe"
+        )
+        _require_maton_telegram_success(result, ":token/getMe")
+        return _json({"ok": True, "connection_id": selected_id, **result})
+    except Exception as e:
+        return _maton_telegram_error("maton_telegram_get_me", e, connection_id=connection_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Maton Telegram Get Chat", openWorldHint=True, readOnlyHint=True)
+)
+async def maton_telegram_get_chat(
+    chat_id: str, connection_id: Optional[str] = None
+) -> str:
+    """Resolve a Telegram chat/channel by numeric id or public @username."""
+    try:
+        selected_id = await _maton_telegram_connection_id(connection_id)
+        target = _maton_telegram_chat_id(chat_id)
+        path = f":token/getChat?{urlencode({'chat_id': target})}"
+        result = await mt.MatonClient().request(
+            method="GET", app="telegram", connection_id=selected_id, path=path
+        )
+        _require_maton_telegram_success(result, path)
+        return _json({"ok": True, "connection_id": selected_id, "chat_id": target, **result})
+    except Exception as e:
+        return _maton_telegram_error("maton_telegram_get_chat", e, chat_id=chat_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Maton Telegram Prepare Message", openWorldHint=True, destructiveHint=True
+    )
+)
+async def maton_telegram_prepare_send_message(
+    chat_id: str,
+    text: str,
+    connection_id: Optional[str] = None,
+    parse_mode: Optional[str] = None,
+    silent: bool = False,
+    link_preview: bool = True,
+    protect_content: bool = False,
+) -> str:
+    """Prepare sendMessage with two required fields; confirmation performs the send."""
+    try:
+        selected_id = await _maton_telegram_connection_id(connection_id)
+        target = _maton_telegram_chat_id(chat_id)
+        message = _maton_telegram_text(text, "text", 4096)
+        mode = _maton_telegram_parse_mode(parse_mode)
+        body: Dict[str, Any] = {
+            "chat_id": target,
+            "text": message,
+            "disable_notification": bool(silent),
+            "disable_web_page_preview": not bool(link_preview),
+            "protect_content": bool(protect_content),
+        }
+        if mode:
+            body["parse_mode"] = mode
+        return _json(
+            _maton_pending_request(
+                app="telegram",
+                connection_id=selected_id,
+                method="POST",
+                path=":token/sendMessage",
+                summary=f"Send a Telegram message to {target}",
+                body=body,
+            )
+        )
+    except Exception as e:
+        return _maton_telegram_error(
+            "maton_telegram_prepare_send_message", e, chat_id=chat_id
+        )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Maton Telegram Prepare Animation", openWorldHint=True, destructiveHint=True
+    )
+)
+async def maton_telegram_prepare_send_animation(
+    chat_id: str,
+    animation: str,
+    caption: Optional[str] = None,
+    connection_id: Optional[str] = None,
+    parse_mode: Optional[str] = None,
+    silent: bool = False,
+    protect_content: bool = False,
+) -> str:
+    """Prepare sendAnimation for an HTTP URL or Telegram file_id; confirmation sends it."""
+    try:
+        selected_id = await _maton_telegram_connection_id(connection_id)
+        target = _maton_telegram_chat_id(chat_id)
+        animation_ref = str(animation or "").strip()
+        if (
+            not animation_ref
+            or len(animation_ref) > 4096
+            or any(ord(char) < 32 for char in animation_ref)
+        ):
+            raise ValueError("animation must be an HTTP URL or Telegram file_id")
+        body: Dict[str, Any] = {
+            "chat_id": target,
+            "animation": animation_ref,
+            "disable_notification": bool(silent),
+            "protect_content": bool(protect_content),
+        }
+        if caption is not None and str(caption).strip():
+            body["caption"] = _maton_telegram_text(caption, "caption", 1024)
+            mode = _maton_telegram_parse_mode(parse_mode)
+            if mode:
+                body["parse_mode"] = mode
+        return _json(
+            _maton_pending_request(
+                app="telegram",
+                connection_id=selected_id,
+                method="POST",
+                path=":token/sendAnimation",
+                summary=f"Send a Telegram animation to {target}",
+                body=body,
+            )
+        )
+    except Exception as e:
+        return _maton_telegram_error(
+            "maton_telegram_prepare_send_animation", e, chat_id=chat_id
+        )
+
+
 @mcp.tool(
     annotations=ToolAnnotations(title="Maton Prepare Connection", openWorldHint=True, destructiveHint=True)
 )
@@ -1868,40 +2634,16 @@ def maton_prepare_request(
             raise ValueError("summary is required so the user can review the expected outcome")
         body = mt.parse_json_object(body_json, "body_json")
         headers = mt.validate_custom_headers(mt.parse_json_object(headers_json, "headers_json"))
-        with am.connect() as conn:
-            action_id = am.create_pending_action(
-                conn,
-                action_type="maton_request",
-                account_id=f"maton:{connection_id}",
-                target_chat=None,
-                target_label=f"Maton {app} / {connection_id}",
-                payload={
-                    "app": app,
-                    "connection_id": connection_id,
-                    "method": method,
-                    "path": path,
-                    "summary": summary,
-                    "body": body,
-                    "headers": headers,
-                },
-            )
-            conn.commit()
         return _json(
-            {
-                "ok": True,
-                "pending_action_id": action_id,
-                "action_type": "maton_request",
-                "request": {
-                    "app": app,
-                    "connection_id": connection_id,
-                    "method": method,
-                    "path": path,
-                    "headers": headers,
-                    "body": body,
-                    "expected_outcome": summary,
-                },
-                "next_step": "Call assistant_confirm_action only after explicit human approval of this exact request.",
-            }
+            _maton_pending_request(
+                app=app,
+                connection_id=connection_id,
+                method=method,
+                path=path,
+                summary=summary,
+                body=body,
+                headers=headers,
+            )
         )
     except Exception as e:
         return log_and_format_error("maton_prepare_request", e, app=app, connection_id=connection_id)
@@ -2687,7 +3429,6 @@ async def list_chats(chat_type: str = None, limit: int = 20, account_id: Optiona
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Chat", openWorldHint=True, readOnlyHint=True))
-@validate_id("chat_id")
 async def get_chat(chat_id: Union[int, str], account_id: Optional[str] = None) -> str:
     """
     Get detailed information about a specific chat.
@@ -2697,7 +3438,7 @@ async def get_chat(chat_id: Union[int, str], account_id: Optional[str] = None) -
     """
     try:
         c = await _get_client(account_id)
-        entity = await c.get_entity(chat_id)
+        entity = await _resolve_chat_reference(c, chat_id)
 
         result = []
         result.append(f"ID: {entity.id}")
@@ -2757,6 +3498,99 @@ async def get_chat(chat_id: Union[int, str], account_id: Optional[str] = None) -
         return "\n".join(result)
     except Exception as e:
         return log_and_format_error("get_chat", e, chat_id=chat_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Check Posting Access", openWorldHint=True, readOnlyHint=True
+    )
+)
+@tool_timeout(TOOL_OPERATION_TIMEOUT)
+async def check_posting_access(
+    chat_id: Union[int, str], account_id: Optional[str] = None
+) -> str:
+    """Resolve a Telegram target and report whether the selected session can post."""
+    try:
+        c, account_key = await _get_assistant_client_and_account(account_id)
+        entity = await _resolve_chat_reference(c, chat_id)
+        access = _channel_posting_access(entity)
+        return _json(
+            {
+                "ok": True,
+                "account_id": account_key,
+                "target": {
+                    "id": getattr(entity, "id", None),
+                    "title": getattr(entity, "title", None),
+                    "username": getattr(entity, "username", None),
+                    "type": get_entity_type(entity),
+                },
+                **access,
+            }
+        )
+    except Exception as e:
+        return log_and_format_error(
+            "check_posting_access", e, chat_id=chat_id, account_id=account_id
+        )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Check Posting Access Batch", openWorldHint=True, readOnlyHint=True
+    )
+)
+@tool_timeout(BATCH_TOOL_OPERATION_TIMEOUT)
+async def check_posting_access_batch(
+    chat_ids: List[Union[int, str]], account_id: Optional[str] = None
+) -> str:
+    """Check many publication targets sequentially through one Telegram session."""
+    if not chat_ids:
+        return _json({"ok": False, "error": "chat_ids must not be empty"})
+    if len(chat_ids) > 100:
+        return _json({"ok": False, "error": "chat_ids cannot contain more than 100 items"})
+
+    try:
+        c, account_key = await _get_assistant_client_and_account(account_id)
+        results = []
+        for reference in chat_ids:
+            try:
+                entity = await _resolve_chat_reference(c, reference)
+                results.append(
+                    {
+                        "reference": reference,
+                        "ok": True,
+                        "target": {
+                            "id": getattr(entity, "id", None),
+                            "peer_id": am.peer_id(entity),
+                            "title": getattr(entity, "title", None),
+                            "username": getattr(entity, "username", None),
+                            "type": get_entity_type(entity),
+                        },
+                        **_channel_posting_access(entity),
+                    }
+                )
+            except Exception as error:
+                results.append(
+                    {
+                        "reference": reference,
+                        "ok": False,
+                        "can_post": False,
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                )
+        return _json(
+            {
+                "ok": all(item["ok"] for item in results),
+                "account_id": account_key,
+                "requested": len(chat_ids),
+                "resolved": sum(1 for item in results if item["ok"]),
+                "can_post": sum(1 for item in results if item.get("can_post")),
+                "results": results,
+            }
+        )
+    except Exception as e:
+        return log_and_format_error(
+            "check_posting_access_batch", e, account_id=account_id
+        )
 
 
 @mcp.tool(
@@ -6693,7 +7527,7 @@ async def _assistant_resolve_chat(
     account_key: str,
     chat_id: Union[int, str],
 ) -> tuple[Any, str, str]:
-    entity = await c.get_entity(_entity_arg(chat_id))
+    entity = await _resolve_chat_reference(c, chat_id)
     pid = am.peer_id(entity)
     title = am.display_name(entity)
     am.upsert_chat(
@@ -6735,6 +7569,37 @@ def _content_default_target() -> Optional[Dict[str, Any]]:
     with cw.connect() as conn:
         targets = cw.list_channels(conn, kind="target", enabled_only=True, limit=2)
     return targets[0] if len(targets) == 1 else None
+
+
+def _content_quality_for_target(
+    target_chat_id: Union[int, str],
+    text: str,
+    *,
+    requested_format: str = "auto",
+    description_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    try:
+        return {
+            "enforced": True,
+            **cp.review_post(
+                target_chat_id,
+                text,
+                requested_format=requested_format,
+                description_override=description_override,
+            ),
+        }
+    except cp.ChannelProfileError as error:
+        if str(error).startswith("no channel profile matches"):
+            return {
+                "enforced": False,
+                "passed": True,
+                "score": None,
+                "blockers": [],
+                "warnings": [
+                    "target is not in the managed channel profile registry"
+                ],
+            }
+        raise
 
 
 @mcp.tool(
@@ -6782,7 +7647,7 @@ async def _content_upsert_channel(
     notes: Optional[str],
 ) -> Dict[str, Any]:
     c, account_key = await _get_assistant_client_and_account(_content_call_account(account_id))
-    entity = await c.get_entity(_content_entity_arg(chat_id))
+    entity = await _resolve_chat_reference(c, chat_id)
     peer = am.peer_id(entity)
     label = title or am.display_name(entity)
     with cw.connect() as conn:
@@ -6997,6 +7862,7 @@ async def content_sync_sources(
                         meta={
                             "views": getattr(msg, "views", None),
                             "forwards": getattr(msg, "forwards", None),
+                            "telegram_formatting": pf.formatting_from_message(msg),
                         },
                     )
                     stored += 1
@@ -7018,6 +7884,94 @@ async def content_sync_sources(
         )
     except Exception as e:
         return log_and_format_error("content_sync_sources", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Content Capture Source Post", openWorldHint=True, readOnlyHint=False
+    )
+)
+@tool_timeout(TOOL_OPERATION_TIMEOUT)
+async def content_capture_source_post(
+    chat_id: Union[int, str],
+    message_id: int,
+    account_id: Optional[str] = None,
+) -> str:
+    """Capture one Telegram source post with its links and formatting entities."""
+
+    try:
+        c, account_key = await _get_assistant_client_and_account(account_id)
+        entity = await c.get_entity(_content_entity_arg(chat_id))
+        message = await c.get_messages(entity, ids=int(message_id))
+        if not message:
+            return _json(
+                {
+                    "ok": False,
+                    "error_type": "not_found",
+                    "error": f"message {message_id} was not found in {chat_id}",
+                }
+            )
+        text = am.message_text(message)
+        if not text:
+            return _json(
+                {
+                    "ok": False,
+                    "error_type": "unsupported_source",
+                    "error": "the selected message has no text or caption",
+                }
+            )
+        peer = am.peer_id(entity)
+        title = am.display_name(entity)
+        username = getattr(entity, "username", None)
+        formatting = pf.formatting_from_message(message)
+        with cw.connect() as conn:
+            cw.upsert_channel(
+                conn,
+                kind="source",
+                account_id=account_key,
+                chat_id=peer,
+                peer_id=peer,
+                title=title,
+                username=username,
+                enabled=True,
+            )
+            source = cw.store_post(
+                conn,
+                role="source",
+                status="captured",
+                account_id=account_key,
+                chat_id=peer,
+                peer_id=peer,
+                chat_title=title,
+                message_id=int(message_id),
+                message_date=getattr(message, "date", None),
+                text=text,
+                meta={
+                    "views": getattr(message, "views", None),
+                    "forwards": getattr(message, "forwards", None),
+                    "telegram_formatting": formatting,
+                },
+            )
+            conn.commit()
+        public_reference = (
+            f"@{username}/{int(message_id)}" if username else f"{peer}/{int(message_id)}"
+        )
+        return _json(
+            {
+                "ok": True,
+                "source_post": source,
+                "source_reference": public_reference,
+                "formatting": formatting,
+                "next_step": (
+                    "Pass source_post.id to content_create_draft. The formatting guard "
+                    "will preserve an exact source or reject silently lost hidden links."
+                ),
+            }
+        )
+    except Exception as e:
+        return log_and_format_error(
+            "content_capture_source_post", e, chat_id=chat_id, message_id=message_id
+        )
 
 
 @mcp.tool(
@@ -7055,13 +8009,145 @@ def content_research_context(
                 "recent_published": recent_history,
                 "recent_drafts": drafts,
                 "agent_instruction": (
-                    "Use source_posts as research material, write a transformed draft, "
-                    "then call content_create_draft to run duplicate checks."
+                    "Use source_posts as research material. Telegram formatting is in "
+                    "source_posts[].meta.telegram_formatting; never reconstruct a post "
+                    "from visible text alone. Pass source_post.id to content_create_draft "
+                    "so entity preservation and duplicate checks run."
                 ),
             }
         )
     except Exception as e:
         return log_and_format_error("content_research_context", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Content Channel Profiles", openWorldHint=False, readOnlyHint=True
+    )
+)
+def content_channel_profiles(
+    group: Optional[str] = None,
+    include_disabled: bool = False,
+) -> str:
+    """List publishable channel profiles; include disabled channels for administration."""
+    try:
+        registry = cp.load_profiles()
+        selected_group = str(group or "").strip()
+        channels = [
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "group": item["group"],
+                "references": item["references"],
+                "description": cp.effective_description(item),
+                "description_status": item["description_status"],
+                "publishing_enabled": item.get("publishing_enabled", True),
+                "inference_confidence": item.get("inference_confidence"),
+                "content_pillars": item.get("content_pillars", []),
+                "preferred_formats": item["preferred_formats"],
+                "operational_note": item.get("operational_note"),
+            }
+            for item in registry["channels"]
+            if not selected_group or item["group"] == selected_group
+            if include_disabled or item.get("publishing_enabled", True)
+        ]
+        return _json(
+            {
+                "ok": True,
+                "returned": len(channels),
+                "include_disabled": bool(include_disabled),
+                "channels": channels,
+                "format_policy": registry["format_policy"],
+                "description_priority": registry["description_priority"],
+            }
+        )
+    except Exception as e:
+        return log_and_format_error("content_channel_profiles", e, group=group)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Content Channel Post Brief", openWorldHint=False, readOnlyHint=True
+    )
+)
+def content_channel_post_brief(
+    chat_id: Union[int, str],
+    requested_format: str = "auto",
+    objective: Optional[str] = None,
+    description_override: Optional[str] = None,
+) -> str:
+    """Build a channel-specific brief before drafting a Telegram post."""
+    try:
+        return _json(
+            {
+                "ok": True,
+                **cp.build_post_brief(
+                    chat_id,
+                    requested_format=requested_format,
+                    objective=objective,
+                    description_override=description_override,
+                ),
+                "agent_instruction": (
+                    "Choose depth from the subject and this profile. Do not force the "
+                    "post into a universal short length. Preview and similarity-check "
+                    "the finished text before preparing publication."
+                ),
+            }
+        )
+    except cp.ChannelProfileError as e:
+        return _json(
+            {
+                "ok": False,
+                "error_type": "channel_profile_error",
+                "error": str(e),
+            }
+        )
+    except Exception as e:
+        return log_and_format_error(
+            "content_channel_post_brief", e, chat_id=chat_id
+        )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Content Quality Review", openWorldHint=False, readOnlyHint=True
+    )
+)
+def content_quality_review(
+    chat_id: Union[int, str],
+    text: str,
+    requested_format: str = "auto",
+    description_override: Optional[str] = None,
+    format_mode: str = "plain",
+) -> str:
+    """Review encoding, channel fit, depth, structure, and Telegram limits before drafting."""
+    try:
+        post = pf.parse_post(text, format_mode)
+        review = cp.review_post(
+            chat_id,
+            post.text,
+            requested_format=requested_format,
+            description_override=description_override,
+        )
+        return _json(
+            {
+                "ok": True,
+                "blocked": not review["passed"],
+                "quality": review,
+                "formatting": pf.preview(post),
+                "next_step": (
+                    "Revise the post and review it again."
+                    if not review["passed"]
+                    else "Create the channel-specific draft."
+                ),
+            }
+        )
+    except cp.ChannelProfileError as e:
+        return _json(
+            {"ok": False, "error_type": "channel_profile_error", "error": str(e)}
+        )
+    except Exception as e:
+        return log_and_format_error("content_quality_review", e, chat_id=chat_id)
 
 
 @mcp.tool(
@@ -7114,14 +8200,22 @@ def content_create_draft(
     target_chat_id: Optional[Union[int, str]] = None,
     target_account_id: Optional[str] = None,
     source_post_id: Optional[int] = None,
+    source_reference: Optional[str] = None,
     threshold: Optional[float] = None,
     allow_similar: bool = False,
+    allow_formatting_loss: bool = False,
     format_mode: str = "plain",
     media_path: Optional[str] = None,
     force_document: bool = False,
+    requested_format: str = "auto",
+    description_override: Optional[str] = None,
 ) -> str:
     """
     Store a draft only after checking it against source/draft/published history.
+
+    source_post_id references a numeric source row in the managed content database.
+    source_reference resolves a previously captured ``@channel/123`` source.
+    Use content_capture_source_post first for an arbitrary Telegram message.
 
     If one enabled target exists and target_chat_id is omitted, it is used.
     format_mode supports plain, html, and markdown. HTML supports Telegram
@@ -7130,7 +8224,136 @@ def content_create_draft(
     try:
         normalized_media_path = _validated_media_path(media_path)
         max_length = pf.MAX_CAPTION_UTF16_LENGTH if normalized_media_path else pf.MAX_MESSAGE_UTF16_LENGTH
-        post = pf.parse_post(text, format_mode, max_utf16_length=max_length)
+        with cw.connect() as conn:
+            source = cw.get_post(conn, source_post_id) if source_post_id is not None else None
+            if source is None and source_reference:
+                source = cw.find_source_post_by_reference(conn, source_reference)
+            if source is not None and source.get("role") != "source":
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "invalid_source_post",
+                        "message": "source_post_id must reference a captured source post.",
+                    }
+                )
+            if source_reference and source is None:
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "source_not_captured",
+                        "source_reference": source_reference,
+                        "message": (
+                            "Capture the Telegram message with content_capture_source_post "
+                            "before drafting so links and formatting can be verified."
+                        ),
+                    }
+                )
+
+        source_formatting = None
+        inherited_formatting = False
+        if source is not None:
+            source_post_id = int(source["id"])
+            source_meta = source.get("meta") if isinstance(source.get("meta"), dict) else {}
+            candidate = source_meta.get("telegram_formatting")
+            if isinstance(candidate, dict):
+                source_formatting = candidate
+
+        if (
+            source is not None
+            and source_formatting
+            and source_formatting.get("entity_count")
+            and str(format_mode or "plain").strip().lower() == "plain"
+            and str(text or "").strip() == str(source.get("text") or "").strip()
+        ):
+            post = pf.parse_post(
+                source_formatting["formatted_text"], "html", max_utf16_length=max_length
+            )
+            inherited_formatting = True
+        else:
+            post = pf.parse_post(text, format_mode, max_utf16_length=max_length)
+
+        missing_formatting = (
+            pf.missing_source_formatting(source["text"], source_formatting, post)
+            if source is not None and source_formatting
+            else []
+        )
+        unattributed_formatting = []
+        if source is None:
+            candidate_text = post.text.casefold()
+            candidate_entities = pf.entity_details(post.text, post.entities)
+            with cw.connect() as conn:
+                recent_sources = cw.research_posts(conn, limit=200)
+            for candidate_source in recent_sources:
+                candidate_meta = (
+                    candidate_source.get("meta")
+                    if isinstance(candidate_source.get("meta"), dict)
+                    else {}
+                )
+                candidate_formatting = candidate_meta.get("telegram_formatting")
+                if not isinstance(candidate_formatting, dict):
+                    continue
+                for entity in candidate_formatting.get("entities", []):
+                    if not isinstance(entity, dict) or not entity.get("hidden_target"):
+                        continue
+                    label = str(entity.get("text") or "").strip()
+                    if len(label) < 8 or label.casefold() not in candidate_text:
+                        continue
+                    if any(
+                        item.get("target") == entity.get("target")
+                        and item.get("text", "").strip() == label
+                        for item in candidate_entities
+                    ):
+                        continue
+                    unattributed_formatting.append(
+                        {
+                            "source_post_id": candidate_source["id"],
+                            "chat_title": candidate_source.get("chat_title"),
+                            "message_id": candidate_source.get("message_id"),
+                            "kind": entity.get("kind"),
+                            "text": label,
+                            "target": entity.get("target"),
+                        }
+                    )
+            if unattributed_formatting:
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "source_formatting_requires_provenance",
+                        "source_candidates": unattributed_formatting[:20],
+                        "message": (
+                            "Plain text matches hidden-link labels from a captured Telegram "
+                            "source. Pass its source_post_id so entities can be preserved. "
+                            "Formatting loss can be explicitly allowed only after the source "
+                            "has been identified."
+                        ),
+                    }
+                )
+        formatting_guard = {
+            "checked": source is not None,
+            "source_post_id": source_post_id,
+            "inherited": inherited_formatting,
+            "allow_formatting_loss": bool(allow_formatting_loss),
+            "passed": not missing_formatting or bool(allow_formatting_loss),
+            "missing": missing_formatting,
+        }
+        if missing_formatting and not allow_formatting_loss:
+            return _json(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "block_reason": "source_formatting_loss",
+                    "source_post_id": source_post_id,
+                    "missing_entities": missing_formatting,
+                    "message": (
+                        "The draft retained source labels but lost Telegram links or "
+                        "formatting. Use format_mode=html with <a href=...> links, or "
+                        "set allow_formatting_loss=true only when removal is intentional."
+                    ),
+                }
+            )
         target_title = None
         target = None
         if target_chat_id is None:
@@ -7139,6 +8362,24 @@ def content_create_draft(
                 target_chat_id = target["chat_id"]
                 target_account_id = target_account_id or target["account_id"]
                 target_title = target["title"]
+        quality = None
+        if target_chat_id is not None:
+            quality = _content_quality_for_target(
+                target_chat_id,
+                post.text,
+                requested_format=requested_format,
+                description_override=description_override,
+            )
+            if quality["enforced"] and not quality["passed"]:
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "channel_quality",
+                        "quality": quality,
+                        "message": "Draft failed the managed-channel quality gate. Revise it before storing.",
+                    }
+                )
         with cw.connect() as conn:
             result = cw.create_draft(
                 conn,
@@ -7156,6 +8397,11 @@ def content_create_draft(
                     "custom_emojis": post.custom_emojis,
                     "media_path": normalized_media_path,
                     "force_document": bool(force_document),
+                    "requested_format": requested_format,
+                    "description_override": description_override,
+                    "source_reference": str(source_reference or "").strip() or None,
+                    "source_formatting_guard": formatting_guard,
+                    "quality_review": quality,
                 },
             )
             conn.commit()
@@ -7191,11 +8437,45 @@ async def content_prepare_publish(
         with cw.connect() as content_conn:
             draft = cw.get_post(content_conn, draft_id)
             if not draft:
-                raise ValueError(f"draft {draft_id} not found")
+                return _json(
+                    {
+                        "ok": False,
+                        "error_type": "not_found",
+                        "draft_id": draft_id,
+                        "error": f"draft {draft_id} not found",
+                    }
+                )
             if draft["role"] != "draft":
-                raise ValueError(f"post {draft_id} is not a draft")
+                return _json(
+                    {
+                        "ok": False,
+                        "error_type": "invalid_draft",
+                        "draft_id": draft_id,
+                        "error": f"post {draft_id} is not a draft",
+                    }
+                )
             draft_meta = draft.get("meta") or {}
-            chosen_format = format_mode or draft_meta.get("format_mode", "plain")
+            stored_format = str(draft_meta.get("format_mode") or "plain").lower()
+            if (
+                format_mode
+                and str(format_mode).lower() != stored_format
+                and draft_meta.get("formatted_text")
+            ):
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "format_mode_conflict",
+                        "draft_id": draft_id,
+                        "stored_format_mode": stored_format,
+                        "requested_format_mode": str(format_mode).lower(),
+                        "message": (
+                            "A rich draft cannot be reinterpreted with another format mode "
+                            "during publication. Create or edit the draft explicitly instead."
+                        ),
+                    }
+                )
+            chosen_format = format_mode or stored_format
             formatted_source = draft_meta.get("formatted_text") or draft["text"]
             chosen_media_path = _validated_media_path(media_path or draft_meta.get("media_path"))
             chosen_force_document = (
@@ -7207,6 +8487,53 @@ async def content_prepare_publish(
                 pf.MAX_CAPTION_UTF16_LENGTH if chosen_media_path else pf.MAX_MESSAGE_UTF16_LENGTH
             )
             post = pf.parse_post(formatted_source, chosen_format, max_utf16_length=max_length)
+            source = (
+                cw.get_post(content_conn, draft.get("source_post_id"))
+                if draft.get("source_post_id") is not None
+                else None
+            )
+            if source is None and draft_meta.get("source_reference"):
+                source = cw.find_source_post_by_reference(
+                    content_conn, draft_meta["source_reference"]
+                )
+            formatting_guard = draft_meta.get("source_formatting_guard")
+            allow_formatting_loss = bool(
+                formatting_guard.get("allow_formatting_loss", False)
+                if isinstance(formatting_guard, dict)
+                else False
+            )
+            if source is None and draft_meta.get("source_reference"):
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "source_not_captured",
+                        "draft_id": draft_id,
+                        "message": (
+                            "The referenced source is not captured, so Telegram entities "
+                            "cannot be verified before publication."
+                        ),
+                    }
+                )
+            if source is not None:
+                source_meta = source.get("meta") if isinstance(source.get("meta"), dict) else {}
+                source_formatting = source_meta.get("telegram_formatting")
+                missing_formatting = (
+                    pf.missing_source_formatting(source["text"], source_formatting, post)
+                    if isinstance(source_formatting, dict)
+                    else []
+                )
+                if missing_formatting and not allow_formatting_loss:
+                    return _json(
+                        {
+                            "ok": False,
+                            "blocked": True,
+                            "block_reason": "source_formatting_loss",
+                            "draft_id": draft_id,
+                            "missing_entities": missing_formatting,
+                            "message": "Publication preflight detected lost Telegram entities.",
+                        }
+                    )
             target_chat = target_chat_id or draft.get("chat_id")
             target_account = target_account_id or draft.get("account_id")
             if not target_chat:
@@ -7215,7 +8542,45 @@ async def content_prepare_publish(
                     target_chat = target["chat_id"]
                     target_account = target_account or target["account_id"]
             if not target_chat:
-                raise ValueError("target_chat_id is required when the draft has no target")
+                return _json(
+                    {
+                        "ok": False,
+                        "error_type": "missing_target",
+                        "draft_id": draft_id,
+                        "error": "target_chat_id is required when the draft has no target",
+                    }
+                )
+            quality = _content_quality_for_target(
+                target_chat,
+                post.text,
+                requested_format=draft_meta.get("requested_format", "auto"),
+                description_override=draft_meta.get("description_override"),
+            )
+            if quality["enforced"] and not quality["passed"]:
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "channel_quality",
+                        "draft_id": draft_id,
+                        "quality": quality,
+                        "message": "Draft failed quality revalidation and was not prepared for delivery.",
+                    }
+                )
+
+        with am.connect() as action_conn:
+            existing = am.find_action_for_content_draft(action_conn, draft_id)
+        if existing is not None:
+            return _json(
+                {
+                    "ok": True,
+                    "idempotent": True,
+                    "draft_id": draft_id,
+                    "pending_action_id": existing["id"],
+                    "status": existing["status"],
+                    "message": "An existing durable action already represents this draft.",
+                }
+            )
 
         c, account_key = await _get_assistant_client_and_account(_content_call_account(target_account))
         await _validate_custom_emoji_access(c, post)
@@ -7252,6 +8617,7 @@ async def content_prepare_publish(
                 "draft_id": draft_id,
                 "target": {"peer_id": peer, "title": title, "account_id": account_key},
                 "formatting": pf.preview(post),
+                "quality": quality,
                 "delivery": {
                     "silent": bool(silent),
                     "link_preview": bool(link_preview),
@@ -7263,6 +8629,69 @@ async def content_prepare_publish(
         )
     except Exception as e:
         return log_and_format_error("content_prepare_publish", e, draft_id=draft_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Content Prepare Publish Batch", openWorldHint=True, destructiveHint=False
+    )
+)
+@tool_timeout(TOOL_OPERATION_TIMEOUT)
+async def content_prepare_publish_batch(items_json: str) -> str:
+    """Prepare multiple drafts sequentially and return a resumable per-item receipt."""
+    try:
+        items = json.loads(items_json)
+        if not isinstance(items, list) or not items:
+            raise ValueError("items_json must be a non-empty JSON array")
+        if len(items) > 50:
+            raise ValueError("a batch can contain at most 50 drafts")
+        results = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or "draft_id" not in item:
+                results.append(
+                    {"index": index, "ok": False, "error": "draft_id is required"}
+                )
+                continue
+            allowed = {
+                "draft_id",
+                "target_chat_id",
+                "target_account_id",
+                "reply_to_msg_id",
+                "format_mode",
+                "silent",
+                "link_preview",
+                "send_as",
+                "media_path",
+                "force_document",
+            }
+            arguments = {key: value for key, value in item.items() if key in allowed}
+            raw_result = await content_prepare_publish(**arguments)
+            try:
+                result = json.loads(raw_result)
+            except (TypeError, json.JSONDecodeError):
+                result = {
+                    "ok": False,
+                    "draft_id": arguments["draft_id"],
+                    "error_type": "tool_error",
+                    "error": str(raw_result or "content_prepare_publish returned no result"),
+                }
+            results.append({"index": index, **result})
+        failures = [item for item in results if not item.get("ok")]
+        return _json(
+            {
+                "ok": not failures,
+                "total": len(results),
+                "prepared": len(results) - len(failures),
+                "failed": len(failures),
+                "items": results,
+                "next_step": (
+                    "Review every exact pending action, confirm each approved action once, "
+                    "then use assistant_action_status_batch for reconciliation."
+                ),
+            }
+        )
+    except Exception as e:
+        return log_and_format_error("content_prepare_publish_batch", e)
 
 
 @mcp.tool(
@@ -7335,7 +8764,6 @@ async def post_extract_custom_emojis(
 @mcp.tool(
     annotations=ToolAnnotations(title="Post Prepare Send", openWorldHint=True, destructiveHint=False)
 )
-@validate_id("chat_id")
 @tool_timeout(TOOL_OPERATION_TIMEOUT)
 async def post_prepare_send(
     chat_id: Union[int, str],
@@ -7752,13 +9180,40 @@ async def assistant_confirm_action(action_id: int) -> str:
     """
     Execute a pending Telegram or Maton action after explicit approval.
     """
+    external_result: Optional[Dict[str, Any]] = None
     try:
         with am.connect() as conn:
             action = am.get_pending_action(conn, action_id)
             if action is None:
                 return f"Pending action {action_id} not found."
+            if action["status"] == "sent" and action["result_json"]:
+                result = json.loads(action["result_json"])
+                result["idempotent_replay"] = True
+                return _json(result)
             if action["status"] != "pending":
-                return f"Pending action {action_id} is already {action['status']}."
+                return _json(
+                    {
+                        "ok": False,
+                        "action_id": action_id,
+                        "status": action["status"],
+                        "retry_safe": False,
+                        "message": (
+                            "This action was already claimed. Inspect its status and the "
+                            "target history before preparing another send."
+                        ),
+                    }
+                )
+            claimed = am.claim_pending_action(conn, action_id)
+            if claimed is None:
+                return _json(
+                    {
+                        "ok": False,
+                        "action_id": action_id,
+                        "status": "already_claimed",
+                        "retry_safe": False,
+                    }
+                )
+            conn.commit()
             payload = json.loads(action["payload_json"])
             account_id = action["account_id"]
             action_type = action["action_type"]
@@ -7770,20 +9225,19 @@ async def assistant_confirm_action(action_id: int) -> str:
             connection = result.get("connection", result)
             if not isinstance(connection, dict):
                 raise mt.MatonAPIError("Maton create connection returned invalid connection data")
+            external_result = {
+                "ok": True,
+                "action_id": action_id,
+                "status": "sent",
+                "connection": mt.summarize_connection(
+                    connection, include_authorization_url=True
+                ),
+                "next_step": "Open authorization_url in a browser and complete the provider consent flow.",
+            }
             with am.connect() as conn:
-                am.resolve_pending_action(conn, action_id, "sent")
+                am.resolve_pending_action(conn, action_id, "sent", result=external_result)
                 conn.commit()
-            return _json(
-                {
-                    "ok": True,
-                    "action_id": action_id,
-                    "status": "sent",
-                    "connection": mt.summarize_connection(
-                        connection, include_authorization_url=True
-                    ),
-                    "next_step": "Open authorization_url in a browser and complete the provider consent flow.",
-                }
-            )
+            return _json(external_result)
 
         if action_type == "maton_request":
             result = await mt.MatonClient().request(
@@ -7794,36 +9248,70 @@ async def assistant_confirm_action(action_id: int) -> str:
                 body=payload.get("body"),
                 headers=payload.get("headers"),
             )
+            if str(payload.get("app", "")).lower() == "telegram":
+                _require_maton_telegram_success(result, payload["path"])
+            external_result = {
+                "ok": True,
+                "action_id": action_id,
+                "status": "sent",
+                "request": {
+                    "app": payload["app"],
+                    "connection_id": payload["connection_id"],
+                    "method": payload["method"],
+                    "path": payload["path"],
+                    "expected_outcome": payload.get("summary"),
+                },
+                "response": result,
+            }
             with am.connect() as conn:
-                am.resolve_pending_action(conn, action_id, "sent")
+                am.resolve_pending_action(conn, action_id, "sent", result=external_result)
                 conn.commit()
-            return _json(
-                {
-                    "ok": True,
-                    "action_id": action_id,
-                    "status": "sent",
-                    "request": {
-                        "app": payload["app"],
-                        "connection_id": payload["connection_id"],
-                        "method": payload["method"],
-                        "path": payload["path"],
-                        "expected_outcome": payload.get("summary"),
-                    },
-                    "response": result,
-                }
-            )
+            return _json(external_result)
+
+        if action_type == "telegram_bot_send_message":
+            response = await tbot.TelegramBotClient().send_message(payload["body"])
+            sent = response.get("result", {})
+            if not isinstance(sent, dict) or not sent.get("message_id"):
+                raise tbot.TelegramBotAPIError(
+                    "Telegram Bot API sendMessage returned no message_id"
+                )
+            chat = sent.get("chat", {}) if isinstance(sent.get("chat"), dict) else {}
+            external_result = {
+                "ok": True,
+                "action_id": action_id,
+                "status": "sent",
+                "publisher": "telegram_bot_api",
+                "message_id": sent["message_id"],
+                "chat": {
+                    "id": chat.get("id"),
+                    "title": chat.get("title"),
+                    "username": chat.get("username"),
+                },
+                "text": sent.get("text", ""),
+                "entities": sent.get("entities", []),
+            }
+            with am.connect() as conn:
+                am.resolve_pending_action(conn, action_id, "sent", result=external_result)
+                conn.commit()
+            return _json(external_result)
 
         if action_type != "send_message":
-            return f"Unsupported pending action type: {action_type}"
+            raise ValueError(f"Unsupported pending action type: {action_type}")
         c, _ = await _get_assistant_client_and_account(
             None if account_id == am.DEFAULT_ACCOUNT_KEY else account_id
         )
 
         entity = await c.get_entity(_entity_arg(payload["chat_id"]))
         sent, sent_text = await _send_pending_rich_post(c, entity, payload)
+        external_result = {
+            "ok": True,
+            "action_id": action_id,
+            "status": "sent",
+            "message_id": sent.id,
+        }
         with am.connect() as conn:
             peer = am.peer_id(entity)
-            am.resolve_pending_action(conn, action_id, "sent")
+            am.resolve_pending_action(conn, action_id, "sent", result=external_result)
             am.upsert_chat(
                 conn,
                 account_id=account_id,
@@ -7866,17 +9354,125 @@ async def assistant_confirm_action(action_id: int) -> str:
                     f"(action_id={action_id}, draft_id={payload.get('content_draft_id')}): "
                     f"{content_error}"
                 )
+        external_result["content_published"] = content_publish
+        with am.connect() as conn:
+            am.resolve_pending_action(conn, action_id, "sent", result=external_result)
+            conn.commit()
+        return _json(external_result)
+    except Exception as e:
+        try:
+            with am.connect() as conn:
+                if external_result is not None:
+                    external_result["recovered_after_local_error"] = True
+                    am.resolve_pending_action(
+                        conn, action_id, "sent", result=external_result
+                    )
+                elif isinstance(e, (tbot.TelegramBotAPIError, _MatonTelegramOperationError)):
+                    am.resolve_pending_action(
+                        conn,
+                        action_id,
+                        "failed",
+                        error={
+                            "type": type(e).__name__,
+                            "message": str(e),
+                            "delivery_state": "not_sent",
+                        },
+                    )
+                else:
+                    am.resolve_pending_action(
+                        conn,
+                        action_id,
+                        "needs_reconciliation",
+                        error={"type": type(e).__name__, "message": str(e)},
+                    )
+                conn.commit()
+        except Exception:
+            logger.exception(
+                "failed to persist pending action outcome (action_id=%s)", action_id
+            )
+        if external_result is not None:
+            return _json(external_result)
+        return log_and_format_error("assistant_confirm_action", e, action_id=action_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Assistant Action Status", openWorldHint=False, readOnlyHint=True
+    )
+)
+def assistant_action_status(action_id: int) -> str:
+    """Inspect an external action without retrying or repeating it."""
+    try:
+        with am.connect() as conn:
+            action = am.get_pending_action(conn, action_id)
+        if action is None:
+            return _json({"ok": False, "action_id": action_id, "status": "not_found"})
         return _json(
             {
                 "ok": True,
                 "action_id": action_id,
-                "status": "sent",
-                "message_id": sent.id,
-                "content_published": content_publish,
+                "action_type": action["action_type"],
+                "target_chat": action["target_chat"],
+                "target_label": action["target_label"],
+                "status": action["status"],
+                "attempt_count": action["attempt_count"],
+                "started_at": action["started_at"],
+                "resolved_at": action["resolved_at"],
+                "result": json.loads(action["result_json"])
+                if action["result_json"]
+                else None,
+                "error": json.loads(action["error_json"])
+                if action["error_json"]
+                else None,
+                "retry_safe": action["status"] in {"pending", "cancelled"},
             }
         )
     except Exception as e:
-        return log_and_format_error("assistant_confirm_action", e, action_id=action_id)
+        return log_and_format_error("assistant_action_status", e, action_id=action_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Assistant Action Status Batch", openWorldHint=False, readOnlyHint=True
+    )
+)
+def assistant_action_status_batch(action_ids_json: str) -> str:
+    """Inspect several durable actions without shell loops, retries, or repeated sends."""
+    try:
+        action_ids = json.loads(action_ids_json)
+        if not isinstance(action_ids, list) or not action_ids:
+            raise ValueError("action_ids_json must be a non-empty JSON array")
+        if len(action_ids) > 100:
+            raise ValueError("at most 100 action IDs can be inspected at once")
+        items = []
+        with am.connect() as conn:
+            for raw_action_id in action_ids:
+                action_id = int(raw_action_id)
+                action = am.get_pending_action(conn, action_id)
+                if action is None:
+                    items.append(
+                        {"ok": False, "action_id": action_id, "status": "not_found"}
+                    )
+                    continue
+                items.append(
+                    {
+                        "ok": True,
+                        "action_id": action_id,
+                        "status": action["status"],
+                        "target_chat": action["target_chat"],
+                        "target_label": action["target_label"],
+                        "attempt_count": action["attempt_count"],
+                        "result": json.loads(action["result_json"])
+                        if action["result_json"]
+                        else None,
+                        "error": json.loads(action["error_json"])
+                        if action["error_json"]
+                        else None,
+                    }
+                )
+        return _json({"ok": True, "items": items})
+    except Exception as e:
+        return log_and_format_error("assistant_action_status_batch", e)
 
 
 @mcp.tool(

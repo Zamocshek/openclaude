@@ -22,7 +22,8 @@ RUN pip install --no-cache-dir --upgrade pip \
 ENV PATH="/app/.venv/bin:${PATH}"
 
 # Copy application code needed by both MCP and the web console.
-COPY main.py account_admin.py assistant_memory.py content_workflow.py maton_client.py operator_config.py post_formatting.py runtime_config.py web_app.py session_string_generator.py stat_report_renderer.py vpromotions_client.py ./
+COPY main.py account_admin.py assistant_memory.py channel_profiles.py content_workflow.py interaction_protocol.py maton_client.py operator_config.py post_formatting.py runtime_config.py web_app.py session_string_generator.py stat_report_renderer.py telegram_bot_client.py vpromotions_client.py twiboost_client.py ./
+COPY channel_profiles.json ./
 COPY README.md LICENSE ./
 
 # Create a non-root user and switch to it
@@ -53,8 +54,13 @@ ENV TELEGRAM_MCP_HOST="0.0.0.0"
 ENV TELEGRAM_MCP_PORT="8000"
 ENV VPROMOTIONS_API_URL="https://vpromotions.ru/api/v2"
 ENV VPROMOTIONS_TIMEOUT="30"
+ENV TWIBOOST_API_URL="https://twiboost.com/api/v2"
+ENV TWIBOOST_TIMEOUT="30"
 ENV MATON_API_URL="https://api.maton.ai"
 ENV MATON_TIMEOUT="30"
+ENV TELEGRAM_MCP_BOT_TOKEN=""
+ENV TELEGRAM_MCP_BOT_TIMEOUT="30"
+ENV TELEGRAM_MCP_CHANNEL_PROFILES="/app/channel_profiles.json"
 
 VOLUME ["/data"]
 EXPOSE 8000 8765 8766

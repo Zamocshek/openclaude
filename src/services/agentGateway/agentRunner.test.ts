@@ -13,8 +13,10 @@ import { join } from 'path'
 import {
   buildAgentArgs,
   buildAgentChildEnv,
+  buildSemanticRouterEnvOverrides,
   buildPromptFromChatMessages,
   classifyAgentRunFailure,
+  classifyAgentToolEvidence,
   extractVisualLocalPaths,
   extractCamofoxScreenshotArtifacts,
   extractStreamJsonAssistantText,
@@ -26,6 +28,7 @@ import {
   injectGatewayVisionEvidence,
   isIgnorablePostSuccessStderr,
   normalizeMessageContent,
+  restrictMcpTaskRouteForExecution,
   runOpenClaudeAgent,
   shouldUseGatewaySubagents,
   summarizeStreamJsonProgress,
@@ -36,6 +39,65 @@ import { setManagedMcpServerEnabled } from './mcpRegistry.js'
 import { redactAgentText } from './redaction.js'
 
 describe('agent gateway prompt builder', () => {
+  test('runs semantic routing without project memory or model reasoning', () => {
+    const env = buildSemanticRouterEnvOverrides({
+      OPENAI_MODEL: 'router-model',
+      OPENAI_API_KEY: 'router-key',
+      MAX_THINKING_TOKENS: '64000',
+    })
+
+    expect(env.OPENAI_MODEL).toBe('router-model')
+    expect(env.OPENAI_API_KEY).toBe('router-key')
+    expect(env.MAX_THINKING_TOKENS).toBe('0')
+    expect(env.CLAUDE_CODE_DISABLE_THINKING).toBe('1')
+    expect(env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1')
+    expect(env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe('1')
+  })
+
+  test('removes Telegram MCP from scheduled deliveries without dropping read tools', () => {
+    const restricted = restrictMcpTaskRouteForExecution(
+      {
+        mode: 'auto',
+        servers: new Set([
+          'telegram-mcp',
+          'mcp-router',
+          'capability-router',
+          'gateway-control',
+          'hindsight',
+          'searxng',
+        ]),
+        reasons: ['telegram-account', 'explicit-memory', 'research'],
+      },
+      'scheduled-delivery',
+    )
+
+    expect([...restricted.servers].sort()).toEqual(['hindsight', 'searxng'])
+    expect(restricted.reasons)
+      .toContain('execution-context:scheduled-delivery')
+  })
+
+  test('turns all-tools routes into an explicit scheduled-delivery allowlist', () => {
+    const restricted = restrictMcpTaskRouteForExecution(
+      {
+        mode: 'all',
+        servers: new Set(),
+        reasons: ['explicit all-tools request'],
+      },
+      'scheduled-delivery',
+      [
+        'telegram-mcp',
+        'mcp-router',
+        'capability-router',
+        'gateway-control',
+        'hindsight',
+        'context7',
+      ],
+    )
+
+    expect(restricted.mode).toBe('auto')
+    expect([...restricted.servers].sort()).toEqual(['context7', 'hindsight'])
+  })
+
   test('folds OpenAI chat messages into a headless OpenClaude prompt', () => {
     const { prompt, systemPrompt } = buildPromptFromChatMessages([
       { role: 'system', content: 'Stay concise.' },
@@ -75,6 +137,25 @@ describe('agent gateway prompt builder', () => {
     )).toBe(true)
   })
 
+  test('does not mistake Russian zapisat for an API coding request', () => {
+    const prompt = 'Запомни и запиши мою Telegram-сетку в MONEY и память.'
+    expect(hasCodingTaskIntent(prompt)).toBe(false)
+    expect(hasCodingMutationIntent(prompt)).toBe(false)
+  })
+
+  test('does not route prose about programming or deployment through coding mutation', () => {
+    expect(hasCodingMutationIntent('Write a blog post about Python.')).toBe(false)
+    expect(hasCodingMutationIntent('Create a status message about deploy.')).toBe(false)
+    expect(hasCodingMutationIntent('Напиши пост про Python.')).toBe(false)
+    expect(hasCodingMutationIntent('Напиши Python script scraper.py.')).toBe(true)
+  })
+
+  test('still recognizes a standalone Russian API request', () => {
+    const prompt = 'Исправь АПИ интеграцию.'
+    expect(hasCodingTaskIntent(prompt)).toBe(true)
+    expect(hasCodingMutationIntent(prompt)).toBe(true)
+  })
+
   test('does not infer coding intent from Telegram bridge instructions', () => {
     const prompt = [
       'Use code tools to write files when the task requires it.',
@@ -85,6 +166,61 @@ describe('agent gateway prompt builder', () => {
 
     expect(hasCodingTaskIntent(prompt)).toBe(false)
     expect(hasCodingMutationIntent(prompt)).toBe(false)
+  })
+
+  test('does not execute coding workflows quoted inside a dialogue-analysis request', () => {
+    const prompt = [
+      'User message:',
+      'Объясни Никите в чем он ошибается в диалоге, пока ничего делать не надо!',
+      '',
+      'Alien Founder, [1 авг. 2026 в 11:56]',
+      'сделай скрипт который старты в бота делает',
+      'я запущу',
+    ].join('\n')
+
+    expect(hasCodingTaskIntent(prompt)).toBe(false)
+    expect(hasCodingMutationIntent(prompt)).toBe(false)
+
+    const args = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+      prompt,
+      preparedMcpConfigPath: '.mcp.json',
+      preparedMcpServerNames: new Set(),
+    })
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+    expect(systemPrompt).toContain('pasted dialogue, logs, or quoted source material')
+    expect(systemPrompt).toContain('conversational explanation or analysis')
+    expect(systemPrompt).not.toContain('This request changes code or configuration')
+  })
+
+  test('keeps real coding intent when the directive asks to fix attached evidence', () => {
+    const prompt = [
+      'User message:',
+      'Исправь эту ошибку и запусти тесты:',
+      '',
+      'Build log, [1 авг. 2026 в 11:56]',
+      'TypeError: value is not a function at service.ts:42',
+    ].join('\n')
+
+    expect(hasCodingTaskIntent(prompt)).toBe(true)
+    expect(hasCodingMutationIntent(prompt)).toBe(true)
+  })
+
+  test('does not let a scoped negative instruction cancel a real code change', () => {
+    const prompt = 'Не меняй API-контракт, но исправь баг в TypeScript endpoint и запусти тесты.'
+    expect(hasCodingTaskIntent(prompt)).toBe(true)
+    expect(hasCodingMutationIntent(prompt)).toBe(true)
+  })
+
+  test('does not treat a negated mutation verb as a coding change request', () => {
+    const prompt = [
+      'Ничего не отправляй и не изменяй в Telegram.',
+      'Файлы PREFLIGHT.md уже готовы. Используй только Hindsight recall.',
+    ].join(' ')
+    expect(hasCodingTaskIntent(prompt)).toBe(false)
+    expect(hasCodingMutationIntent(prompt)).toBe(false)
+    expect(hasCodingMutationIntent(
+      'Do not edit PREFLIGHT.md; only verify it with OpenRAG search.',
+    )).toBe(false)
   })
 
   test('keeps prompts out of CLI argv so variadic options cannot swallow them', () => {
@@ -102,6 +238,43 @@ describe('agent gateway prompt builder', () => {
     expect(args).toContain('--disallowedTools')
     expect(args).toContain('WebSearch')
     expect(args).not.toContain('hello from api')
+  })
+
+  test('confines semantically routed Telegram operations to typed MCP tools', () => {
+    const config = getDefaultAgentGatewayConfig()
+    const telegramRoute = {
+      mode: 'auto' as const,
+      servers: new Set(['telegram-mcp']),
+      reasons: ['semantic telegram operation'],
+      source: 'semantic' as const,
+      capabilities: ['telegram'],
+      taskKind: 'telegram-content-publishing',
+      codingIntent: false,
+      codingMutationIntent: false,
+    }
+
+    const args = buildAgentArgs(config, {
+      prompt: 'Publish one approved post to every configured Telegram channel.',
+      taskRoute: telegramRoute,
+      preparedMcpConfigPath: '.mcp.json',
+      preparedMcpServerNames: new Set(['telegram-mcp']),
+    })
+    const denied = args[args.indexOf('--disallowedTools') + 1].split(',')
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(denied).toContain('Bash')
+    expect(denied).toContain('Read')
+    expect(denied).toContain('Glob')
+    expect(denied).toContain('Agent')
+    expect(systemPrompt).toContain('typed Telegram MCP tools as the source of truth')
+
+    const codingArgs = buildAgentArgs(config, {
+      prompt: 'Fix the Telegram MCP TypeScript adapter.',
+      taskRoute: { ...telegramRoute, codingIntent: true, codingMutationIntent: true },
+      preparedMcpConfigPath: '.mcp.json',
+      preparedMcpServerNames: new Set(['telegram-mcp']),
+    })
+    expect(codingArgs).not.toContain('--disallowedTools')
   })
 
   test('adds Agent to an explicit tool allowlist only for configured subagents', () => {
@@ -128,7 +301,7 @@ describe('agent gateway prompt builder', () => {
       roles: [{
         name: 'gateway-vision',
         provider: 'codex',
-        model: 'gpt-5.6-sol?reasoning=medium',
+        model: 'gpt-5.6-sol?reasoning=ultra',
       }],
       cleanup: () => {},
     }
@@ -238,6 +411,27 @@ describe('agent gateway prompt builder', () => {
         rm(state, { recursive: true, force: true }),
       ])
     }
+  })
+
+  test('injects only the relevant compact capability map into an agent run', () => {
+    const config = getDefaultAgentGatewayConfig()
+    const args = buildAgentArgs(config, {
+      prompt: 'Fix the TypeScript endpoint and run the tests.',
+      preparedMcpConfigPath: '.mcp.json',
+      preparedMcpServerNames: new Set([
+        'codegraph',
+        'context7',
+        'hindsight',
+        'searxng',
+      ]),
+    })
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(systemPrompt).toContain('Compact Nova capability map')
+    expect(systemPrompt).toContain('codegraph_explore')
+    expect(systemPrompt).toContain('resolve-library-id')
+    expect(systemPrompt).not.toContain('hindsight_recall')
+    expect(systemPrompt).not.toContain('searxng_web_search')
   })
 
   test('keeps disabled skills out of capability guidance', async () => {
@@ -367,6 +561,10 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('call list_accounts')
     expect(systemPrompt).toContain('If no session exists')
     expect(systemPrompt).toContain('confirm=true')
+    expect(systemPrompt).toContain('not a transport for your gateway reply')
+    expect(systemPrompt).toContain('is not permission to send anything')
+    expect(systemPrompt).toContain('invoke the maton-api-gateway Skill')
+    expect(systemPrompt).toContain('maton_telegram_*')
   })
 
   test('enables verifier-first terminal execution only when requested', () => {
@@ -434,26 +632,16 @@ describe('agent gateway prompt builder', () => {
     const simplePrompt = simpleArgs[simpleArgs.indexOf('--append-system-prompt') + 1]
     expect(simplePrompt.length).toBeLessThan(1_000)
     expect(simplePrompt).not.toContain('capability-routing')
+    expect(simplePrompt).toContain('highest reasoning effort supported')
     expect(shouldUseGatewaySubagents('Hello, how are you?')).toBe(false)
     expect(shouldUseGatewaySubagents('Fix the TypeScript service.')).toBe(true)
-    expect(shouldUseGatewaySubagents('Fix the TypeScript service.', 'minimal')).toBe(false)
-    expect(shouldUseGatewaySubagents('Hello', 'strict')).toBe(true)
   })
 
-  test('uses concise adaptive coding guidance and preserves a strict workflow mode', () => {
-    const adaptiveArgs = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+  test('uses the production coding workflow in the unified harness', () => {
+    const args = buildAgentArgs(getDefaultAgentGatewayConfig(), {
       prompt: 'Fix the bug in calculator.py and run its test.',
     })
-    const adaptivePrompt = adaptiveArgs[adaptiveArgs.indexOf('--append-system-prompt') + 1]
-    expect(adaptivePrompt).toContain('This request changes code or configuration')
-    expect(adaptivePrompt).not.toContain('# Production Coding Workflow')
-
-    const strictConfig = getDefaultAgentGatewayConfig()
-    strictConfig.runner.harnessMode = 'strict'
-    const strictArgs = buildAgentArgs(strictConfig, {
-      prompt: 'Fix the bug in calculator.py and run its test.',
-    })
-    const systemPrompt = strictArgs[strictArgs.indexOf('--append-system-prompt') + 1]
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
 
     expect(systemPrompt).toContain('# Production Coding Workflow')
     expect(systemPrompt).toContain('## 4. Definition of done')
@@ -461,6 +649,46 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('after the final mutation')
     expect(hasCodingTaskIntent('Исправь баг в TypeScript проекте')).toBe(true)
     expect(hasCodingTaskIntent('Какая сегодня погода?')).toBe(false)
+  })
+
+  test('adds staged SSH diagnostics only for remote administration tasks', () => {
+    const remoteArgs = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+      prompt: 'Deploy the service to my VPS over SSH and verify the firewall.',
+    })
+    const remotePrompt = remoteArgs[remoteArgs.indexOf('--append-system-prompt') + 1]
+
+    expect(remotePrompt).toContain('openclaude-ssh-doctor')
+    expect(remotePrompt).toContain('TCP timeout proves only')
+    expect(remotePrompt).toContain('sshpass -e')
+
+    const russianArgs = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+      prompt: '\u041e\u0442\u043a\u0440\u043e\u0439 \u043f\u043e\u0440\u0442\u044b \u043d\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435 \u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u044c firewall.',
+    })
+    const russianPrompt = russianArgs[russianArgs.indexOf('--append-system-prompt') + 1]
+    expect(russianPrompt).toContain('openclaude-ssh-doctor')
+
+    const ordinaryArgs = buildAgentArgs(getDefaultAgentGatewayConfig(), {
+      prompt: 'Explain how this calculator works.',
+    })
+    const ordinaryPrompt = ordinaryArgs[ordinaryArgs.indexOf('--append-system-prompt') + 1]
+    expect(ordinaryPrompt).not.toContain('openclaude-ssh-doctor')
+  })
+
+  test('adds the evidence-driven acceptance loop in ouroboros mode', () => {
+    const config = getDefaultAgentGatewayConfig()
+    config.runner.harnessMode = 'ouroboros'
+    const args = buildAgentArgs(config, {
+      prompt: 'Fix the bug in calculator.py and run its test.',
+      preparedMcpConfigPath: '.mcp.json',
+      preparedMcpServerNames: new Set(),
+    })
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
+
+    expect(systemPrompt).toContain('# Production Coding Workflow')
+    expect(systemPrompt).toContain('Ouroboros evidence loop is active')
+    expect(systemPrompt).toContain('compact task contract')
+    expect(systemPrompt).toContain('unmasked verifier')
+    expect(systemPrompt).toContain('root-level acceptance checks')
   })
 
   test('turns Codex Ultra into xhigh reasoning with automatic delegation guidance', () => {
@@ -519,6 +747,19 @@ describe('agent gateway prompt builder', () => {
       error: '',
       costUsd: 0.0123,
     })
+  })
+
+  test('rejects a transport error disguised as a successful stream result', () => {
+    const message = {
+      type: 'result',
+      subtype: 'success',
+      result: 'API Error: fetch failed',
+    }
+    expect(extractStreamJsonResult(message)).toEqual({
+      text: '',
+      error: 'API Error: fetch failed',
+    })
+    expect(summarizeStreamJsonProgress(message)).toEqual(['result: error'])
   })
 
   test('extracts the latest assistant text when a success result is empty', () => {
@@ -625,6 +866,197 @@ describe('agent gateway prompt builder', () => {
     ])
   })
 
+  test('records structured workspace evidence without accepting unrelated runtime health', () => {
+    expect(classifyAgentToolEvidence({
+      toolName: 'Edit',
+      toolInput: { file_path: '/workspace/src/api.ts' },
+      output: 'updated',
+      success: true,
+    })).toEqual([{
+      kind: 'mutation',
+      scope: 'workspace',
+      target: 'file:/workspace/src/api.ts',
+      success: true,
+      source: 'Edit',
+    }])
+    expect(classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'curl -fsS http://unrelated.example/health' },
+      output: 'ok',
+      success: true,
+    })).toEqual([])
+  })
+
+  test('treats document read-back as verification without weakening code checks', () => {
+    expect(classifyAgentToolEvidence({
+      toolName: 'Read',
+      toolInput: { file_path: '/workspace/memory/MEMORY.md' },
+      output: '# Memory',
+      success: true,
+    })).toEqual([{
+      kind: 'verification',
+      scope: 'workspace',
+      target: 'file:/workspace/memory/memory.md',
+      success: true,
+      source: 'Read',
+    }])
+    expect(classifyAgentToolEvidence({
+      toolName: 'Read',
+      toolInput: { file_path: '/workspace/src/runtime.ts' },
+      output: 'export const runtime = true',
+      success: true,
+    })).toEqual([])
+  })
+
+  test('records target-scoped runtime mutation and verification evidence', () => {
+    const mutation = classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'ssh root@host.example "systemctl restart nova"' },
+      output: '',
+      success: true,
+    })
+    const verification = classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'ssh root@host.example "systemctl is-active nova"' },
+      output: 'active',
+      success: true,
+    })
+    expect(mutation).toContainEqual(expect.objectContaining({
+      kind: 'mutation',
+      scope: 'runtime',
+      target: 'host:host.example/service:nova',
+    }))
+    expect(verification).toContainEqual(expect.objectContaining({
+      kind: 'verification',
+      scope: 'runtime',
+      target: 'host:host.example/service:nova',
+    }))
+  })
+
+  test('scopes generic SSH mutations and verifiers to short remote hostnames', () => {
+    const mutation = classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: {
+        command: 'ssh -i /tmp/key -o BatchMode=yes root@nova-ssh-e2e "sed -i s/old/new/ /opt/app.py"',
+      },
+      output: '',
+      success: true,
+    })
+    const verification = classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: {
+        command: 'ssh -i /tmp/key -o BatchMode=yes root@nova-ssh-e2e "python3 -m unittest -v /opt/test_app.py"',
+      },
+      output: 'Ran 1 test in 0.01s\nOK',
+      success: true,
+    })
+
+    expect(mutation).toContainEqual(expect.objectContaining({
+      kind: 'mutation',
+      scope: 'runtime',
+      target: 'host:nova-ssh-e2e/filesystem',
+    }))
+    expect(verification).toContainEqual(expect.objectContaining({
+      kind: 'verification',
+      scope: 'runtime',
+      target: 'host:nova-ssh-e2e/filesystem',
+    }))
+    expect([...mutation, ...verification]).not.toContainEqual(
+      expect.objectContaining({ scope: 'workspace' }),
+    )
+  })
+
+  test('records only uploads as remote scp mutations', () => {
+    const upload = classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'scp -i /tmp/key ./app.py root@nova-ssh-e2e:/opt/app.py' },
+      output: '',
+      success: true,
+    })
+    const download = classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'scp -i /tmp/key root@nova-ssh-e2e:/opt/app.py /tmp/app.py' },
+      output: '',
+      success: true,
+    })
+
+    expect(upload).toContainEqual(expect.objectContaining({
+      kind: 'mutation',
+      scope: 'runtime',
+      target: 'host:nova-ssh-e2e/filesystem',
+    }))
+    expect(download).not.toContainEqual(expect.objectContaining({
+      kind: 'mutation',
+      target: 'host:nova-ssh-e2e/filesystem',
+    }))
+
+    const legacyProtocolUpload = classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'scp -O ./app.py root@legacy-host:/opt/app.py' },
+      output: '',
+      success: true,
+    })
+    expect(legacyProtocolUpload).toContainEqual(expect.objectContaining({
+      target: 'host:legacy-host/filesystem',
+    }))
+
+    const x11SshVerification = classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'ssh -X root@x11-host "test -f /opt/app.py"' },
+      output: '',
+      success: true,
+    })
+    expect(x11SshVerification).toContainEqual(expect.objectContaining({
+      kind: 'verification',
+      target: 'host:x11-host/filesystem',
+    }))
+  })
+
+  test('records MCP file writes and Docker lifecycle evidence', () => {
+    expect(classifyAgentToolEvidence({
+      toolName: 'mcp__filesystem__write_file',
+      toolInput: { path: '/workspace/src/generated.ts' },
+      output: 'written',
+      success: true,
+    })).toEqual([{
+      kind: 'mutation',
+      scope: 'workspace',
+      target: 'file:/workspace/src/generated.ts',
+      success: true,
+      source: 'mcp__filesystem__write_file',
+    }])
+
+    expect(classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'docker compose up -d api' },
+      output: 'started',
+      success: true,
+    })).toContainEqual(expect.objectContaining({
+      kind: 'mutation',
+      scope: 'runtime',
+      target: 'host:local/docker:*',
+    }))
+    expect(classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'docker compose ps api' },
+      output: 'running',
+      success: true,
+    })).toContainEqual(expect.objectContaining({
+      kind: 'verification',
+      scope: 'runtime',
+      target: 'host:local/docker:*',
+    }))
+  })
+
+  test('does not record a masked runtime verifier as evidence', () => {
+    expect(classifyAgentToolEvidence({
+      toolName: 'Bash',
+      toolInput: { command: 'systemctl is-active nova | tail -1' },
+      output: 'active',
+      success: true,
+    }).some(item => item.kind === 'verification')).toBe(false)
+  })
+
   test('bounds remembered tool calls for multi-hour stream sessions', () => {
     const context: StreamProgressContext = { toolUseById: new Map() }
     for (let index = 0; index < 700; index += 1) {
@@ -688,6 +1120,112 @@ describe('agent gateway prompt builder', () => {
         'Saved Camofox screenshot: /workspace/not-from-camofox.png',
       ),
     ).toEqual([])
+  })
+
+  test('captures a successful Telegram session authorization continuation without secrets', () => {
+    const context: StreamProgressContext = {
+      toolUseById: new Map(),
+      toolNameById: new Map(),
+      interactionCandidateByToolUseId: new Map(),
+      pendingInteractions: new Map(),
+    }
+    summarizeStreamJsonProgress({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_auth',
+          name: 'mcp__telegram-mcp__authorize_send_code',
+          input: { phone: '+1 854 442 1149' },
+        }],
+      },
+    }, context)
+    summarizeStreamJsonProgress({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_auth',
+          content: [{
+            type: 'text',
+            text: "Code sent to the account. Now call authorize_complete(session_name='18544421149', code=<received code>).",
+          }],
+        }],
+      },
+    }, context)
+
+    expect([...context.pendingInteractions!.values()]).toEqual([{
+      protocol: 'openclaude.interaction/v1' as const,
+      id: 'telegram-auth:18544421149',
+      handler: 'telegram.session.authorize',
+      stage: 'code',
+      prompt: 'Send the Telegram confirmation code.',
+      input: {
+        name: 'code',
+        kind: 'otp',
+        prompt: 'Send the Telegram confirmation code.',
+        minLength: 5,
+        maxLength: 5,
+      },
+      state: { sessionName: '18544421149' },
+      sourceTool: 'mcp__telegram-mcp__authorize_send_code',
+      expiresInMs: 10 * 60_000,
+    }])
+    expect(JSON.stringify([...context.pendingInteractions!.values()]))
+      .not.toContain('+1 854 442 1149')
+  })
+
+  test('captures a generic tool-declared interaction without knowing the tool name', () => {
+    const context: StreamProgressContext = {
+      toolUseById: new Map(),
+      toolNameById: new Map(),
+      interactionCandidateByToolUseId: new Map(),
+      pendingInteractions: new Map(),
+    }
+    summarizeStreamJsonProgress({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'toolu_prepare',
+          name: 'mcp__future-service__prepare_operation',
+          input: {},
+        }],
+      },
+    }, context)
+    const envelope = {
+      protocol: 'openclaude.interaction/v1' as const,
+      id: 'future:choice-1',
+      handler: 'future.choose-target',
+      stage: 'target',
+      prompt: 'Choose a target.',
+      input: {
+        name: 'target',
+        kind: 'choice' as const,
+        prompt: 'Choose a target.',
+        choices: ['alpha', 'beta'],
+      },
+      state: { operationId: 'op-1' },
+      expiresInMs: 600000,
+    }
+    summarizeStreamJsonProgress({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'toolu_prepare',
+          content: [{
+            type: 'text',
+            text: `<openclaude_interaction>${JSON.stringify(envelope)}</openclaude_interaction>`,
+          }],
+        }],
+      },
+    }, context)
+
+    expect([...context.pendingInteractions!.values()]).toEqual([{
+      ...envelope,
+      sourceTool: 'mcp__future-service__prepare_operation',
+    }])
   })
 
   test('classifies provider rate limits from activity and redacts Abacus-style keys', () => {
@@ -1355,5 +1893,30 @@ describe('agent gateway prompt builder', () => {
     expect(env.OPENAI_BASE_URL).toBe('https://example.test/v1')
     expect(env.OPENAI_MODEL).toBe('file-model')
     expect(env.OPENAI_API_KEY).toBe('file-provider-key')
+  })
+
+  test('keeps OpenCode Zen adapter env aligned with the canonical gateway profile', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-opencode-env-'))
+    await writeFile(
+      join(cwd, '.env'),
+      [
+        'OPENCLAUDE_RESPECT_PROVIDER_ENV=1',
+        'OPENCLAUDE_PROVIDER=opencode-zen',
+        'OPENCLAUDE_BASE_URL=https://opencode.ai/zen/v1',
+        'OPENCLAUDE_MODEL=deepseek-v4-flash-free',
+        'CLAUDE_CODE_USE_OPENAI=1',
+        'OPENAI_BASE_URL=https://stale.example/v1',
+        'OPENAI_MODEL=stale-model',
+        'OPENAI_API_KEY=stale-key',
+        'OPENCODE_ZEN_API_KEY=zen-key',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const env = buildAgentChildEnv({}, cwd)
+
+    expect(env.OPENAI_BASE_URL).toBe('https://opencode.ai/zen/v1')
+    expect(env.OPENAI_MODEL).toBe('deepseek-v4-flash-free')
+    expect(env.OPENAI_API_KEY).toBe('zen-key')
   })
 })

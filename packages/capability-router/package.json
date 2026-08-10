@@ -1,0 +1,27 @@
+{
+  "name": "@nova/capability-router",
+  "version": "1.0.0",
+  "description": "Portable, agent-neutral MCP capability router, skill store, and file workspace",
+  "type": "module",
+  "bin": {
+    "capability-router-mcp": "./src/mcp.mjs",
+    "capability-router-web": "./src/http.mjs"
+  },
+  "scripts": {
+    "start": "node src/http.mjs",
+    "mcp": "node src/mcp.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "Dockerfile"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}

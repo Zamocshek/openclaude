@@ -12,14 +12,12 @@ import { getAgentGatewayStateDir } from './config.js'
 import type { AgentGatewayConfig } from './config.js'
 import {
   loadDialogueBlocks,
-  saveDialogueBlocks,
   loadDialogueMeta,
-  saveDialogueMeta,
+  saveDialogueState,
   readChatLogFromOffset,
   countChatLogLines,
-  appendDialogueBlock,
   loadScratchpadBlocks,
-  saveScratchpadBlocks,
+  commitScratchpadConsolidation,
   loadIdentity,
   loadPatterns,
   savePatterns,
@@ -37,6 +35,7 @@ const ERA_COMPRESS_COUNT = 4         // Oldest blocks to compress per era
 const SCRATCHPAD_CONSOLIDATION_THRESHOLD = 30000  // chars
 
 type ConsolidationAgentRunner = typeof runOpenClaudeAgent
+let dialogueConsolidationTail: Promise<void> = Promise.resolve()
 
 // ---------------------------------------------------------------------------
 // Dialogue Consolidation
@@ -57,8 +56,26 @@ export async function consolidateDialogue(
   config: AgentGatewayConfig,
   options: { runAgent?: ConsolidationAgentRunner } = {},
 ): Promise<{ blocksCreated: number; usage?: Record<string, unknown> }> {
+  const previous = dialogueConsolidationTail
+  let release!: () => void
+  dialogueConsolidationTail = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await previous.catch(() => {})
+  try {
+    return await consolidateDialogueUnlocked(config, options)
+  } finally {
+    release()
+  }
+}
+
+async function consolidateDialogueUnlocked(
+  config: AgentGatewayConfig,
+  options: { runAgent?: ConsolidationAgentRunner } = {},
+): Promise<{ blocksCreated: number; usage?: Record<string, unknown> }> {
   const runAgent = options.runAgent ?? runOpenClaudeAgent
   const meta = await loadDialogueMeta()
+  const existingBlocks = await loadDialogueBlocks()
   const total = await countChatLogLines()
   let lastOffset = meta.lastConsolidatedOffset || 0
   if (lastOffset > total) lastOffset = 0
@@ -68,6 +85,7 @@ export async function consolidateDialogue(
 
   let blocksCreated = 0
   let processedEntries = 0
+  const newBlocks: DialogueBlock[] = []
   const identity = await loadIdentity()
 
   for (let i = 0; i < completeChunks; i++) {
@@ -95,7 +113,7 @@ export async function consolidateDialogue(
       ? `${firstTs.slice(0, 10)} ${firstTs.slice(11, 16)} - ${lastTs.slice(11, 16)}`
       : `${firstTs.slice(0, 10)} ${firstTs.slice(11, 16)} - ${lastTs.slice(0, 10)} ${lastTs.slice(11, 16)}`
 
-    await appendDialogueBlock({
+    newBlocks.push({
       ts: new Date().toISOString(),
       type: 'summary',
       range,
@@ -107,8 +125,12 @@ export async function consolidateDialogue(
   }
 
   if (blocksCreated > 0) {
-    await compressDialogueEras(config, runAgent)
-    await saveDialogueMeta({
+    const blocks = await compressDialogueEras(
+      [...existingBlocks, ...newBlocks],
+      config,
+      runAgent,
+    )
+    await saveDialogueState(blocks, {
       lastConsolidatedOffset: lastOffset + processedEntries,
       lastConsolidatedAt: new Date().toISOString(),
     })
@@ -118,29 +140,31 @@ export async function consolidateDialogue(
 }
 
 async function compressDialogueEras(
+  initialBlocks: DialogueBlock[],
   config: AgentGatewayConfig,
   runAgent: ConsolidationAgentRunner,
-): Promise<void> {
-  const blocks = await loadDialogueBlocks()
-  if (blocks.length <= MAX_SUMMARY_BLOCKS) return
-
-  const compressCount = Math.min(ERA_COMPRESS_COUNT, blocks.length - 1)
-  const oldBlocks = blocks.slice(0, compressCount)
-  const remaining = blocks.slice(compressCount)
-
+): Promise<DialogueBlock[]> {
+  let blocks = initialBlocks
   const identity = await loadIdentity()
-  const eraSummary = await compressBlocksToEra(oldBlocks, identity, config, runAgent)
-  if (!eraSummary) return
 
-  const eraBlock: DialogueBlock = {
-    ts: new Date().toISOString(),
-    type: 'era',
-    range: `${oldBlocks[0]!.range.slice(0, 10)} to ${oldBlocks[oldBlocks.length - 1]!.range.slice(0, 10)}`,
-    messageCount: oldBlocks.reduce((sum, b) => sum + b.messageCount, 0),
-    content: eraSummary.trim(),
+  while (blocks.length > MAX_SUMMARY_BLOCKS) {
+    const compressCount = Math.min(ERA_COMPRESS_COUNT, blocks.length - 1)
+    const oldBlocks = blocks.slice(0, compressCount)
+    const remaining = blocks.slice(compressCount)
+    const eraSummary = await compressBlocksToEra(oldBlocks, identity, config, runAgent)
+    if (!eraSummary) break
+
+    const eraBlock: DialogueBlock = {
+      ts: new Date().toISOString(),
+      type: 'era',
+      range: `${oldBlocks[0]!.range.slice(0, 10)} to ${oldBlocks[oldBlocks.length - 1]!.range.slice(0, 10)}`,
+      messageCount: oldBlocks.reduce((sum, b) => sum + b.messageCount, 0),
+      content: eraSummary.trim(),
+    }
+    blocks = [eraBlock, ...remaining]
   }
 
-  await saveDialogueBlocks([eraBlock, ...remaining])
+  return blocks
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +193,6 @@ export async function consolidateScratchpad(
 
   const compressCount = Math.max(2, Math.floor(blocks.length / 2))
   const oldBlocks = blocks.slice(0, compressCount)
-  const recentBlocks = blocks.slice(compressCount)
   const oldContent = oldBlocks
     .map(b => `[${b.ts.slice(0, 16)} - ${b.source}]\n${b.content}`)
     .join('\n\n---\n\n')
@@ -204,6 +227,7 @@ export async function consolidateScratchpad(
       prompt,
       config,
       suppressObservers: true,
+      executionClass: 'maintenance',
     })
     if (result.exitCode !== 0) return { entriesExtracted: 0 }
 
@@ -224,20 +248,17 @@ export async function consolidateScratchpad(
         source: 'consolidation-knowledge',
         content: `Knowledge: ${String(entry.topic)}\n\n${String(entry.content)}`,
       }))
-    const newBlocks = [
+    const replacement = [
       {
         ts: new Date().toISOString(),
         source: 'consolidation',
         content: compressedBlock,
       },
       ...knowledgeBlocks,
-      ...recentBlocks,
     ]
 
-    await saveScratchpadBlocks(newBlocks, {
-      archiveBlocks: oldBlocks,
-      reason: 'consolidation',
-    })
+    const committed = await commitScratchpadConsolidation(oldBlocks, replacement)
+    if (!committed) return { entriesExtracted: 0 }
     return { entriesExtracted: knowledgeBlocks.length }
   } catch (error) {
     console.warn(
@@ -283,7 +304,12 @@ export async function updatePatternRegister(
   ].join('\n')
 
   try {
-    const result = await runOpenClaudeAgent({ prompt, config, suppressObservers: true })
+    const result = await runOpenClaudeAgent({
+      prompt,
+      config,
+      suppressObservers: true,
+      executionClass: 'maintenance',
+    })
     if (result.exitCode !== 0) return
 
     const updated = result.text.trim()
@@ -345,7 +371,12 @@ async function createBlockSummary(
   ].join('\n')
 
   try {
-    const result = await runAgent({ prompt, config, suppressObservers: true })
+    const result = await runAgent({
+      prompt,
+      config,
+      suppressObservers: true,
+      executionClass: 'maintenance',
+    })
     if (result.exitCode !== 0) return null
     return result.text.trim() || null
   } catch {
@@ -376,7 +407,12 @@ async function compressBlocksToEra(
   ].join('\n')
 
   try {
-    const result = await runAgent({ prompt, config, suppressObservers: true })
+    const result = await runAgent({
+      prompt,
+      config,
+      suppressObservers: true,
+      executionClass: 'maintenance',
+    })
     if (result.exitCode !== 0) return null
     const content = result.text.trim()
     if (!content) return null

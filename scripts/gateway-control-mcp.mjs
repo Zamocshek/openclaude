@@ -20,6 +20,7 @@ const providerDefaults = {
   codex: { baseUrl: 'https://chatgpt.com/backend-api/codex', apiKeyEnv: 'CODEX_API_KEY' },
   deepseek: { baseUrl: 'https://api.deepseek.com/v1', apiKeyEnv: 'DEEPSEEK_API_KEY' },
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', apiKeyEnv: 'OPENROUTER_API_KEY' },
+  'opencode-zen': { baseUrl: 'https://opencode.ai/zen/v1', apiKeyEnv: 'OPENCODE_ZEN_API_KEY' },
   openai: { baseUrl: 'https://api.openai.com/v1', apiKeyEnv: 'OPENAI_API_KEY' },
   'lmstudio-lan': { baseUrl: 'http://192.168.187.1:1234/v1' },
   lmstudio: { baseUrl: 'http://localhost:1234/v1' },

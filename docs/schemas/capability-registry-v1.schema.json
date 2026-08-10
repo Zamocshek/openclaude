@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclaude.local/schemas/capability-registry-v1.json",
+  "title": "Portable capability registry",
+  "type": "object",
+  "required": ["schemaVersion", "servers", "components"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "skillRoots": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "servers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "description": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "intents": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "enabled": { "type": "boolean" },
+          "allowedTools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "blockedTools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+        },
+        "additionalProperties": true
+      }
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "description"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$" },
+          "name": { "type": "string" },
+          "kind": { "type": "string" },
+          "description": { "type": "string" },
+          "root": { "type": "string" },
+          "mcpEntrypoint": { "type": "string" },
+          "webEntrypoint": { "type": "string" },
+          "image": { "type": "string" },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -93,6 +93,21 @@ Telegraf-based Telegram bot:
   `/pausejob`, `/resumejob`, `/deletejob`, `/files`, `/transcribe`,
   `/consciousness`, `/evolution`, `/evolve`, `/identity`, `/scratchpad`
 
+#### Telegram MCP content document contract
+
+The separate `telegram-mcp` service treats a Telegram post as a document,
+not a plain string. Source sync and `content_capture_source_post` persist the
+visible text plus a canonical HTML representation of every UTF-16 entity,
+including hidden text URLs, mentions, styles, spoilers, and custom emoji.
+
+`content_create_draft` accepts a captured `source_post_id`. Exact source reuse
+inherits the complete entity set; edited drafts must preserve retained hidden
+targets explicitly. Draft creation and `content_prepare_publish` both fail
+closed on silent entity loss. If a model omits provenance, the server compares
+the candidate against hidden-link labels from recently captured sources and
+returns the matching source IDs before any target-quality or send action.
+`allow_formatting_loss` applies only after a source is explicitly identified.
+
 ### 2.3 Cron Scheduler (`cron.ts`)
 
 File-based cron system:
@@ -117,11 +132,10 @@ Spawns OpenClaude CLI subprocess:
   `all tools` or `all MCP` request selects every eligible server, including
   dynamically imported servers
 - Selects Hindsight for explicit memory and prior-context requests
-- Supports `minimal`, `adaptive` (default), and `strict` harness modes so
-  optional orchestration is proportional to task complexity
+- Uses one fixed `ouroboros` harness, with task-aware activation so direct
+  dialogue stays concise while substantial work receives the evidence loop
 - Requires a successful verifier after the last coding mutation by default,
-  with one adaptive or two strict bounded correction passes and fail-closed
-  completion; minimal mode skips the extra evaluator
+  with three bounded correction passes and fail-closed completion
 - Merges implementation and evaluator artifacts, activity, duration, and cost
 - Buffers streaming coding answers until verification while sending SSE
   keepalive comments
@@ -150,6 +164,9 @@ MCP and documented in `docs/REPO_GUIDE.md`:
   `~/.openclaude/camofox-auth/browser-model-profiles.json`; browser
   authentication state remains outside the repository under
   `~/.camofox/profiles`.
+
+Nova's request-scoped capability map, route aliases, context rules, and
+extension contract are documented in `docs/nova-capability-routing.md`.
 
 ### 2.5.1 Personal RPG / Life System (`Vladimir_Kuplevatskyi/`)
 
@@ -283,13 +300,14 @@ behavior applies to Telegram, Agent API, cron, Ouroboros, and OpenWebUI runs:
   only relevant servers. An explicit `all tools`/`all MCP` request includes all
   eligible servers, including JSON-imported servers. Hindsight is selected for
   explicit memory and prior-context requests.
-- `OPENCLAUDE_AGENT_HARNESS_MODE=adaptive` (default): injects only relevant
-  routing guidance. `minimal` minimizes gateway steering; `strict` enables the
-  full coding workflow and an additional verifier pass.
+- Ouroboros is the fixed execution harness. It adds an explicit task contract,
+  inspect/plan/act/verify/accept checkpoints, automatic delegation, and final
+  requirement acceptance for substantial work. Legacy harness configuration
+  values normalize to Ouroboros.
 - `OPENCLAUDE_AGENT_CODING_COMPLETION_GATE=1` (default): any successful coding
   mutation requires a relevant verifier to succeed after the final edit. The
-  adaptive gate allows one bounded correction pass, strict allows two, and then
-  fails closed.
+  gate allows three bounded correction passes and then fails closed. Verifiers whose pipelines or
+  fallback commands can hide a failing exit status are rejected.
 - `OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS=900000` (default): aborts a child
   run after 15 minutes without output. Set `0` to disable this watchdog.
 - `OPENCLAUDE_TELEGRAM_AGENT_RECOVERY_BACKOFF_MS=1000` and

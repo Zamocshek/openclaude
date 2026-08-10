@@ -10,7 +10,7 @@ describe('Tool Router UI', () => {
       openWebUI: 'http://localhost:3000',
       hindsight: 'http://localhost:8888',
       openRAG: 'http://localhost:18000',
-      telegramMcp: 'http://localhost:18765',
+      telegramMcp: 'http://localhost:19765',
       omniRoute: 'http://localhost:20128',
     })
 
@@ -22,8 +22,10 @@ describe('Tool Router UI', () => {
     expect(html).toContain('id="builtin-tool-list"')
     expect(html).toContain('data-toggle-builtin-tool')
     expect(html).toContain("tool:input.dataset.toggleBuiltinTool")
-    expect(html).toContain('data-harness-mode="adaptive"')
-    expect(html).toContain("request('/api/router/harness'")
+    expect(html).not.toContain('data-harness-mode=')
+    expect(html).toContain('Ouroboros · evidence loop, acceptance, and recovery')
+    expect(html).toContain('Always on')
+    expect(html).not.toContain("request('/api/router/harness'")
 
     const script = html.match(/<script>([\s\S]+)<\/script>/u)?.[1]
     expect(script).toBeTruthy()

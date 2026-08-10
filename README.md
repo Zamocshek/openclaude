@@ -3,7 +3,11 @@
 Clone-to-production setup for Windows, Linux, macOS, and servers is documented
 in [`docs/portable-deployment.md`](docs/portable-deployment.md). Existing
 instance operations are covered by
-[`docs/production-runbook.md`](docs/production-runbook.md).
+[`docs/production-runbook.md`](docs/production-runbook.md). Portable migration
+of NOVA memory, history, skills, MCP, tools, and workspace into OpenClaude,
+Hermes, OpenCode, OpenClaw, or Codex is covered by
+[`docs/agent-migration.md`](docs/agent-migration.md). Persistent VPS/SSH access
+is documented in [`docs/server-access.md`](docs/server-access.md).
 
 OpenClaude is an open-source coding-agent CLI for cloud and local model providers.
 
@@ -108,18 +112,17 @@ Telegram:
   Store, inspect skills, and create or remove persistent user skills
 - `/tools [on|off|list|enable NAME|disable NAME]` - inspect or toggle all
   model tools, or enable/disable one built-in tool for subsequent runs
-- `/harness [minimal|adaptive|strict|status]` - choose minimal model steering,
-  task-aware adaptive routing (default), or the full strict coding workflow
 - `/chatid` - show the current chat ID
 - `/status` - show gateway, worker, cron, budget, and Ouroboros status
 - `/provider`, `/models`, `/provider models`,
   `/provider set <provider> <model> [base_url] [api_key]` - inspect or switch
   the provider and model used by the next agent runs; `/provider` and
-  `/models` include Telegram inline buttons for Codex, DeepSeek, OpenRouter,
-  and LM Studio
-- `/sol`, `/terra`, `/luna`, `/gpt55`, `/codex`, `/dsflash`, `/dspro`,
+  `/models` include Telegram inline buttons for Codex, DeepSeek, OpenCode Zen,
+  OpenRouter, OmniRoute, and LM Studio
+- `/sol`, `/terra`, `/luna`, `/gpt55`, `/codex`, `/dsflash`, `/dspro`, `/zenflash`,
   `/gemma`, `/gemmacoder` - quick switches for Codex GPT-5.6 Sol/Terra/Luna,
-  GPT-5.5, DeepSeek V4 Flash/Pro, and the LM Studio Gemma profiles
+  GPT-5.5, DeepSeek V4 Flash/Pro, OpenCode Zen DeepSeek V4 Flash Free, and the
+  LM Studio Gemma profiles
 - `/reasoning [low|medium|high|xhigh|max|ultra]` - open the Codex reasoning
   picker or set a supported level directly; the bot reads supported levels
   from the signed-in Codex model catalog. `max` uses the backend-safe `xhigh`
@@ -129,6 +132,9 @@ Telegram:
   inference to the LAN LM Studio server at `http://192.168.187.1:1234/v1`
   and enable no-tools runner mode for models whose LM Studio template rejects
   OpenAI tool schemas.
+- `/zenflash` - switch to OpenCode Zen at `https://opencode.ai/zen/v1` using
+  the free `deepseek-v4-flash-free` model. Its credential is retained in the
+  ignored `OPENCODE_ZEN_API_KEY` environment variable.
 - `/model [model]`, `/baseurl <url>`, `/apikey <key>` - open model buttons or update the active
   OpenAI-compatible provider profile. OpenRouter keys are retained separately
   in `OPENROUTER_API_KEY` so switching away and back does not lose them.
@@ -150,6 +156,9 @@ Telegram:
 
 The bridge also registers the same base commands with Telegram's command menu
 through `setMyCommands` at startup.
+
+See [docs/ouroboros-harness.md](docs/ouroboros-harness.md) for the mode's
+completion contract, upstream attribution, and benchmark-reproduction limits.
 
 Background consciousness persists its enabled state in both `.env` and the
 gateway config. `start` restarts the gateway and schedules an immediate wakeup;
@@ -292,6 +301,8 @@ Advanced and source-build guides:
 - **CodeGraph semantic code intelligence**: `codegraph_explore` returns relevant source, call paths, and change impact from a local auto-synced `.codegraph` SQLite index
 - **Private web research**: SearXNG plus `mcp-searxng` provide metasearch, suggestions, instance diagnostics, and source-page reading
 - **Current library documentation**: Context7 resolves packages and retrieves version-aware API and setup documentation
+- **GitHub automation**: the official GitHub MCP handles authenticated repository, issue, pull request, Actions, and account operations
+- **Semantic task routing**: a bounded model-router selects task type and capabilities by meaning; deterministic rules remain only as an availability fallback and for explicit server names
 - **Streaming responses**: Real-time token output and tool progress
 - **Tool calling**: Multi-step tool loops with model calls, tool execution, and follow-up responses
 - **Images**: Telegram photos and OpenAI `image_url`/Responses `input_image`
@@ -337,6 +348,22 @@ Context7 is connected through the same project `.mcp.json`. The agent is directe
 to use `resolve-library-id` and `query-docs` for current library/API documentation,
 configuration, setup, and version-specific code. `CONTEXT7_API_KEY` is optional;
 set one in `.env` for higher upstream rate limits.
+
+### GitHub MCP
+
+The tracked `.mcp.json` connects the official remote
+[GitHub MCP Server](https://github.com/github/github-mcp-server) at
+`https://api.githubcopilot.com/mcp/`. Put `GITHUB_MCP_PAT` in the ignored
+`.env`; the token is expanded only in the protected runtime configuration and
+is never committed. The default GitHub toolsets cover account context,
+repositories, issues, pull requests, and users. NOVA routes GitHub work to this
+server instead of assembling ad-hoc REST commands.
+
+Task routing is semantic by default. A tools-disabled `gateway-explore` pass
+returns a validated JSON decision before the main run. It has a 20-second
+ceiling, cannot select an unavailable MCP server, and falls back without
+blocking the task. Set `OPENCLAUDE_AGENT_SEMANTIC_ROUTING=0` only for diagnostic
+comparison.
 
 ### Android Devices
 
@@ -420,10 +447,12 @@ The Tool Router has three independent reduction layers: MCP server switches,
 Skill Store switches, and per-tool switches under **Tools & Runtime**. The
 global model-tools switch starts subsequent runs with an empty strict MCP
 configuration and no built-in tool schemas. Capability-specific system guidance
-is included only for MCP servers and skills that are enabled for that run. The
-same page exposes the persisted harness mode: `adaptive` is task-aware,
-`minimal` leaves maximum room for the provider model, and `strict` adds the
-complete coding workflow and a second bounded verifier pass.
+is included only for MCP servers and skills that are enabled for that run.
+Ouroboros is the single execution harness: it stays lightweight for direct
+conversation and enables task contracts, acceptance checks, delegation, and
+three bounded verifier passes for substantial or tool-driven work. Codex model
+selection defaults to the highest reasoning level advertised by that model;
+`/reasoning` remains available when an explicit lower level is wanted.
 
 An enabled MCP server is **eligible**, not automatically loaded into every
 request. With `OPENCLAUDE_AGENT_AUTO_MCP_ROUTING=1` (the production default),
@@ -444,15 +473,56 @@ Telegram memory/search, confirmed reply and publishing workflows, and optional
 Maton-connected services. A single sidecar prevents parallel agent runs from
 opening the same Telethon SQLite session files independently.
 
-Set `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and optionally `MATON_API_KEY` in
-the ignored project `.env`. Persistent sessions live at
+Set `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, and optional provider keys such as
+`MATON_API_KEY`, `VPROMOTIONS_API_KEY`, or `TWIBOOST_API_KEY` in the ignored
+Telegram MCP deployment `.env` (under `OPENCLAUDE_HOST_TELEGRAM_MCP_DIR`).
+Persistent sessions live at
 `%USERPROFILE%/.openclaude/telegram-mcp/session` by default. The loopback-only
-operator console is available at `http://localhost:18765`.
+operator console is available at `http://localhost:19765`.
 
-The built-in `telegram-mcp-operations` and `maton-api-gateway` skills appear in
+Interactive account login is continuation-aware. After `authorize_send_code`
+succeeds, the bridge keeps a short-lived in-memory auth state for that Telegram
+chat. The next confirmation code and optional 2FA password go directly to
+`authorize_complete`; they are not sent through the main model, chat transcript,
+recovery prompt, or durable memory. `/newchat` cancels the pending login.
+
+This uses the general `openclaude.interaction/v1` protocol rather than a
+Telegram phrase matcher. Any multi-step tool can declare its handler, stage,
+expected input schema, safe state, source tool, and TTL. The gateway keeps the
+workflow attached to the client session and routes the next turn with that
+context. Protected input is accepted only by a registered trusted adapter and
+is never forwarded to the model as a fallback.
+
+The built-in `telegram-mcp-operations`, `maton-api-gateway`, `vpromotions`, and
+`twiboost` skills appear in
 the Skill Store and can be enabled or disabled independently. Provider-specific
 Maton references are vendored under
 `integrations/telegram-mcp/maton skills for telegram/references/`.
+
+### Portable capability router
+
+`packages/capability-router` is an agent-neutral MCP facade for the MCP Router,
+Skill Store, workspace file manager, and task capability selection. A client
+sees five stable tools instead of every downstream schema. For each task the
+router uses OmniRoute (or another OpenAI-compatible endpoint) to select a
+bounded set of capabilities, starts only those MCP servers, and returns only
+their relevant tool schemas. A deterministic metadata scorer is available when
+the semantic endpoint is offline.
+
+The Docker UI is available at `http://localhost:19868`; its MCP endpoint is
+`http://localhost:19868/mcp`. It uses `OPENCLAUDE_AGENT_API_KEY` by default, or
+the separate `CAPABILITY_ROUTER_API_KEY` override. The package has no dependency
+on NOVA or Agent Gateway and can be installed in Hermes, OpenCode, OpenClaw,
+Codex, or another MCP client. Export a ready target bundle with:
+
+```bash
+bun run agent:migrate export --output ./nova-portable
+bun run agent:migrate adapt ./nova-portable --target hermes --output ./nova-hermes
+node ./nova-hermes/install-capabilities.mjs
+```
+
+Use `--exposure direct` only when a target must receive every downstream MCP
+schema eagerly. See [`docs/agent-migration.md`](docs/agent-migration.md).
 
 ### Skill Store
 
@@ -490,9 +560,10 @@ verification, final diff review, and recovery from corrected tool calls. With
 `OPENCLAUDE_AGENT_CODING_COMPLETION_GATE=1` (the production default), a
 successful coding mutation is not considered complete until a relevant
 verifier succeeds after the last edit. A test that ran before the final
-mutation does not satisfy the gate. The evaluator gets at most two bounded
-correction passes and then fails closed instead of reporting unverified work as
-complete. Artifacts, activity, duration, and cost from all passes are retained.
+mutation does not satisfy the gate. The default Ouroboros evaluator gets at
+most three bounded correction passes and then fails closed instead of reporting
+unverified work as complete. Artifacts, activity, duration, and cost from all
+passes are retained.
 For streaming OpenAI-compatible coding requests, the final answer is buffered
 until the gate passes while SSE keepalives keep OpenWebUI connections alive.
 
@@ -564,8 +635,8 @@ docker compose -f docker-compose.agent-gateway.yml up -d --build
 
 Production containers run a strict base-MCP preflight after CodeGraph indexing
 and before the gateway starts. It verifies the tracked `.mcp.json`, the pinned
-CodeGraph/SearXNG/Context7 packages, the Pentest MCP contract, the CodeGraph
-database, and SearXNG health.
+CodeGraph/SearXNG/Context7 packages, the authenticated GitHub MCP contract, the
+Pentest MCP contract, the CodeGraph database, and SearXNG health.
 Run the same local check with `bun run check:base:mcp`; use
 `OPENCLAUDE_MCP_PREFLIGHT_STRICT=0` only when intentionally accepting a degraded
 startup. The full protocol smoke test is `bun run test:research:mcp` and also

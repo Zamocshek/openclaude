@@ -10,7 +10,7 @@ The portable stack ships with:
 - Agent Gateway, Telegram bridge, cron, queues, memory, background
   consciousness, evolution, OpenAI-compatible API, and model-driven subagents
 - Tool Router, File Manager, Skill Store, and the bundled coding skills
-- bundled Telegram MCP, Telegram operations, Maton, and VPromotions skills
+- bundled Telegram MCP, Telegram operations, Maton, VPromotions, and TwiBoost skills
 - CodeGraph, SearXNG, Context7, authorized Pentest mode, OpenRAG, Hindsight,
   and custom MCP JSON import
 - OpenWebUI, OmniRoute, two agent workers, and local Ollama
@@ -137,7 +137,7 @@ Primary interfaces:
 - Tool Router: `http://127.0.0.1:8642/router`
 - File Manager: `http://127.0.0.1:8642/files`
 - OmniRoute: `http://127.0.0.1:20128`
-- Telegram MCP: `http://127.0.0.1:18765`
+- Telegram MCP: `http://127.0.0.1:19765`
 - Hindsight: `http://127.0.0.1:9999`
 - OpenRAG: `http://127.0.0.1:3000`
 

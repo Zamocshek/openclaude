@@ -28,6 +28,7 @@ export type ProviderPreset =
   | 'groq'
   | 'azure-openai'
   | 'openrouter'
+  | 'opencode-zen'
   | 'onlysq'
   | 'lmstudio'
   | 'lmstudio-lan'
@@ -277,6 +278,15 @@ export function getProviderPresetDefaults(
         baseUrl: 'https://openrouter.ai/api/v1',
         model: 'openai/gpt-5-mini',
         apiKey: '',
+        requiresApiKey: true,
+      }
+    case 'opencode-zen':
+      return {
+        provider: 'openai',
+        name: 'OpenCode Zen',
+        baseUrl: 'https://opencode.ai/zen/v1',
+        model: 'deepseek-v4-flash-free',
+        apiKey: process.env.OPENCODE_ZEN_API_KEY ?? '',
         requiresApiKey: true,
       }
     case 'onlysq':

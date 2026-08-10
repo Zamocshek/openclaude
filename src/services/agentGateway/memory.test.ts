@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm } from 'fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { describe, expect, test } from 'bun:test'
 import {
   addCuratedMemoryEntry,
+  appendDialogueBlock,
   appendScratchpadBlock,
   buildMemoryContextSection,
   applyCuratedMemoryDirectives,
@@ -16,6 +17,8 @@ import {
   getCuratedMemoryStatus,
   loadPendingCuratedMemoryActions,
   listCuratedMemoryEntries,
+  loadDialogueBlocks,
+  loadDialogueMeta,
   loadScratchpadBlocks,
   removeCuratedMemoryEntry,
   removeCuratedMemoryText,
@@ -142,6 +145,71 @@ describe('agent gateway curated memory', () => {
     })
   })
 
+  test('preserves every acknowledged concurrent curated-memory write', async () => {
+    await withGatewayMemoryState(async () => {
+      const results = await Promise.all(
+        Array.from({ length: 100 }, (_, index) => addCuratedMemoryEntry({
+          kind: 'memory',
+          content: `Concurrent fact ${index}`,
+          source: 'parallel-test',
+        })),
+      )
+
+      expect(results.every(result => result.added)).toBe(true)
+      const entries = await listCuratedMemoryEntries('memory')
+      expect(entries).toHaveLength(100)
+      expect(new Set(entries.map(entry => entry.content)).size).toBe(100)
+    })
+  })
+
+  test('does not overwrite a malformed curated-memory store', async () => {
+    await withGatewayMemoryState(async stateDir => {
+      const path = join(stateDir, 'memory', 'curated_memory.json')
+      const malformed = '{"version":1,"entries":['
+      await mkdir(join(stateDir, 'memory'), { recursive: true })
+      await writeFile(path, malformed)
+
+      await expect(addCuratedMemoryEntry({
+        kind: 'memory',
+        content: 'Must not replace damaged bytes.',
+      })).rejects.toThrow()
+      expect(await readFile(path, 'utf8')).toBe(malformed)
+    })
+  })
+
+  test('preserves concurrent scratchpad appends', async () => {
+    await withGatewayMemoryState(async () => {
+      await Promise.all(
+        Array.from({ length: 50 }, (_, index) => (
+          appendScratchpadBlock(`scratch-${index}`, 'parallel-test')
+        )),
+      )
+      const blocks = await loadScratchpadBlocks()
+      expect(blocks).toHaveLength(50)
+      expect(new Set(blocks.map(block => block.content)).size).toBe(50)
+    })
+  })
+
+  test('preserves concurrent dialogue appends in one atomic state', async () => {
+    await withGatewayMemoryState(async stateDir => {
+      await Promise.all(Array.from({ length: 40 }, (_, index) =>
+        appendDialogueBlock({
+          ts: new Date(1_700_000_000_000 + index).toISOString(),
+          type: 'summary',
+          range: `range-${index}`,
+          messageCount: 1,
+          content: `dialogue-${index}`,
+        })))
+
+      const blocks = await loadDialogueBlocks()
+      expect(blocks).toHaveLength(40)
+      expect(new Set(blocks.map(block => block.content)).size).toBe(40)
+      expect((await loadDialogueMeta()).lastConsolidatedOffset).toBe(0)
+      expect(await readFile(join(stateDir, 'memory', 'dialogue_state.json'), 'utf8'))
+        .toContain('dialogue-39')
+    })
+  })
+
   test('updates memory through unique old_text substrings', async () => {
     await withGatewayMemoryState(async () => {
       await addCuratedMemoryEntry({
@@ -214,6 +282,26 @@ describe('agent gateway curated memory', () => {
       expect(processed.results[0]?.pending).toBe(false)
       expect((await searchCuratedMemory({ query: 'bearer auth' }))[0]?.tags)
         .toEqual(['security', 'api'])
+    })
+  })
+
+  test('rolls back an entire directive batch when one action fails', async () => {
+    await withGatewayMemoryState(async () => {
+      await addCuratedMemoryEntry({
+        kind: 'memory',
+        content: 'Existing durable fact.',
+        source: 'test',
+      })
+
+      await expect(applyCuratedMemoryDirectives([
+        '[MEMORY action="add" target="memory" content="Must be rolled back."]',
+        '[MEMORY action="replace" target="memory" old_text="missing exact text" content="replacement"]',
+      ].join('\n'))).rejects.toThrow(CuratedMemoryError)
+
+      const entries = await listCuratedMemoryEntries()
+      expect(entries.map(entry => entry.content)).toEqual(['Existing durable fact.'])
+      expect(await readFile(curatedMemoryMarkdownPath('memory'), 'utf8'))
+        .not.toContain('Must be rolled back.')
     })
   })
 

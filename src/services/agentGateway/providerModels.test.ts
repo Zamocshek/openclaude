@@ -9,7 +9,8 @@ import {
 
 describe('agent gateway provider model catalog', () => {
   test('ships current Codex, DeepSeek, OpenRouter, and OmniRoute quick models', () => {
-    expect(getBuiltInProviderModels('codex').map(model => model.id)).toEqual([
+    const codexModels = getBuiltInProviderModels('codex')
+    expect(codexModels.map(model => model.id)).toEqual([
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',
@@ -18,7 +19,16 @@ describe('agent gateway provider model catalog', () => {
       'gpt-5.4-mini',
       'gpt-5.3-codex-spark',
     ])
+    expect(codexModels.find(model => model.id === 'gpt-5.6-sol')?.defaultReasoning).toBe('ultra')
+    expect(codexModels.find(model => model.id === 'gpt-5.6-luna')?.defaultReasoning).toBe('max')
+    expect(codexModels.find(model => model.id === 'gpt-5.5')?.defaultReasoning).toBe('xhigh')
+    expect(codexModels.find(model => model.id === 'gpt-5.3-codex-spark')?.defaultReasoning).toBeUndefined()
     expect(getBuiltInProviderModels('deepseek').map(model => model.id)).toEqual([
+      'deepseek-v4-flash',
+      'deepseek-v4-pro',
+    ])
+    expect(getBuiltInProviderModels('opencode-zen').map(model => model.id)).toEqual([
+      'deepseek-v4-flash-free',
       'deepseek-v4-flash',
       'deepseek-v4-pro',
     ])
@@ -38,7 +48,7 @@ describe('agent gateway provider model catalog', () => {
     ])
   })
 
-  test('preserves supported Codex reasoning levels from the live catalog', () => {
+  test('uses the highest supported Codex reasoning level from the live catalog', () => {
     const models = parseCodexModelRecords([
       {
         slug: 'gpt-5.6-sol',
@@ -61,7 +71,7 @@ describe('agent gateway provider model catalog', () => {
     expect(models).toEqual([{
       id: 'gpt-5.6-sol',
       label: 'GPT-5.6 Sol',
-      defaultReasoning: 'medium',
+      defaultReasoning: 'ultra',
       reasoningLevels: ['low', 'xhigh', 'max', 'ultra'],
       contextWindow: 372_000,
     }])

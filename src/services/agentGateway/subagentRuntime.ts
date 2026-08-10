@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { join } from 'path'
 
@@ -37,6 +37,30 @@ type RuntimeRoute = AgentGatewaySubagentRoute & {
 }
 
 const SETTINGS_FILE_PREFIX = 'subagent-routing'
+const RUNTIME_SETTINGS_RE = /^subagent-routing\.\d+\.[0-9a-f-]+\.settings\.json$/iu
+const DEFAULT_STALE_SETTINGS_AGE_MS = 24 * 60 * 60 * 1_000
+
+export function cleanupStaleGatewaySubagentSettings(
+  stateDir = getAgentGatewayStateDir(),
+  now = Date.now(),
+  staleAfterMs = DEFAULT_STALE_SETTINGS_AGE_MS,
+): number {
+  if (!existsSync(stateDir)) return 0
+  let removed = 0
+  for (const entry of readdirSync(stateDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !RUNTIME_SETTINGS_RE.test(entry.name)) continue
+    const path = join(stateDir, entry.name)
+    try {
+      const stats = lstatSync(path)
+      if (now - stats.mtimeMs < staleAfterMs) continue
+      rmSync(path, { force: true })
+      removed += 1
+    } catch {
+      // Another run may have removed the file after directory enumeration.
+    }
+  }
+  return removed
+}
 
 /**
  * Produces an ephemeral OpenClaude settings layer for each gateway child run.
@@ -79,6 +103,7 @@ export function prepareGatewaySubagentRuntime(
     `${SETTINGS_FILE_PREFIX}.${process.pid}.${randomUUID()}.settings.json`,
   )
   mkdirSync(stateDir, { recursive: true })
+  cleanupStaleGatewaySubagentSettings(stateDir)
   writeFileSync(settingsPath, `${JSON.stringify({ agentModels, agentRouting }, null, 2)}\n`, {
     encoding: 'utf8',
     mode: 0o600,
@@ -175,13 +200,14 @@ function defaultProviderApiKeyFromEnvironment(provider: string, env: NodeJS.Proc
     return env.DEEPSEEK_API_KEY || env.OPENCLAUDE_DEEPSEEK_API_KEY || env.OPENCLAUDE_API_KEY || ''
   }
   if (provider === 'openrouter') return env.OPENROUTER_API_KEY || env.OPENCLAUDE_API_KEY || ''
+  if (provider === 'opencode-zen') return env.OPENCODE_ZEN_API_KEY || env.OPENCLAUDE_API_KEY || ''
   return env.OPENCLAUDE_API_KEY || env.OPENAI_API_KEY || ''
 }
 
 function buildGatewayAgentDefinitions(
   config: AgentGatewayConfig,
   roles: GatewaySubagentRuntime['roles'],
-): Record<string, { description: string; prompt: string; model: string; maxTurns: number; disallowedTools?: string[] }> {
+): Record<string, GatewayAgentDefinition> {
   return Object.fromEntries(roles.map(role => [
     role.name,
     gatewayAgentDefinition(role.name, config.runner.maxTurns),
@@ -191,15 +217,15 @@ function buildGatewayAgentDefinitions(
 function gatewayAgentDefinition(
   name: string,
   maxTurns: number,
-): { description: string; prompt: string; model: string; maxTurns: number; disallowedTools?: string[] } {
-  const readOnlyTools = ['Agent', 'Edit', 'Write', 'NotebookEdit']
+): GatewayAgentDefinition {
+  const readOnlyTools = ['Read', 'Grep', 'Glob']
   if (name === 'gateway-vision') {
     return {
       description: 'Read-only visual inspection through a multimodal Codex model.',
       prompt: 'You are the Gateway Vision subagent. Inspect the exact local image paths in the assignment with the Read tool before answering. Report only observable visual evidence needed for the parent request, including relevant text, layout, objects, colors, and uncertainty. Never infer contents from filenames or captions. Do not modify files, run unrelated tools, or spawn agents. If an image cannot be read, report the exact failure.',
       model: 'inherit',
       maxTurns,
-      disallowedTools: readOnlyTools,
+      tools: ['Read'],
     }
   }
   if (name === 'gateway-explore') {
@@ -208,7 +234,7 @@ function gatewayAgentDefinition(
       prompt: 'You are the Gateway Explore subagent. Investigate the assigned question thoroughly with read-only tools. Report concrete evidence, paths, commands, risks, and open questions. Do not modify files or spawn agents.',
       model: 'inherit',
       maxTurns,
-      disallowedTools: readOnlyTools,
+      tools: readOnlyTools,
     }
   }
   if (name === 'gateway-plan') {
@@ -217,7 +243,7 @@ function gatewayAgentDefinition(
       prompt: 'You are the Gateway Plan subagent. Inspect the relevant project state and produce an actionable, ordered implementation plan. Include affected files, dependencies, verification steps, and concurrency boundaries. Do not modify files or spawn agents.',
       model: 'inherit',
       maxTurns,
-      disallowedTools: readOnlyTools,
+      tools: readOnlyTools,
     }
   }
   if (name === 'gateway-review') {
@@ -226,7 +252,7 @@ function gatewayAgentDefinition(
       prompt: 'You are the Gateway Review subagent. Independently verify the assigned implementation or claim. Run relevant read-only inspection and tests, identify concrete defects or missing checks, and end with VERDICT: PASS, FAIL, or PARTIAL. Do not modify files or spawn agents.',
       model: 'inherit',
       maxTurns,
-      disallowedTools: readOnlyTools,
+      tools: readOnlyTools,
     }
   }
   return {
@@ -236,4 +262,13 @@ function gatewayAgentDefinition(
     maxTurns,
     disallowedTools: ['Agent'],
   }
+}
+
+type GatewayAgentDefinition = {
+  description: string
+  prompt: string
+  model: string
+  maxTurns: number
+  tools?: string[]
+  disallowedTools?: string[]
 }

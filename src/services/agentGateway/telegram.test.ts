@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import {
   applyTelegramCronDirectivesForChat,
   buildTelegramAgentPrompt,
+  buildTelegramCronContext,
   buildTelegramAgentRecoveryPrompt,
   buildTelegramBotCommands,
   buildTelegramDownloadFileName,
@@ -20,6 +21,8 @@ import {
   buildTelegramSkillDetailsKeyboard,
   buildTelegramSkillStoreKeyboard,
   buildTelegramReplyContext,
+  buildTelegramSemanticRoutingContext,
+  canMergeTelegramTextSplit,
   extractTelegramCronDirectives,
   extractTelegramSendDirectives,
   formatTelegramReplyContext,
@@ -38,13 +41,18 @@ import {
   getTelegramRecoveryBackoffMs,
   getTelegramAgentRepeatedFailureLimit,
   getTelegramAgentRecoveryAttemptLimit,
+  getTelegramAuthContinuationTtlMs,
   getTelegramQueueLimits,
   getTelegramRetryDelayMs,
+  getTelegramTextSplitCoalesceMs,
   mergeAgentArtifactsWithTelegramDirectives,
+  mergeTelegramTextSplit,
   getTelegramQueuePosition,
   getTelegramProviderShortcut,
   isTelegramActorAllowed,
   hasTelegramMemoryIntent,
+  isLikelyTelegramTextSplitStart,
+  isCronRemovalFeedback,
   applyTelegramResearchMode,
   repairLikelyMojibakeText,
   parseTelegramSkillCreateInput,
@@ -117,9 +125,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain(
       '/tools [on|off|list|enable NAME|disable NAME] - toggle model tools',
     )
-    expect(help).toContain(
-      '/harness [minimal|adaptive|strict|status] - set gateway steering level',
-    )
+    expect(help).not.toContain('/harness')
     expect(help).toContain('/bg [start|stop|now|status] - control background consciousness')
     expect(help).toContain('/consciousness [start|stop|now|status] - alias for /bg')
     expect(help).toContain('/evolve [on|off|now|status] - control evolution or run one cycle')
@@ -146,7 +152,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     )
     expect(help).toContain('Hindsight: http://localhost:8888')
     expect(help).toContain('OpenRAG: http://localhost:3000')
-    expect(help).toContain('Telegram MCP: http://localhost:18765')
+    expect(help).toContain('Telegram MCP: http://localhost:19765')
     expect(help).toContain('OmniRoute: http://localhost:20128')
     expect(help).toEndWith('OmniRoute: http://localhost:20128')
     expect(help).toContain(
@@ -245,14 +251,14 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(mcpActions).toContain('mcp:add')
 
     const runtimeActions = buildTelegramRuntimeKeyboard({
-      harnessMode: 'adaptive',
+      harnessMode: 'ouroboros',
       toolsEnabled: true,
       cronEnabled: true,
       consciousnessEnabled: false,
       evolutionEnabled: false,
     }).flat().map(button => button.callback_data)
     expect(runtimeActions).toContain('runtime:tools')
-    expect(runtimeActions).toContain('runtime:harness')
+    expect(runtimeActions).not.toContain('runtime:harness')
     expect(runtimeActions).toContain('runtime:cron')
     expect(runtimeActions).toContain('runtime:evolution')
     expect(runtimeActions).toContain('runtime:wake')
@@ -528,6 +534,52 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(prompt).toContain('primary target of the user request')
   })
 
+  test('builds compact semantic routing context for short dialogue continuations', () => {
+    const context = buildTelegramSemanticRoutingContext(
+      formatTelegramConversationTranscript([{
+        direction: 'out',
+        chatId: '42',
+        text: 'The Telegram login code was sent. Send the confirmation code.',
+      }]),
+      {
+        messageId: 88,
+        text: 'The Telegram login code was sent. Send the confirmation code.',
+      },
+    )
+
+    expect(context).toContain('Telegram replied-to message context')
+    expect(context).toContain('Telegram conversation transcript')
+    expect(context.length).toBeLessThanOrEqual(6_000)
+  })
+
+  test('injects a pending tool interaction as semantic context, not user text', () => {
+    const prompt = buildTelegramAgentPrompt({
+      chatId: '42',
+      messageId: 101,
+      text: 'beta',
+      attachments: [],
+      interactionContext: [
+        'Pending tool interaction:',
+        '- handler: future.choose-target',
+        '- expected input: choice',
+      ].join('\n'),
+    })
+
+    expect(prompt).toContain('## Active tool interaction')
+    expect(prompt).toContain('future.choose-target')
+    expect(prompt).toContain('semantically answers the pending prompt')
+    expect(prompt).toContain('User message:\nbeta')
+  })
+
+  test('bounds Telegram authorization continuation lifetime', () => {
+    expect(getTelegramAuthContinuationTtlMs({
+      OPENCLAUDE_TELEGRAM_AUTH_CONTINUATION_TTL_MS: '1000',
+    })).toBe(60_000)
+    expect(getTelegramAuthContinuationTtlMs({
+      OPENCLAUDE_TELEGRAM_AUTH_CONTINUATION_TTL_MS: '99999999',
+    })).toBe(30 * 60_000)
+  })
+
   test('does not add replied-to context when Telegram message is not a reply', () => {
     const prompt = buildTelegramAgentPrompt({
       chatId: '42',
@@ -642,6 +694,7 @@ describe('agent gateway Telegram bridge helpers', () => {
 
     expect(prompt).toContain('[TELEGRAM_CRON_CREATE')
     expect(prompt).toContain('[TELEGRAM_CRON_UPDATE')
+    expect(prompt).toContain('[TELEGRAM_CRON_DELETE')
     expect(prompt).toContain('mode="message"')
     expect(prompt).toContain('without running an LLM or tools')
     expect(prompt).toContain('timezone="')
@@ -703,6 +756,26 @@ describe('agent gateway Telegram bridge helpers', () => {
     ])
   })
 
+  test('extracts Telegram cron delete directives with only a job name', () => {
+    const parsed = extractTelegramCronDirectives([
+      'Удаляю задачу.',
+      '[TELEGRAM_CRON_DELETE name="programming-nova-2037"]',
+    ].join('\n'))
+
+    expect(parsed.text).toBe('Удаляю задачу.')
+    expect(parsed.directives).toEqual([{
+      action: 'delete',
+      name: 'programming-nova-2037',
+    }])
+  })
+
+  test('recognizes explicit cron removal feedback without matching negation', () => {
+    expect(isCronRemovalFeedback('сделано убирай')).toBe(true)
+    expect(isCronRemovalFeedback('удали эту задачу')).toBe(true)
+    expect(isCronRemovalFeedback('не удаляй эту задачу')).toBe(false)
+    expect(isCronRemovalFeedback('сделано')).toBe(false)
+  })
+
   test('skips missing Telegram cron updates without failing the agent response', async () => {
     await withTempGatewayState(async () => {
       const result = await applyTelegramCronDirectivesForChat(
@@ -715,6 +788,69 @@ describe('agent gateway Telegram bridge helpers', () => {
       expect(result.messages.join('\n')).toContain('pharma-mon-0907 was not found')
       expect(result.messages.join('\n')).not.toContain('failed')
       expect(await listCronJobs(true)).toHaveLength(0)
+    })
+  })
+
+  test('deletes an existing Telegram cron job through the bridge directive', async () => {
+    await withTempGatewayState(async stateDir => {
+      await writeFile(join(stateDir, 'cron-jobs.json'), `${JSON.stringify({
+        jobs: [{
+          id: 'programming-nova-2037',
+          name: 'programming-nova-2037',
+          prompt: 'NOVA development.',
+          schedule: { kind: 'cron', expr: '37 20 * * *', display: '37 20 * * *' },
+          scheduleDisplay: '37 20 * * *',
+          timezone: 'Europe/Amsterdam',
+          repeat: { completed: 10 },
+          enabled: true,
+          state: 'scheduled',
+          deliver: 'origin',
+          origin: { platform: 'telegram', chatId: '42' },
+          createdAt: '2026-07-01T00:00:00.000Z',
+          nextRunAt: '2099-01-01T00:00:00.000Z',
+          mode: 'message',
+        }],
+        updatedAt: '2026-07-01T00:00:00.000Z',
+      }, null, 2)}\n`, 'utf8')
+
+      const result = await applyTelegramCronDirectivesForChat(
+        '42',
+        '[TELEGRAM_CRON_DELETE name="programming-nova-2037"]',
+      )
+
+      expect(result.messages.join('\n')).toContain('Telegram cron deleted:')
+      expect(result.messages.join('\n')).toContain('programming-nova-2037')
+      expect(await listCronJobs(true)).toHaveLength(0)
+    })
+  })
+
+  test('includes Telegram cron jobs beyond the former twenty-job cutoff', async () => {
+    await withTempGatewayState(async stateDir => {
+      const jobs = Array.from({ length: 25 }, (_, index) => ({
+        id: `job-${index}`,
+        name: `job-${index}`,
+        prompt: `Reminder ${index}`,
+        schedule: { kind: 'cron', expr: '0 12 * * *', display: '0 12 * * *' },
+        scheduleDisplay: '0 12 * * *',
+        timezone: 'Europe/Amsterdam',
+        repeat: { completed: 0 },
+        enabled: true,
+        state: 'scheduled',
+        deliver: 'origin',
+        origin: { platform: 'telegram', chatId: '42' },
+        createdAt: '2026-07-01T00:00:00.000Z',
+        nextRunAt: '2099-01-01T00:00:00.000Z',
+        mode: 'message',
+      }))
+      await writeFile(join(stateDir, 'cron-jobs.json'), `${JSON.stringify({
+        jobs,
+        updatedAt: '2026-07-01T00:00:00.000Z',
+      }, null, 2)}\n`, 'utf8')
+
+      const context = await buildTelegramCronContext('42')
+
+      expect(context).toContain('name: job-0')
+      expect(context).toContain('name: job-24')
     })
   })
 
@@ -859,7 +995,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(shouldRetryTelegramAgentFailure({
       ...base,
       failureKind: 'quality_gate',
-    })).toBe(true)
+    })).toBe(false)
   })
 
   test('uses bounded exponential backoff for transient network recovery', () => {
@@ -957,6 +1093,71 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(getTelegramQueuePosition({ active: true, waiting: 0 })).toBe(1)
     expect(getTelegramQueuePosition({ active: true, waiting: 2 })).toBe(3)
     expect(formatTelegramQueueNotice(2, 'second task')).toContain('Queued #2')
+  })
+
+  test('reassembles Telegram text split at the 4096 character boundary', async () => {
+    const bridge = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+    const handled: any[] = []
+    ;(bridge as any).handleUpdate = async (update: unknown) => {
+      handled.push(update)
+    }
+    const first = {
+      message_id: 10,
+      date: 100,
+      chat: { id: 42 },
+      from: { id: 7 },
+      text: 'A'.repeat(4_095),
+    }
+    const second = {
+      message_id: 11,
+      date: 101,
+      chat: { id: 42 },
+      from: { id: 7 },
+      text: 'continued',
+    }
+
+    expect(isLikelyTelegramTextSplitStart(first)).toBe(true)
+    expect(canMergeTelegramTextSplit(first, second)).toBe(true)
+    expect(mergeTelegramTextSplit(first, second).text).toBe(
+      `${first.text}${second.text}`,
+    )
+
+    ;(bridge as any).handleMessageUpdateInBackground({ update_id: 20, message: first })
+    ;(bridge as any).handleMessageUpdateInBackground({ update_id: 21, message: second })
+    await waitFor(() => handled.length === 1)
+
+    expect(handled[0].message.message_id).toBe(10)
+    expect(handled[0].message.text).toBe(`${first.text}${second.text}`)
+  })
+
+  test('keeps ordinary consecutive Telegram messages as separate queued turns', async () => {
+    const bridge = new TelegramAgentBridge(getDefaultAgentGatewayConfig())
+    const handled: any[] = []
+    ;(bridge as any).handleUpdate = async (update: unknown) => {
+      handled.push(update)
+    }
+
+    ;(bridge as any).handleMessageUpdateInBackground({
+      update_id: 30,
+      message: { message_id: 20, date: 100, chat: { id: 42 }, from: { id: 7 }, text: 'first' },
+    })
+    ;(bridge as any).handleMessageUpdateInBackground({
+      update_id: 31,
+      message: { message_id: 21, date: 101, chat: { id: 42 }, from: { id: 7 }, text: 'second' },
+    })
+    await waitFor(() => handled.length === 2)
+
+    expect(handled.map(update => update.message.text)).toEqual(['first', 'second'])
+  })
+
+  test('bounds the long-message coalescing delay', () => {
+    expect(getTelegramTextSplitCoalesceMs({})).toBe(750)
+    expect(getTelegramTextSplitCoalesceMs({
+      OPENCLAUDE_TELEGRAM_TEXT_SPLIT_COALESCE_MS: '20',
+    })).toBe(100)
+    expect(getTelegramTextSplitCoalesceMs({
+      OPENCLAUDE_TELEGRAM_TEXT_SPLIT_COALESCE_MS: '10000',
+    })).toBe(3_000)
   })
 
   test('uses bounded exponential Telegram request backoff', () => {
@@ -1390,6 +1591,19 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(text).not.toContain('waiting for model/tool output')
   })
 
+  test('formats a blocked task as waiting for access instead of failed', () => {
+    const text = formatTelegramProgressText({
+      status: 'blocked',
+      phase: 'Waiting for required input or access.',
+      startedAt: Date.now() - 2_000,
+      events: [],
+    })
+
+    expect(text).toContain('OpenClaude task: blocked')
+    expect(text).toContain('Waiting for required input or access.')
+    expect(text).not.toContain('Agent run failed')
+  })
+
   test('hides recovered edit validation errors after a successful run', () => {
     const event = {
       label: 'tool result error (Write): Read the file first',
@@ -1453,17 +1667,21 @@ describe('agent gateway Telegram bridge helpers', () => {
       provider: 'deepseek',
       model: 'deepseek-v4-pro',
     })
+    expect(getTelegramProviderShortcut('/zenflash')).toMatchObject({
+      provider: 'opencode-zen',
+      model: 'deepseek-v4-flash-free',
+    })
     expect(getTelegramProviderShortcut('/gpt55')).toMatchObject({
       provider: 'codex',
-      model: 'gpt-5.5?reasoning=medium',
+      model: 'gpt-5.5?reasoning=xhigh',
     })
     expect(getTelegramProviderShortcut('/sol')).toMatchObject({
       provider: 'codex',
-      model: 'gpt-5.6-sol?reasoning=medium',
+      model: 'gpt-5.6-sol?reasoning=ultra',
     })
     expect(getTelegramProviderShortcut('/terra')).toMatchObject({
       provider: 'codex',
-      model: 'gpt-5.6-terra?reasoning=medium',
+      model: 'gpt-5.6-terra?reasoning=ultra',
     })
     expect(getTelegramProviderShortcut('/gemmacoder')).toMatchObject({
       provider: 'lmstudio-lan',
@@ -1493,6 +1711,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(providers).toContainEqual({
       text: 'OmniRoute',
       callback_data: 'provider:omniroute',
+    })
+    expect(providers).toContainEqual({
+      text: 'OpenCode Zen',
+      callback_data: 'provider:opencode-zen',
     })
 
     const models = buildTelegramModelKeyboard(
@@ -1547,6 +1769,26 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(profile.model).toBe('gemma-4-12b-obliterated')
     expect(profile.baseUrl).toBe('http://192.168.187.1:1234/v1')
     expect(profile.apiKey).toBe('lm-studio')
+  })
+
+  test('switches Telegram provider profile to OpenCode Zen defaults', () => {
+    const profile = buildTelegramProviderProfileUpdate(
+      {
+        provider: 'deepseek',
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/v1',
+        apiKey: 'deepseek-key',
+      },
+      {
+        provider: 'opencode-zen',
+        model: 'deepseek-v4-flash-free',
+      },
+    )
+
+    expect(profile.provider).toBe('opencode-zen')
+    expect(profile.model).toBe('deepseek-v4-flash-free')
+    expect(profile.baseUrl).toBe('https://opencode.ai/zen/v1')
+    expect(profile.apiKey).toBe('')
   })
 
   test('switches Telegram provider profile without persisting a placeholder OmniRoute key', () => {

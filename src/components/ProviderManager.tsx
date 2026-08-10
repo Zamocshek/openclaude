@@ -1016,6 +1016,11 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         description: 'LM Studio on the local network',
       },
       {
+        value: 'opencode-zen',
+        label: 'OpenCode Zen',
+        description: 'OpenCode Zen curated OpenAI-compatible models',
+      },
+      {
         value: 'custom',
         label: 'Custom',
         description: 'Any OpenAI-compatible provider',

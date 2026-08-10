@@ -55,6 +55,11 @@ export function getLocalClaudePath(): string {
   return join(getLocalInstallDir(), 'openclaude')
 }
 
+export type LocalInstallationProbeOptions = {
+  accessPath?: (path: string) => Promise<void>
+  candidateDirs?: string[]
+}
+
 /**
  * Check if we're running from our managed local installation
  */
@@ -172,25 +177,21 @@ export async function installOrUpdateClaudePackage(
  * Check if local installation exists.
  * Pure existence probe — callers use this to choose update path / UI hints.
  */
-export async function localInstallationExists(): Promise<boolean> {
-  for (const localInstallDir of getCandidateLocalInstallDirs()) {
-    for (const binaryPath of getCandidateLocalBinaryPaths(localInstallDir)) {
-      try {
-        await access(binaryPath)
-        return true
-      } catch {
-        // Try next candidate
-      }
-    }
-  }
-  return false
+export async function localInstallationExists(
+  options: LocalInstallationProbeOptions = {},
+): Promise<boolean> {
+  return (await getDetectedLocalInstallDir(options)) !== null
 }
 
-export async function getDetectedLocalInstallDir(): Promise<string | null> {
-  for (const localInstallDir of getCandidateLocalInstallDirs()) {
+export async function getDetectedLocalInstallDir(
+  options: LocalInstallationProbeOptions = {},
+): Promise<string | null> {
+  const accessPath = options.accessPath ?? access
+  const candidateDirs = options.candidateDirs ?? getCandidateLocalInstallDirs()
+  for (const localInstallDir of candidateDirs) {
     for (const binaryPath of getCandidateLocalBinaryPaths(localInstallDir)) {
       try {
-        await access(binaryPath)
+        await accessPath(binaryPath)
         return localInstallDir
       } catch {
         // Try next candidate

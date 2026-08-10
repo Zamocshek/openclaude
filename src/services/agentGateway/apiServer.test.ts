@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { request as httpRequest } from 'node:http'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { getDefaultAgentGatewayConfig, type AgentGatewayConfig } from './config.js'
@@ -27,6 +28,17 @@ const defaultRunOpenClaudeAgent = async (options: MockAgentRunOptions) => {
 const runOpenClaudeAgent = mock(defaultRunOpenClaudeAgent)
 
 function mockCurrentRequest(prompt: string): string {
+  const framedMarkers = [
+    ...prompt.matchAll(/(?:^|\n)Current request \[chars=(\d+)\]:\n/gu),
+  ]
+  for (const framed of framedMarkers) {
+    if (framed.index === undefined) continue
+    const start = framed.index + framed[0].length
+    const length = Number.parseInt(framed[1] || '', 10)
+    if (Number.isFinite(length) && prompt.length - start === length) {
+      return prompt.slice(start)
+    }
+  }
   const markers = [
     ...prompt.matchAll(/(?:^|\n)(?:User|Current) request:\s*/giu),
   ]
@@ -134,12 +146,12 @@ function createDeferred<T>() {
 }
 
 async function waitFor(
-  condition: () => boolean,
+  condition: () => boolean | Promise<boolean>,
   timeoutMs = 1000,
 ): Promise<void> {
   const startedAt = Date.now()
   while (Date.now() - startedAt < timeoutMs) {
-    if (condition()) return
+    if (await condition()) return
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   throw new Error('Timed out waiting for condition')
@@ -234,6 +246,98 @@ describe('AgentApiServer', () => {
         prompt: expect.stringContaining('Persistent memory tool protocol'),
       }),
     )
+  })
+
+  test('retries bounded transient failures for non-stream API tasks', async () => {
+    const previousBackoff = process.env.OPENCLAUDE_API_AGENT_RECOVERY_BACKOFF_MS
+    process.env.OPENCLAUDE_API_AGENT_RECOVERY_BACKOFF_MS = '0'
+    let invocation = 0
+    runOpenClaudeAgent.mockImplementation(async options => {
+      invocation += 1
+      if (invocation === 1) {
+        return {
+          text: '',
+          stderr: 'API Error: fetch failed',
+          exitCode: 1,
+          timedOut: false,
+          failureKind: 'transient_network' as const,
+          diagnostic: 'Transient provider failure.',
+          activity: ['mcp__telegram-mcp__get_pinned_messages: success'],
+        }
+      }
+      return successfulAgentResult('recovered response')
+    })
+
+    try {
+      const { AgentApiServer } = await import('./apiServer.js')
+      server = new AgentApiServer({ config: testConfig() })
+      await server.start()
+
+      const response = await fetch(`${server.url}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'openclaude-agent',
+          messages: [{ role: 'user', content: 'prepare a Telegram campaign' }],
+        }),
+      })
+
+      expect(response.status).toBe(200)
+      const body = await response.json() as {
+        choices: Array<{ message: { content: string } }>
+      }
+      expect(body.choices[0]?.message.content).toContain('recovered response')
+      expect(invocation).toBe(2)
+      expect(runOpenClaudeAgent.mock.calls[1]?.[0]?.prompt).toContain(
+        'Before any external write, inspect pending/action status',
+      )
+    } finally {
+      if (previousBackoff === undefined) {
+        delete process.env.OPENCLAUDE_API_AGENT_RECOVERY_BACKOFF_MS
+      } else {
+        process.env.OPENCLAUDE_API_AGENT_RECOVERY_BACKOFF_MS = previousBackoff
+      }
+    }
+  })
+
+  test('exposes blocked completion state without returning a server error', async () => {
+    runOpenClaudeAgent.mockImplementation(async () => ({
+      ...successfulAgentResult('SSH access is required.'),
+      completionStatus: 'blocked' as const,
+    }))
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const chatResponse = await fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'check access' }],
+      }),
+    })
+    expect(chatResponse.status).toBe(200)
+    const chatBody = await chatResponse.json() as {
+      openclaude_status: string
+      choices: Array<{ message: { content: string } }>
+    }
+    expect(chatBody.openclaude_status).toBe('blocked')
+    expect(chatBody.choices[0]?.message.content).toContain('SSH access is required')
+
+    const responsesResponse = await fetch(`${server.url}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'check access' }),
+    })
+    expect(responsesResponse.status).toBe(200)
+    const responsesBody = await responsesResponse.json() as {
+      status: string
+      openclaude_status: string
+      incomplete_details?: { reason: string }
+    }
+    expect(responsesBody.status).toBe('incomplete')
+    expect(responsesBody.openclaude_status).toBe('blocked')
+    expect(responsesBody.incomplete_details?.reason).toBe('required_input_or_access')
   })
 
   test('reports streaming runner failures and never stores a partial assistant turn', async () => {
@@ -396,7 +500,7 @@ describe('AgentApiServer', () => {
 
     expect(response.status).toBe(200)
     const options = runOpenClaudeAgent.mock.calls.at(-1)?.[0] as MockAgentRunOptions
-    const currentRequest = options.prompt.split('Current request:').at(-1) || ''
+    const currentRequest = mockCurrentRequest(options.prompt)
     expect(currentRequest).toContain('[Vision input]')
     expect(currentRequest).toContain('gateway-vision')
     expect(currentRequest).not.toContain('image_url')
@@ -428,7 +532,7 @@ describe('AgentApiServer', () => {
 
     expect(response.status).toBe(200)
     const options = runOpenClaudeAgent.mock.calls.at(-1)?.[0] as MockAgentRunOptions
-    const currentRequest = options.prompt.split('Current request:').at(-1) || ''
+    const currentRequest = mockCurrentRequest(options.prompt)
     expect(currentRequest).toContain('[Vision input]')
     expect(currentRequest).not.toContain('prompt_reference:')
     expect(currentRequest).not.toContain('input_image')
@@ -766,7 +870,7 @@ describe('AgentApiServer', () => {
       }
     }
     expect(overviewBody.data.tools.enabled).toBe(true)
-    expect(overviewBody.data.harness.mode).toBe('adaptive')
+    expect(overviewBody.data.harness.mode).toBe('ouroboros')
     expect(overviewBody.data.tools.catalog).toContainEqual({
       name: 'WebSearch',
       group: 'Research',
@@ -798,17 +902,17 @@ describe('AgentApiServer', () => {
     const harness = await fetch(`${server.url}/api/router/harness`, {
       method: 'PATCH',
       headers,
-      body: JSON.stringify({ mode: 'minimal' }),
+      body: JSON.stringify({ mode: 'ouroboros' }),
     })
     expect(harness.status).toBe(200)
-    expect(config.runner.harnessMode).toBe('minimal')
+    expect(config.runner.harnessMode).toBe('ouroboros')
     expect(await readFile(join(projectRoot, '.env'), 'utf8')).toContain(
-      'OPENCLAUDE_AGENT_HARNESS_MODE=minimal',
+      'OPENCLAUDE_AGENT_HARNESS_MODE=ouroboros',
     )
     expect((await fetch(`${server.url}/api/router/harness`, {
       method: 'PATCH',
       headers,
-      body: JSON.stringify({ mode: 'invalid' }),
+      body: JSON.stringify({ mode: 'adaptive' }),
     })).status).toBe(400)
 
     const activity = await fetch(`${server.url}/api/router/activity`, { headers })
@@ -840,7 +944,7 @@ describe('AgentApiServer', () => {
       data: Array<{ action: string; target: string }>
     }).data).toContainEqual(expect.objectContaining({
       action: 'harness.updated',
-      target: 'minimal',
+      target: 'ouroboros',
     }))
   })
 
@@ -1472,6 +1576,83 @@ describe('AgentApiServer', () => {
     await waitFor(() => pending.length === 2)
   })
 
+  test('keeps an async run available after an SSE observer disconnects', async () => {
+    const deferred = createDeferred<ReturnType<typeof successfulAgentResult>>()
+    runOpenClaudeAgent.mockImplementationOnce(async () => deferred.promise)
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const runResponse = await fetch(`${server.url}/v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'survive observer disconnect' }),
+    })
+    const runBody = await runResponse.json() as { run_id: string }
+
+    const observerAbort = new AbortController()
+    const observer = await fetch(
+      `${server.url}/v1/runs/${runBody.run_id}/events`,
+      { signal: observerAbort.signal },
+    )
+    const reader = observer.body!.getReader()
+    const first = await reader.read()
+    expect(new TextDecoder().decode(first.value)).toContain('run.started')
+    observerAbort.abort()
+
+    deferred.resolve(successfulAgentResult('completed after disconnect'))
+    await waitFor(async () => {
+      const queue = await fetch(`${server.url}/api/queue/status`).then(response => response.json()) as {
+        completed: number
+      }
+      return queue.completed === 1
+    })
+
+    const resumed = await fetch(
+      `${server.url}/v1/runs/${runBody.run_id}/events`,
+    )
+    expect(resumed.status).toBe(200)
+    const events = await resumed.text()
+    expect(events).toContain('run.completed')
+    expect(events).toContain('completed after disconnect')
+  })
+
+  test('broadcasts the same async run history to every SSE observer', async () => {
+    runOpenClaudeAgent.mockImplementationOnce(async (options: MockAgentRunOptions) => {
+      options.onStdout?.('shared stream delta')
+      return successfulAgentResult('shared terminal output')
+    })
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const runResponse = await fetch(`${server.url}/v1/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'broadcast async run' }),
+    })
+    const { run_id: runId } = await runResponse.json() as { run_id: string }
+    await waitFor(async () => {
+      const status = await fetch(`${server.url}/api/queue/status`).then(response => response.json()) as {
+        completed: number
+      }
+      return status.completed === 1
+    })
+
+    const [first, second] = await Promise.all([
+      fetch(`${server.url}/v1/runs/${runId}/events`).then(response => response.text()),
+      fetch(`${server.url}/v1/runs/${runId}/events`).then(response => response.text()),
+    ])
+    for (const events of [first, second]) {
+      expect(events).toContain('shared stream delta')
+      expect(events).toContain('run.completed')
+      expect(events).toContain('shared terminal output')
+      expect(events).toMatch(/id: \d+/u)
+    }
+  })
+
   test('allows public or tunnel bind only when an API key is set', async () => {
     const { AgentApiServer } = await import('./apiServer.js')
     const withoutKey = new AgentApiServer({
@@ -1525,7 +1706,7 @@ describe('AgentApiServer', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'openclaude-agent',
-        messages: [{ role: 'user', content: 'create odessa file' }],
+        messages: [{ role: 'user', content: 'show odessa file result' }],
       }),
     })
 
@@ -1591,6 +1772,92 @@ describe('AgentApiServer', () => {
       }),
     })
     expect(responses.status).toBe(200)
+  })
+
+  test('does not abort a completed request body while its response is pending', async () => {
+    runOpenClaudeAgent.mockImplementationOnce(async options => {
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(options.signal?.aborted).toBe(false)
+      return successfulAgentResult('connection-close request completed')
+    })
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const url = new URL(`${server.url}/v1/chat/completions`)
+    const body = JSON.stringify({
+      model: 'openclaude-agent',
+      messages: [{ role: 'user', content: 'keep working after request EOF' }],
+    })
+    const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const request = httpRequest({
+        hostname: url.hostname,
+        port: Number(url.port),
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          Connection: 'close',
+        },
+      }, response => {
+        let responseBody = ''
+        response.setEncoding('utf8')
+        response.on('data', chunk => {
+          responseBody += chunk
+        })
+        response.on('end', () => resolve({
+          status: response.statusCode || 0,
+          body: responseBody,
+        }))
+      })
+      request.on('error', reject)
+      request.end(body)
+    })
+
+    expect(result.status).toBe(200)
+    expect(result.body).toContain('connection-close request completed')
+  })
+
+  test('aborts an active API agent run when the server stops', async () => {
+    const started = createDeferred<AbortSignal>()
+    runOpenClaudeAgent.mockImplementationOnce(async options => {
+      const signal = options.signal!
+      started.resolve(signal)
+      if (!signal.aborted) {
+        await new Promise<void>(resolve => {
+          signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+      }
+      return {
+        text: '',
+        stderr: 'Gateway stopped.',
+        exitCode: 1,
+        timedOut: false,
+        failureKind: 'aborted' as const,
+      }
+    })
+
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({ config: testConfig() })
+    await server.start()
+
+    const request = fetch(`${server.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openclaude-agent',
+        messages: [{ role: 'user', content: 'wait until shutdown' }],
+      }),
+    }).catch(() => undefined)
+    const signal = await started.promise
+
+    const stopping = server.stop()
+    await waitFor(() => signal.aborted)
+    await stopping
+    server = undefined
+    await request
   })
 
   test('restores response chains by conversation after restart when the index is missing', async () => {

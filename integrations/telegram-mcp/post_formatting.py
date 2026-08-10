@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 from telethon import helpers, types
 from telethon.extensions import html, markdown
@@ -138,6 +138,114 @@ def _unparse_html(text: str, entities: List[Any]) -> str:
         ),
         rendered,
     )
+
+
+def _entity_kind(entity: Any) -> str:
+    name = type(entity).__name__.removeprefix("MessageEntity")
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def entity_details(text: str, entities: List[Any]) -> List[Dict[str, Any]]:
+    """Return a JSON-safe description of Telegram's UTF-16 entities."""
+
+    details: List[Dict[str, Any]] = []
+    for entity in entities:
+        item: Dict[str, Any] = {
+            "kind": _entity_kind(entity),
+            "offset": int(entity.offset),
+            "length": int(entity.length),
+            "text": _entity_text(text, entity),
+        }
+        if isinstance(entity, types.MessageEntityTextUrl):
+            item["target"] = str(entity.url)
+        elif isinstance(entity, types.MessageEntityMentionName):
+            item["target"] = f"tg://user?id={int(entity.user_id)}"
+        elif isinstance(entity, types.MessageEntityCustomEmoji):
+            item["target"] = f"tg://emoji?id={int(entity.document_id)}"
+        elif isinstance(entity, types.MessageEntityUrl):
+            item["target"] = item["text"]
+        elif isinstance(entity, types.MessageEntityEmail):
+            item["target"] = f"mailto:{item['text']}"
+        elif isinstance(entity, types.MessageEntityPhone):
+            item["target"] = f"tel:{item['text']}"
+        item["semantic"] = bool(item.get("target"))
+        item["hidden_target"] = isinstance(
+            entity,
+            (
+                types.MessageEntityTextUrl,
+                types.MessageEntityMentionName,
+                types.MessageEntityCustomEmoji,
+            ),
+        )
+        details.append(item)
+    return details
+
+
+def formatting_snapshot(text: str, entities: List[Any]) -> Dict[str, Any]:
+    """Create a portable representation that can recreate a Telegram message."""
+
+    entity_list = list(entities or [])
+    details = entity_details(text, entity_list)
+    return {
+        "format_mode": "html" if entity_list else "plain",
+        "formatted_text": _unparse_html(text, entity_list) if entity_list else text,
+        "entity_count": len(entity_list),
+        "entities": details,
+        "has_hidden_targets": any(item["hidden_target"] for item in details),
+        "custom_emojis": _custom_emoji_details(text, entity_list),
+    }
+
+
+def formatting_from_message(message: Any) -> Dict[str, Any]:
+    """Capture text plus every formatting entity from a Telethon message."""
+
+    text = getattr(message, "message", None) or getattr(message, "text", None) or ""
+    return formatting_snapshot(text, list(getattr(message, "entities", None) or []))
+
+
+def missing_source_formatting(
+    source_text: str,
+    source_formatting: Mapping[str, Any],
+    candidate: FormattedPost,
+) -> List[Dict[str, Any]]:
+    """Find source entities that a derived post silently converted to plain text.
+
+    For an exact copy every entity is part of the document contract. For edited
+    text only semantic hidden targets (text links, user links, custom emoji) are
+    required when their visible label remains in the candidate.
+    """
+
+    source_entities = source_formatting.get("entities")
+    if not isinstance(source_entities, list) or not source_entities:
+        return []
+    candidate_entities = entity_details(candidate.text, candidate.entities)
+    exact_text = str(source_text or "").strip() == candidate.text.strip()
+    missing: List[Dict[str, Any]] = []
+
+    for raw in source_entities:
+        if not isinstance(raw, dict):
+            continue
+        label = str(raw.get("text") or "")
+        target = str(raw.get("target") or "")
+        if not exact_text:
+            if not raw.get("hidden_target") or not label or label not in candidate.text:
+                continue
+
+        def matches(item: Dict[str, Any]) -> bool:
+            if target:
+                return item.get("target") == target and item.get("text") == label
+            return item.get("kind") == raw.get("kind") and item.get("text") == label
+
+        if not any(matches(item) for item in candidate_entities):
+            missing.append(
+                {
+                    "kind": raw.get("kind"),
+                    "text": label,
+                    "target": target or None,
+                    "reason": "telegram_entity_was_lost",
+                }
+            )
+    return missing
 
 
 def parse_post(

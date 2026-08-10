@@ -138,24 +138,53 @@ export function trimConversationMessagesWithinCharBudget<
   T extends TextConversationMessage,
 >(messages: T[], maxChars: number): T[] {
   const budget = Math.max(1, maxChars)
-  const selected: T[] = []
+  const groups = groupConversationTurns(messages)
+  const selectedGroups: T[][] = []
   let used = 0
 
-  for (const message of [...messages].reverse()) {
-    const cost = message.role.length + message.content.length + 2
-    if (used + cost > budget && selected.length > 0) break
+  for (const group of [...groups].reverse()) {
+    const cost = group.reduce(
+      (sum, message) => sum + message.role.length + message.content.length + 2,
+      0,
+    )
+    if (used + cost > budget && selectedGroups.length > 0) break
     if (used + cost > budget) {
-      selected.push({
-        ...message,
-        content: truncateTextFromStart(message.content, budget),
-      })
+      const retained = [...group]
+      const overhead = retained.reduce(
+        (sum, message) => sum + message.role.length + 2,
+        0,
+      )
+      let remaining = Math.max(retained.length, budget - overhead)
+      const resized = new Array<T>(retained.length)
+      for (let index = retained.length - 1; index >= 0; index -= 1) {
+        const message = retained[index]!
+        const reservedForEarlier = index
+        const available = Math.max(1, remaining - reservedForEarlier)
+        const content = truncateTextFromStart(message.content, available)
+        resized[index] = { ...message, content }
+        remaining -= content.length
+      }
+      selectedGroups.push(resized)
       break
     }
-    selected.push(message)
+    selectedGroups.push(group)
     used += cost
   }
 
-  return selected.reverse()
+  return selectedGroups.reverse().flat()
+}
+
+function groupConversationTurns<T extends TextConversationMessage>(messages: T[]): T[][] {
+  const groups: T[][] = []
+  for (const message of messages) {
+    const current = groups.at(-1)
+    if (!current || message.role === 'user' || message.role === 'system') {
+      groups.push([message])
+    } else {
+      current.push(message)
+    }
+  }
+  return groups
 }
 
 function truncateTextFromStart(text: string, maxChars: number): string {

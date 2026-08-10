@@ -23,6 +23,33 @@ async function withTempGatewayState<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe('agent gateway evolution', () => {
+  test('isolates background analysis from tools and delegates without mutating runtime config', async () => {
+    await withTempGatewayState(async () => {
+      const config = getDefaultAgentGatewayConfig()
+      config.subagents.enabled = true
+      let receivedConfig: typeof config | undefined
+
+      await runEvolutionCycle(config, 'prompt_evolution', {
+        allowWhenDisabled: true,
+        runAgent: async options => {
+          receivedConfig = options.config
+          return {
+            text: '[INSIGHT] Keep evolution analysis bounded.',
+            stderr: '',
+            exitCode: 0,
+            timedOut: false,
+          }
+        },
+      })
+
+      expect(receivedConfig?.runner.disableTools).toBe(true)
+      expect(receivedConfig?.runner.disallowedTools).toEqual([])
+      expect(receivedConfig?.subagents.enabled).toBe(false)
+      expect(config.runner.disableTools).toBe(false)
+      expect(config.subagents.enabled).toBe(true)
+    })
+  })
+
   test('runs one-off cycles without silently enabling autonomous evolution', async () => {
     await withTempGatewayState(async () => {
       await toggleEvolution(false)

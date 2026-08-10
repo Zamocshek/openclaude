@@ -37,6 +37,8 @@ const REQUIRED_TELEGRAM_REPOSITORY_FILES = [
   'integrations/telegram-mcp/skills/telegram-mcp-operations/SKILL.md',
   'integrations/telegram-mcp/skills/maton-api-gateway/SKILL.md',
   'integrations/telegram-mcp/skills/vpromotions/SKILL.md',
+  'integrations/telegram-mcp/skills/twiboost/SKILL.md',
+  'integrations/telegram-mcp/TWIBOOST.md',
   'integrations/telegram-mcp/maton skills for telegram/SKILL.md',
   'src/skills/bundled/telegramMcp.ts',
 ]
@@ -425,7 +427,7 @@ OpenClaude is ready:
   Tool Router: http://127.0.0.1:8642/router
   File Manager:http://127.0.0.1:8642/files
   OmniRoute:   http://127.0.0.1:20128
-  Telegram MCP:http://127.0.0.1:18765
+  Telegram MCP:http://127.0.0.1:19765
   Hindsight:   http://127.0.0.1:9999
   OpenRAG:     http://127.0.0.1:3000
 `)

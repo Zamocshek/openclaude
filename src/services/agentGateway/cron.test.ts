@@ -3,10 +3,12 @@ import { mkdtemp, rm } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import {
+  buildScheduledCronAgentPrompt,
   computeNextRun,
   createCronJob,
   deleteCronJob,
   getCronJob,
+  getCronAgentDeliveryBlockReason,
   listCronJobs,
   parseSchedule,
   pauseCronJob,
@@ -39,6 +41,31 @@ afterEach(async () => {
 })
 
 describe('agent gateway cron schedules', () => {
+  test('defines gateway-owned non-interactive delivery for agent jobs', () => {
+    const prompt = buildScheduledCronAgentPrompt(
+      'Prepare a fresh midday message for @mitherio.',
+    )
+
+    expect(prompt).toContain('gateway owns transport')
+    expect(prompt).toContain('Return only the final message content')
+    expect(prompt).toContain('Do not call Telegram, Maton')
+    expect(prompt).toContain('Prepare a fresh midday message for @mitherio.')
+  })
+
+  test('blocks interactive and incomplete agent output from cron delivery', () => {
+    expect(getCronAgentDeliveryBlockReason({
+      pendingInteractions: [{
+        id: 'pending-4',
+        kind: 'confirmation',
+        prompt: 'Confirm send',
+      }],
+    })).toContain('interactive action')
+    expect(getCronAgentDeliveryBlockReason({
+      completionStatus: 'blocked',
+    })).toContain('blocked')
+    expect(getCronAgentDeliveryBlockReason({})).toBeUndefined()
+  })
+
   test('parses interval, cron, timestamp, and relative one-shot schedules', async () => {
     await expect(parseSchedule('every 2h')).resolves.toMatchObject({
       kind: 'interval',

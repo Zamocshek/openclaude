@@ -107,6 +107,35 @@ async function main() {
       throw new Error(`Qwen navigator tab is missing: ${tabsText}`)
     }
 
+    let tabsPayload
+    try {
+      tabsPayload = JSON.parse(tabsText)
+    } catch {
+      throw new Error('Qwen tab listing did not return JSON')
+    }
+    const qwenTabId = tabsPayload?.tabs?.find(tab =>
+      String(tab?.url || '').includes('chat.qwen.ai'),
+    )?.tabId
+    if (!qwenTabId) throw new Error('Qwen tab listing did not return tabId')
+
+    const snapshot = await withTimeout(
+      client.callTool({
+        name: 'camofox_snapshot',
+        arguments: { tabId: qwenTabId },
+      }),
+      'Camofox persistent Qwen snapshot',
+    )
+    const snapshotText = textContent(snapshot)
+    if (
+      snapshot.isError
+      || /Camofox 404|Tab not found/i.test(snapshotText)
+      || /(?:button|link)\s+"?(?:Log in|Sign up|Continue with)/i.test(snapshotText)
+    ) {
+      throw new Error(
+        `Qwen persistent session is not usable: ${snapshotText.slice(0, 300)}`,
+      )
+    }
+
     const checkpoint = await withTimeout(
       client.callTool({
         name: 'camofox_checkpoint_session',

@@ -1,5 +1,16 @@
 {
   "mcpServers": {
+    "capability-router": {
+      "command": "node",
+      "args": [
+        "packages/capability-router/src/mcp.mjs"
+      ],
+      "env": {
+        "CAPABILITY_ROUTER_WORKSPACE_ROOT": ".",
+        "CAPABILITY_ROUTER_MCP_CONFIG": ".mcp.json",
+        "CAPABILITY_ROUTER_REGISTRY": "capability-registry.json"
+      }
+    },
     "mcp-router": {
       "command": "node",
       "args": [
@@ -79,6 +90,13 @@
       ],
       "env": {
         "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+      }
+    },
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_MCP_PAT}"
       }
     },
     "pentest": {

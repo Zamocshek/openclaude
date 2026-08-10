@@ -11,7 +11,7 @@ describe('agent gateway config normalization', () => {
       getDefaultAgentGatewayConfig().subagents.routes['gateway-vision'],
     ).toEqual({
       provider: 'codex',
-      model: 'gpt-5.6-sol?reasoning=medium',
+      model: 'gpt-5.6-sol?reasoning=ultra',
       baseUrl: 'https://chatgpt.com/backend-api/codex',
       apiKeyEnv: 'CODEX_API_KEY',
     })
@@ -42,20 +42,23 @@ describe('agent gateway config normalization', () => {
     expect(config.runner.timeoutMs).toBe(4 * 60 * 60 * 1000)
   })
 
-  test('normalizes and overrides the harness mode', () => {
-    expect(getDefaultAgentGatewayConfig().runner.harnessMode).toBe('adaptive')
+  test('migrates every harness configuration to the fixed Ouroboros mode', () => {
+    expect(getDefaultAgentGatewayConfig().runner.harnessMode).toBe('ouroboros')
     expect(normalizeAgentGatewayConfig({
       runner: { harnessMode: 'strict' },
-    }).runner.harnessMode).toBe('strict')
+    }).runner.harnessMode).toBe('ouroboros')
+    expect(normalizeAgentGatewayConfig({
+      runner: { harnessMode: 'ouroboros' },
+    }).runner.harnessMode).toBe('ouroboros')
     expect(normalizeAgentGatewayConfig({
       runner: { harnessMode: 'unknown' },
-    }).runner.harnessMode).toBe('adaptive')
+    }).runner.harnessMode).toBe('ouroboros')
 
     const next = applyAgentGatewayEnvOverrides(
       getDefaultAgentGatewayConfig(),
       { OPENCLAUDE_AGENT_HARNESS_MODE: 'minimal' } as NodeJS.ProcessEnv,
     )
-    expect(next.runner.harnessMode).toBe('minimal')
+    expect(next.runner.harnessMode).toBe('ouroboros')
   })
 
   test('allows env to disable Telegram mirroring for API responses', () => {

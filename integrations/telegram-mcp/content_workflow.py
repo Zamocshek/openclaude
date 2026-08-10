@@ -446,6 +446,66 @@ def get_post(conn: sqlite3.Connection, post_id: int) -> Optional[Dict[str, Any]]
     return _post_payload(row) if row else None
 
 
+def _source_reference_parts(reference: str) -> Optional[tuple[str, int]]:
+    text = str(reference or "").strip().split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    text = re.sub(r"^(?:https?://)?(?:www\.)?t\.me/", "", text, flags=re.IGNORECASE)
+    parts = [part for part in text.split("/") if part]
+    if len(parts) >= 3 and parts[-3].lower() == "c" and parts[-2].isdigit() and parts[-1].isdigit():
+        return f"-100{parts[-2]}", int(parts[-1])
+    if len(parts) >= 2 and parts[-1].isdigit():
+        return parts[-2].lstrip("@"), int(parts[-1])
+    return None
+
+
+def find_source_post_by_reference(
+    conn: sqlite3.Connection, reference: str
+) -> Optional[Dict[str, Any]]:
+    """Resolve ``@channel/123`` and public/private t.me post links."""
+
+    parsed = _source_reference_parts(reference)
+    if parsed is None:
+        return None
+    requested_chat, message_id = parsed
+    requested = requested_chat.lower().lstrip("@")
+    rows = conn.execute(
+        """
+        SELECT * FROM content_posts
+        WHERE role = 'source' AND message_id = ?
+        ORDER BY updated_at DESC, id DESC
+        """,
+        (message_id,),
+    ).fetchall()
+    for row in rows:
+        aliases = {
+            str(row["chat_id"] or "").lower().lstrip("@"),
+            str(row["peer_id"] or "").lower().lstrip("@"),
+        }
+        channel_rows = conn.execute(
+            """
+            SELECT chat_id, peer_id, username FROM content_channels
+            WHERE kind = 'source' AND account_id = ?
+              AND (chat_id IN (?, ?) OR peer_id IN (?, ?))
+            """,
+            (
+                row["account_id"],
+                row["chat_id"],
+                row["peer_id"],
+                row["chat_id"],
+                row["peer_id"],
+            ),
+        ).fetchall()
+        for channel in channel_rows:
+            aliases.update(
+                str(value or "").lower().lstrip("@")
+                for value in (channel["chat_id"], channel["peer_id"], channel["username"])
+            )
+        expanded = set(aliases)
+        expanded.update(alias.removeprefix("-100") for alias in aliases if alias.startswith("-100"))
+        if requested in expanded:
+            return _post_payload(row)
+    return None
+
+
 def list_posts(
     conn: sqlite3.Connection,
     *,
@@ -601,6 +661,7 @@ def mark_draft_published(
     draft = get_post(conn, draft_id)
     if not draft:
         raise ValueError(f"draft {draft_id} not found")
+    draft_meta = draft.get("meta") if isinstance(draft.get("meta"), dict) else {}
     published = store_post(
         conn,
         role="published",
@@ -612,7 +673,14 @@ def mark_draft_published(
         message_date=message_date,
         text=draft["text"],
         source_post_id=draft.get("source_post_id"),
-        meta={"draft_id": draft_id, "published_from": "content_workflow"},
+        meta={
+            "draft_id": draft_id,
+            "published_from": "content_workflow",
+            "format_mode": draft_meta.get("format_mode"),
+            "formatted_text": draft_meta.get("formatted_text"),
+            "source_reference": draft_meta.get("source_reference"),
+            "source_formatting_guard": draft_meta.get("source_formatting_guard"),
+        },
     )
     set_post_status(conn, draft_id, "published")
     return published

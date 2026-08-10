@@ -9,6 +9,11 @@ declare const MACRO: {
   ISSUES_EXPLAINER?: string
 }
 
+declare module '*.md' {
+  const content: string
+  export default content
+}
+
 declare module 'qrcode' {
   const qrcode: {
     toString(...args: any[]): Promise<string>
