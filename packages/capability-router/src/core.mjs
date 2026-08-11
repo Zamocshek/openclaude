@@ -205,15 +205,15 @@ function discoverSkills(roots, maxDepth = 7) {
   const found = new Map()
   const visit = (directory, depth) => {
     if (depth > maxDepth || !existsSync(directory)) return
+    const skill = skillMetadata(directory)
+    if (skill) {
+      if (!found.has(skill.name)) found.set(skill.name, skill)
+      return
+    }
     let entries
     try {
       entries = readdirSync(directory, { withFileTypes: true })
     } catch {
-      return
-    }
-    const skill = skillMetadata(directory)
-    if (skill) {
-      if (!found.has(skill.name)) found.set(skill.name, skill)
       return
     }
     for (const entry of entries) {
@@ -287,10 +287,13 @@ export class CapabilityRouter {
     this.connectionAttempts = new Map()
     this.serverSignatures = new Map()
     this.toolCache = new Map()
-    this.reload()
+    this.skills = []
+    this.skillRoots = []
+    this.skillsLoaded = false
+    this.reload({ skills: options.deferSkillDiscovery !== true })
   }
 
-  reload() {
+  reload(options = {}) {
     const registry = readJson(this.registryPath, { schemaVersion: 1, servers: {}, skillRoots: [] })
     const config = readJson(this.mcpConfigPath, { mcpServers: {} })
     this.state = { ...DEFAULT_STATE, ...readJson(this.statePath, DEFAULT_STATE) }
@@ -314,20 +317,36 @@ export class CapabilityRouter {
     this.serverSignatures = signatures
     for (const name of staleConnections) void this.disconnect(name)
     this.components = Array.isArray(registry.components) ? registry.components : []
-    const configuredRoots = [
+    this.skillRoots = [...new Set([
       this.skillStoreRoot,
       ...stringArray(registry.skillRoots).map(path => resolve(this.workspaceRoot, path)),
       ...String(this.environment.CAPABILITY_ROUTER_SKILL_ROOTS || '')
         .split(process.platform === 'win32' ? ';' : ':')
         .filter(Boolean)
         .map(path => resolve(path)),
-    ]
+    ])]
+    if (options.skills !== false) {
+      this.reloadSkills()
+    } else if (this.skillsLoaded) {
+      const disabledSkills = new Set(stringArray(this.state.disabledSkills))
+      for (const skill of this.skills) skill.enabled = !disabledSkills.has(skill.name)
+    }
+    return this.snapshot()
+  }
+
+  reloadSkills() {
     const disabledSkills = new Set(stringArray(this.state.disabledSkills))
-    this.skills = discoverSkills([...new Set(configuredRoots)]).map(skill => ({
+    this.skills = discoverSkills(this.skillRoots).map(skill => ({
       ...skill,
       enabled: !disabledSkills.has(skill.name),
     }))
-    return this.snapshot()
+    this.skillsLoaded = true
+    return this.skills
+  }
+
+  ensureSkillsLoaded() {
+    if (!this.skillsLoaded) this.reloadSkills()
+    return this.skills
   }
 
   snapshot() {
@@ -346,6 +365,7 @@ export class CapabilityRouter {
         connected: this.clients.has(server.name),
       })),
       skills: this.skills.map(({ path, ...skill }) => skill),
+      skillsLoaded: this.skillsLoaded,
       components: this.components,
     }
   }
@@ -364,7 +384,11 @@ export class CapabilityRouter {
     this.state[key] = [...disabled].sort()
     this.persistState()
     if (kind === 'server' && !enabled) void this.disconnect(name)
-    this.reload()
+    if (kind === 'server') {
+      this.reload({ skills: false })
+    } else if (this.skillsLoaded) {
+      for (const skill of this.skills) skill.enabled = !disabled.has(skill.name)
+    }
     return { kind, name, enabled }
   }
 
@@ -385,11 +409,12 @@ export class CapabilityRouter {
       },
     }
     this.persistState()
-    this.reload()
+    this.reload({ skills: false })
     return { imported: validated.map(([name]) => name).sort() }
   }
 
   exportRegistry() {
+    this.ensureSkillsLoaded()
     return {
       schemaVersion: 1,
       mcpServers: Object.fromEntries([...this.servers.values()].map(server => [server.name, {
@@ -551,6 +576,7 @@ export class CapabilityRouter {
   async route(taskValue, options = {}) {
     const task = String(taskValue || '').trim()
     if (!task) throw new Error('task is required')
+    this.ensureSkillsLoaded()
     const excluded = new Set(stringArray(options.excluded))
     const preferred = stringArray(options.preferred)
       .map(name => name.toLowerCase())
@@ -645,10 +671,12 @@ export class CapabilityRouter {
   }
 
   listSkills() {
+    this.ensureSkillsLoaded()
     return this.skills.map(({ path, ...skill }) => skill)
   }
 
   readSkill(nameValue) {
+    this.ensureSkillsLoaded()
     const name = normalizeName(nameValue, 'skill').replaceAll('.', '-')
     const skill = this.skills.find(item => item.name === name)
     if (!skill || !skill.enabled) throw new Error(`Skill is unavailable or disabled: ${name}`)
@@ -682,7 +710,7 @@ export class CapabilityRouter {
       mkdirSync(dirname(target), { recursive: true })
       writeFileSync(target, String(content), 'utf8')
     }
-    this.reload()
+    this.reloadSkills()
     return this.readSkill(name)
   }
 

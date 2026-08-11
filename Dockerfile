@@ -46,10 +46,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       dnsutils \
+      ffmpeg \
       git \
       gosu \
       iputils-ping \
       jq \
+      libgomp1 \
       netcat-openbsd \
       nmap \
       openssh-client \
@@ -61,6 +63,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sshpass \
       whois \
     && rm -rf /var/lib/apt/lists/*
+
+COPY integrations/local-transcription/requirements.txt /tmp/openclaude-stt-requirements.txt
+RUN python3 -m venv /opt/openclaude-stt \
+    && /opt/openclaude-stt/bin/pip install --no-cache-dir \
+      -r /tmp/openclaude-stt-requirements.txt \
+    && rm -f /tmp/openclaude-stt-requirements.txt
 
 ARG UV_VERSION=0.11.32
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
@@ -90,6 +98,7 @@ COPY scripts/release/hindsight-mcp-bridge.cjs scripts/release/hindsight-mcp-brid
 COPY scripts/release/hindsight-control.mjs scripts/release/hindsight-control.mjs
 COPY scripts/release/test-hindsight-mcp-bridge.cjs scripts/release/test-hindsight-mcp-bridge.cjs
 COPY scripts/run-project-mcp.cjs scripts/run-project-mcp.cjs
+COPY scripts/capability-router-launcher.cjs scripts/capability-router-launcher.cjs
 COPY scripts/run-npx-mcp.cjs scripts/run-npx-mcp.cjs
 COPY scripts/pentest-mcp.cjs scripts/pentest-mcp.cjs
 
@@ -106,6 +115,7 @@ COPY scripts/release/ssh-doctor.mjs scripts/release/ssh-doctor.mjs
 COPY scripts/release/ssh-access.sh scripts/release/ssh-access.sh
 COPY scripts/release/vps-ssh-bootstrap.sh scripts/release/vps-ssh-bootstrap.sh
 COPY scripts/agent-migration/ scripts/agent-migration/
+COPY integrations/local-transcription/ integrations/local-transcription/
 COPY capability-registry.json capability-registry.json
 COPY packages/capability-router/ packages/capability-router/
 COPY skills/agent-migration/ skills/agent-migration/
@@ -117,9 +127,11 @@ RUN chmod +x scripts/docker-entrypoint.sh \
     && chmod +x scripts/release/ssh-access.sh \
     && chmod +x scripts/release/vps-ssh-bootstrap.sh \
     && chmod +x scripts/agent-migration/cli.mjs \
+    && chmod +x integrations/local-transcription/transcribe.py \
     && ln -sf /app/scripts/release/ssh-doctor.mjs /usr/local/bin/openclaude-ssh-doctor \
     && ln -sf /app/scripts/release/ssh-access.sh /usr/local/bin/openclaude-ssh \
     && ln -sf /app/scripts/agent-migration/cli.mjs /usr/local/bin/openclaude-migrate \
+    && ln -sf /app/integrations/local-transcription/transcribe.py /usr/local/bin/openclaude-transcribe \
     && ln -sf /app/node_modules/@colbymchenry/codegraph/npm-shim.js /usr/local/bin/codegraph \
     && ln -sf /app/node_modules/mcp-searxng/dist/cli.js /usr/local/bin/mcp-searxng \
     && ln -sf /app/node_modules/@upstash/context7-mcp/dist/index.js /usr/local/bin/context7-mcp \

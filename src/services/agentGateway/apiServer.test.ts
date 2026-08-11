@@ -163,6 +163,7 @@ describe('AgentApiServer', () => {
   let previousClaudeConfigDir: string | undefined
   let previousRunnerDisableTools: string | undefined
   let previousRouterAutoAuth: string | undefined
+  let previousConsoleAutoSession: string | undefined
   let previousDisabledSkills: string | undefined
   let tempGatewayStateDir: string | undefined
 
@@ -173,8 +174,10 @@ describe('AgentApiServer', () => {
     previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
     previousRunnerDisableTools = process.env.OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS
     previousRouterAutoAuth = process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
+    previousConsoleAutoSession = process.env.OPENCLAUDE_CONSOLE_AUTO_SESSION
     previousDisabledSkills = process.env.OPENCLAUDE_DISABLED_SKILLS
     delete process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
+    delete process.env.OPENCLAUDE_CONSOLE_AUTO_SESSION
     delete process.env.OPENCLAUDE_DISABLED_SKILLS
     tempGatewayStateDir = await mkdtemp(join(tmpdir(), 'openclaude-api-server-'))
     process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = tempGatewayStateDir
@@ -203,6 +206,11 @@ describe('AgentApiServer', () => {
       delete process.env.OPENCLAUDE_ROUTER_AUTO_AUTH
     } else {
       process.env.OPENCLAUDE_ROUTER_AUTO_AUTH = previousRouterAutoAuth
+    }
+    if (previousConsoleAutoSession === undefined) {
+      delete process.env.OPENCLAUDE_CONSOLE_AUTO_SESSION
+    } else {
+      process.env.OPENCLAUDE_CONSOLE_AUTO_SESSION = previousConsoleAutoSession
     }
     if (previousDisabledSkills === undefined) {
       delete process.env.OPENCLAUDE_DISABLED_SKILLS
@@ -1006,7 +1014,10 @@ describe('AgentApiServer', () => {
 
     const page = await fetch(`${server.url}/files`)
     expect(page.status).toBe(200)
-    expect(await page.text()).toContain('OpenClaude Files')
+    const pageText = await page.text()
+    expect(pageText).toContain('OpenClaude Files')
+    expect(pageText).toContain('/api/ui/session')
+    expect(pageText).not.toContain('const embeddedApiKey="secret"')
 
     const headers = { Authorization: 'Bearer secret' }
     expect((await fetch(`${server.url}/api/files`)).status).toBe(401)
@@ -1057,6 +1068,67 @@ describe('AgentApiServer', () => {
       headers,
     })
     expect(deleted.status).toBe(200)
+  })
+
+  test('opens a loopback-only HttpOnly console session without exposing the API key', async () => {
+    const projectRoot = join(tempGatewayStateDir!, 'project')
+    await mkdir(projectRoot, { recursive: true })
+    await writeFile(join(projectRoot, 'session-check.txt'), 'ready', 'utf8')
+    process.env.OPENCLAUDE_CONSOLE_AUTO_SESSION = '1'
+    const { AgentApiServer } = await import('./apiServer.js')
+    server = new AgentApiServer({
+      config: testConfig({
+        api: { apiKey: 'console-secret' } as never,
+        runner: { cwd: projectRoot } as never,
+      }),
+    })
+    await server.start()
+
+    const page = await fetch(`${server.url}/files`)
+    const pageText = await page.text()
+    expect(pageText).not.toContain('console-secret')
+    const setCookie = page.headers.get('set-cookie') || ''
+    expect(setCookie).toContain('openclaude_ui_session=')
+    expect(setCookie).toContain('HttpOnly')
+    expect(setCookie).toContain('SameSite=Strict')
+    const cookie = setCookie.split(';', 1)[0]
+
+    const sessionResponse = await fetch(`${server.url}/api/ui/session`, {
+      headers: { Cookie: cookie },
+    })
+    expect(sessionResponse.status).toBe(200)
+    const session = await sessionResponse.json() as { csrfToken: string }
+    expect(session.csrfToken.length).toBeGreaterThan(16)
+
+    const listed = await fetch(`${server.url}/api/files`, {
+      headers: { Cookie: cookie },
+    })
+    expect(listed.status).toBe(200)
+    expect(JSON.stringify(await listed.json())).toContain('session-check.txt')
+
+    const rejectedMutation = await fetch(`${server.url}/api/files/folder`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: 'csrf-rejected' }),
+    })
+    expect(rejectedMutation.status).toBe(403)
+
+    const acceptedMutation = await fetch(`${server.url}/api/files/folder`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: server.url,
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': session.csrfToken,
+      },
+      body: JSON.stringify({ path: 'csrf-accepted' }),
+    })
+    expect(acceptedMutation.status).toBe(201)
+
+    const remoteHostPage = await fetch(`${server.url}/files`, {
+      headers: { Host: 'agent.example.com' },
+    })
+    expect(remoteHostPage.headers.get('set-cookie')).toBeNull()
   })
 
   test('browses and creates native skills through the protected Skill Store API', async () => {

@@ -46,7 +46,7 @@ export type AgentGatewayConfig = {
     maxDownloadBytes: number
     maxUploadBytes: number
     transcribeAudio: boolean
-    transcriptionProvider: 'auto' | 'whisper' | 'parakeet' | 'openai'
+    transcriptionProvider: 'auto' | 'local' | 'whisper' | 'parakeet' | 'openai'
     transcriptionWhisperModel: string
     transcriptionOpenAIModel: string
     transcriptionTimeoutMs: number
@@ -512,6 +512,7 @@ function normalizeTranscriptionProvider(
 ): AgentGatewayConfig['telegram']['transcriptionProvider'] {
   if (
     value === 'whisper' ||
+    value === 'local' ||
     value === 'parakeet' ||
     value === 'openai' ||
     value === 'auto'
@@ -639,6 +640,9 @@ export function applyAgentGatewayEnvOverrides(
       transcriptionOpenAIModel:
         env.OPENCLAUDE_TELEGRAM_TRANSCRIPTION_OPENAI_MODEL ??
         config.telegram.transcriptionOpenAIModel,
+      transcriptionTimeoutMs:
+        env.OPENCLAUDE_TELEGRAM_TRANSCRIPTION_TIMEOUT_MS ??
+        config.telegram.transcriptionTimeoutMs,
       replyWithTranscript:
         telegramReplyWithTranscript ?? config.telegram.replyWithTranscript,
     },

@@ -4,12 +4,13 @@ import { basename, extname, join } from 'path'
 import { randomUUID } from 'crypto'
 import { getAgentGatewayStateDir } from './config.js'
 
-export type TranscriptionProvider = 'auto' | 'whisper' | 'parakeet' | 'openai'
+export type TranscriptionProvider = 'auto' | 'local' | 'whisper' | 'parakeet' | 'openai'
+type ResolvedTranscriptionProvider = Exclude<TranscriptionProvider, 'auto'>
 
 export type TranscriptionResult = {
   text: string
   outputPath?: string
-  provider?: Exclude<TranscriptionProvider, 'auto'>
+  provider?: ResolvedTranscriptionProvider
 }
 
 export type TranscriptionConfig = {
@@ -24,6 +25,7 @@ export type TranscriptionConfig = {
 
 const DEFAULT_TIMEOUT_MS = 120_000
 const DEFAULT_WHISPER_MODEL = 'base'
+const DEFAULT_LOCAL_TRANSCRIPTION_COMMAND = 'openclaude-transcribe'
 
 function transcribeTempDir(): string {
   return join(getAgentGatewayStateDir(), 'transcriptions')
@@ -102,31 +104,80 @@ export async function transcribeWithParakeet(
 }
 
 /**
+ * Transcribe through the portable local adapter bundled with Docker releases.
+ * The command contract is agent-neutral and can be moved with the integration.
+ */
+export async function transcribeWithLocal(
+  audioPath: string,
+  config: TranscriptionConfig = {},
+): Promise<TranscriptionResult> {
+  const { whisperModel = DEFAULT_WHISPER_MODEL, timeoutMs = DEFAULT_TIMEOUT_MS } = config
+  const outDir = await mkdir(transcribeTempDir(), { recursive: true }).then(() => transcribeTempDir())
+  const outputPath = join(
+    outDir,
+    `${basename(audioPath, extname(audioPath))}.local.txt`,
+  )
+  const command = localTranscriptionCommand()
+  await execFileAsync(
+    command.executable,
+    [
+      ...command.args,
+      '--input', audioPath,
+      '--output', outputPath,
+      '--model', whisperModel,
+    ],
+    { timeout: timeoutMs },
+  )
+  const text = stripTimestampMarkers(await readFile(outputPath, 'utf8'))
+  return { text, outputPath, provider: 'local' }
+}
+
+/**
  * Detect which transcription tool is available on this system.
  * Returns 'whisper', 'parakeet', 'openai', or null.
  */
 export async function detectTranscriptionTool(
   preferred: TranscriptionProvider = 'auto',
-): Promise<'whisper' | 'parakeet' | 'openai' | null> {
+  commandAvailable: (
+    command: string,
+    args?: string[],
+  ) => Promise<boolean> = isCommandAvailable,
+): Promise<ResolvedTranscriptionProvider | null> {
   if (preferred === 'openai') {
     return process.env.OPENAI_API_KEY ? 'openai' : null
   }
+  if (preferred === 'local') {
+    const command = localTranscriptionCommand()
+    return await commandAvailable(command.executable, [...command.args, '--health'])
+      ? 'local'
+      : null
+  }
   if (preferred === 'whisper') {
-    return await isCommandAvailable('whisper') ? 'whisper' : null
+    return await commandAvailable('whisper') ? 'whisper' : null
   }
   if (preferred === 'parakeet') {
-    return await isCommandAvailable('parakeet-mlx') ? 'parakeet' : null
+    return await commandAvailable('parakeet-mlx') ? 'parakeet' : null
+  }
+
+  const localCommand = localTranscriptionCommand()
+  if (
+    await commandAvailable(
+      localCommand.executable,
+      [...localCommand.args, '--health'],
+    )
+  ) {
+    return 'local'
   }
 
   const isWindows = process.platform === 'win32'
 
   if (isWindows) {
-    return await isCommandAvailable('whisper') ? 'whisper' : null
+    return await commandAvailable('whisper') ? 'whisper' : null
   }
 
   // macOS / Linux
-  if (await isCommandAvailable('parakeet-mlx')) return 'parakeet'
-  if (process.platform !== 'darwin' && await isCommandAvailable('whisper')) {
+  if (await commandAvailable('parakeet-mlx')) return 'parakeet'
+  if (process.platform !== 'darwin' && await commandAvailable('whisper')) {
     return 'whisper'
   }
   return null
@@ -142,9 +193,12 @@ export async function transcribeAudio(
   const tool = await detectTranscriptionTool(config.provider)
   if (!tool) {
     throw new Error(
-      'No transcription tool available. Install whisper: pip install openai-whisper (ffmpeg also required). ' +
-      'On macOS, parakeet-mlx is preferred. For external STT, set provider=openai and OPENAI_API_KEY.',
+      'No transcription tool available. Install the portable local-transcription adapter, ' +
+      'whisper, or parakeet-mlx. For external STT, set provider=openai and OPENAI_API_KEY.',
     )
+  }
+  if (tool === 'local') {
+    return transcribeWithLocal(audioPath, config)
   }
   if (tool === 'whisper') {
     return transcribeWithWhisper(audioPath, config)
@@ -221,9 +275,29 @@ function execFileAsync(
   })
 }
 
-async function isCommandAvailable(command: string): Promise<boolean> {
+function localTranscriptionCommand(): { executable: string; args: string[] } {
+  const executable = String(
+    process.env.OPENCLAUDE_TRANSCRIBE_COMMAND || DEFAULT_LOCAL_TRANSCRIPTION_COMMAND,
+  ).trim() || DEFAULT_LOCAL_TRANSCRIPTION_COMMAND
+  const rawArgs = String(process.env.OPENCLAUDE_TRANSCRIBE_COMMAND_ARGS || '').trim()
+  if (!rawArgs) return { executable, args: [] }
   try {
-    await execFileAsync(command, ['--help'], { timeout: 10_000 })
+    const parsed = JSON.parse(rawArgs)
+    return {
+      executable,
+      args: Array.isArray(parsed) ? parsed.map(value => String(value)) : [],
+    }
+  } catch {
+    return { executable, args: [] }
+  }
+}
+
+async function isCommandAvailable(
+  command: string,
+  args: string[] = ['--help'],
+): Promise<boolean> {
+  try {
+    await execFileAsync(command, args, { timeout: 10_000 })
     return true
   } catch {
     return false

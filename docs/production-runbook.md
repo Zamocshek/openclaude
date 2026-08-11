@@ -15,8 +15,9 @@ SearXNG, Telegram MCP, skills, memory, cron, and model-driven subagents.
 - The production compose profile runs the agent as root inside its container
   so it can manage the mounted workspace, but disables Docker `privileged`
   mode. Enable wider host or Docker access only as an explicit operator choice.
-- Tool Router auto-auth is disabled in production. Enter the admin key in the
-  browser session when using the Router or File Manager.
+- The admin key is never embedded in Router or File Manager HTML. Loopback
+  pages receive a signed HttpOnly browser session; remote hosts ask for the key
+  once and exchange it for the same short-lived session.
 - Public access must go through an authenticated TLS reverse proxy. Do not set
   bind addresses to `0.0.0.0` unless `OPENCLAUDE_ALLOW_PUBLIC_BIND=1` is an
   intentional and reviewed change.
@@ -44,7 +45,7 @@ docker compose -f docker-compose.agent-gateway.yml -f docker-compose.production.
 ```
 
 Verification checks gateway readiness, the inference-only OpenAI API,
-OmniRoute, OpenWebUI, Telegram MCP, SearXNG, Ollama, Hindsight, OpenRAG,
+the protected File Manager API, OmniRoute, OpenWebUI, Telegram MCP, SearXNG, Ollama, Hindsight, OpenRAG,
 Langflow, Docling, service state, and loopback-only published ports.
 
 OpenRAG launchers pin the complete official `0.5.1` image family by default,

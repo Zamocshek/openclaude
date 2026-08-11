@@ -17,6 +17,7 @@
       "capability-registry.json",
       "scripts",
       "integrations/telegram-mcp",
+      "integrations/local-transcription",
       ".mcp.json",
       "package.json",
       "bun.lock",
@@ -44,6 +45,14 @@
       {
         "id": "capability-router",
         "root": "packages/capability-router"
+      },
+      {
+        "id": "telegram-mcp",
+        "root": "integrations/telegram-mcp"
+      },
+      {
+        "id": "local-transcription",
+        "root": "integrations/local-transcription"
       }
     ],
     "skillRoots": [

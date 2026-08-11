@@ -18,6 +18,8 @@ OpenClaw, or Codex profile.
   config shape.
 - Portable components are copied with their own manifests and dependencies;
   they do not import NOVA or Gateway internals.
+- Telegram MCP and local transcription are declared components, so account
+  automation and file-first voice handling move without the NOVA runtime.
 - Target agents receive one lazy `capability-router` MCP by default, so a task
   sees five facade tools instead of every downstream schema.
 - Full history remains in canonical JSONL even when a target has no stable

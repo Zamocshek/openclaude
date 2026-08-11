@@ -78,6 +78,23 @@
       "image": "diegosouzapw/omniroute:latest",
       "port": 20128,
       "description": "OpenAI-compatible provider and model router deployed as an independent service."
+    },
+    {
+      "id": "telegram-mcp",
+      "name": "Telegram MCP",
+      "kind": "mcp-server",
+      "root": "integrations/telegram-mcp",
+      "mcpEntrypoint": "main.py",
+      "webEntrypoint": "web_app.py",
+      "description": "Self-contained Telegram account, Bot API, Maton, media, and channel automation server."
+    },
+    {
+      "id": "local-transcription",
+      "name": "Local Transcription",
+      "kind": "audio-transcription",
+      "root": "integrations/local-transcription",
+      "cliEntrypoint": "transcribe.py",
+      "description": "Agent-neutral faster-whisper CLI for local voice commands and audio-file transcription."
     }
   ]
 }

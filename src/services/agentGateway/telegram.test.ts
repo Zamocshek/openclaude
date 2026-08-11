@@ -12,6 +12,7 @@ import {
   buildTelegramHelpText,
   buildTelegramControlKeyboard,
   buildTelegramAndroidKeyboard,
+  buildTelegramAudioAgentText,
   buildTelegramMcpKeyboard,
   buildTelegramModelKeyboard,
   buildTelegramProviderKeyboard,
@@ -1532,6 +1533,30 @@ describe('agent gateway Telegram bridge helpers', () => {
         },
       }),
     ).toBeUndefined()
+  })
+
+  test('uses a voice transcript as the command when STT succeeds', () => {
+    expect(buildTelegramAudioAgentText({
+      caption: 'Use this command',
+      type: 'voice',
+      transcript: 'inspect the repository',
+      localPath: '/workspace/voice.ogg',
+    })).toBe([
+      'Use this command',
+      'Transcribed voice message:',
+      'inspect the repository',
+    ].join('\n'))
+  })
+
+  test('keeps the audio file actionable when transcription is unavailable', () => {
+    const prompt = buildTelegramAudioAgentText({
+      type: 'audio',
+      localPath: '/workspace/audio.mp3',
+      transcriptionError: 'local adapter unavailable',
+    })
+    expect(prompt).toContain('/workspace/audio.mp3')
+    expect(prompt).toContain('Inspect or process the attached local_path')
+    expect(prompt).toContain('Non-fatal transcription detail')
   })
 
   test('sanitizes Telegram file names for Windows paths', () => {

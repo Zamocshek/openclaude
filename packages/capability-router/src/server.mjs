@@ -120,7 +120,10 @@ export function createCapabilityMcpServer(router) {
         return await router.call(input.server, input.tool, input.arguments || {})
       }
       if (name === 'capability_registry') {
-        if (input.action === 'list') return resultText(router.snapshot())
+        if (input.action === 'list') {
+          router.ensureSkillsLoaded()
+          return resultText(router.snapshot())
+        }
         if (input.action === 'export') return resultText(router.exportRegistry())
         if (input.action === 'import') return resultText(router.importMcp(input.config))
         if (input.action === 'reload') return resultText(router.reload())

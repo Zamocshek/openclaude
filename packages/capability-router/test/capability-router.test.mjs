@@ -75,6 +75,26 @@ test('routes lazily and exposes only the bounded relevant tool set', async t => 
   assert.match(result.content[0].text, /called:inspect_code/u)
 })
 
+test('deferred skill discovery keeps MCP startup cheap and loads skills on demand', async t => {
+  const root = fixture()
+  const router = new CapabilityRouter({
+    workspaceRoot: root,
+    registryPath: join(root, 'capability-registry.json'),
+    mcpConfigPath: join(root, '.mcp.json'),
+    statePath: join(root, 'state', 'state.json'),
+    deferSkillDiscovery: true,
+  })
+  t.after(async () => {
+    await router.shutdown()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  assert.equal(router.snapshot().skillsLoaded, false)
+  assert.deepEqual(router.snapshot().skills, [])
+  assert.equal(router.listSkills()[0].name, 'code-review')
+  assert.equal(router.snapshot().skillsLoaded, true)
+})
+
 test('shares concurrent MCP connection attempts', async t => {
   const root = fixture()
   const router = new CapabilityRouter({

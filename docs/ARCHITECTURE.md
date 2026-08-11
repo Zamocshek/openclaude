@@ -230,10 +230,13 @@ Results saved to `memory/knowledge/self_insights.md`
 ### 2.10 Voice Transcription (`transcription.ts`)
 
 Automatic voice message transcription:
-- **Windows**: whisper (`pip install openai-whisper` + ffmpeg)
-- **macOS**: parakeet-mlx
-- Auto-detects available tool
-- Temp files cleaned up after processing
+- **Docker/default**: portable `faster-whisper` adapter from
+  `integrations/local-transcription`, with a persistent model cache
+- **Windows fallback**: whisper (`pip install openai-whisper` + ffmpeg)
+- **macOS fallback**: parakeet-mlx
+- Auto-detects the local adapter before platform-specific tools
+- Audio is file-first: the absolute attachment path always reaches the agent;
+  a transcript augments the command but an STT failure does not abort the task
 
 ### 2.11 Vision Routing (`vision.ts`, `subagentRuntime.ts`)
 

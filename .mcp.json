@@ -3,7 +3,7 @@
     "capability-router": {
       "command": "node",
       "args": [
-        "packages/capability-router/src/mcp.mjs"
+        "scripts/capability-router-launcher.cjs"
       ],
       "env": {
         "CAPABILITY_ROUTER_WORKSPACE_ROOT": ".",

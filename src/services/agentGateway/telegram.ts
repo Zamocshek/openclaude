@@ -37,6 +37,7 @@ import {
 } from './taskQuality.js'
 import { redactAgentText } from './redaction.js'
 import { detectTranscriptionTool, transcribeAudio } from './transcription.js'
+import { chunkTelegramText } from './telegramChunks.js'
 import {
   applyCuratedMemoryDirectives,
   buildCuratedMemorySystemInstructions,
@@ -2240,7 +2241,7 @@ export class TelegramAgentBridge {
     candidate: IncomingAttachmentCandidate,
   ): Promise<void> {
     try {
-      await this.sendMessage(chatId, `Transcribing ${candidate.type}...`)
+      await this.sendMessage(chatId, `Processing ${candidate.type}...`)
 
       const audioPath = await this.downloadTelegramFile(
         candidate,
@@ -2261,32 +2262,45 @@ export class TelegramAgentBridge {
       }
       await recordTelegramAttachment(chatId, message.message_id, attachment)
 
-      const transcription = await transcribeAudio(audioPath, {
-        provider: this.config.telegram.transcriptionProvider,
-        whisperModel: this.config.telegram.transcriptionWhisperModel,
-        openAIModel: this.config.telegram.transcriptionOpenAIModel,
-        timeoutMs: this.config.telegram.transcriptionTimeoutMs,
-      })
-      const transcribedText = transcription.text
-      attachment.transcript = transcribedText
-      attachment.transcriptPath = transcription.outputPath
+      let transcribedText = ''
+      try {
+        const transcription = await transcribeAudio(audioPath, {
+          provider: this.config.telegram.transcriptionProvider,
+          whisperModel: this.config.telegram.transcriptionWhisperModel,
+          openAIModel: this.config.telegram.transcriptionOpenAIModel,
+          timeoutMs: this.config.telegram.transcriptionTimeoutMs,
+        })
+        transcribedText = transcription.text
+        attachment.transcript = transcribedText || undefined
+        attachment.transcriptPath = transcription.outputPath
+        if (!transcribedText) {
+          attachment.transcriptionError = 'The transcription provider returned no text.'
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        attachment.transcriptionError = detail
+        await recordTelegramError(chatId, 'audio-transcription', detail)
+      }
+      await recordTelegramAttachment(chatId, message.message_id, attachment)
 
       if (!transcribedText) {
-        await this.sendMessage(chatId, "I couldn't transcribe the audio.")
-        return
+        await this.sendMessage(
+          chatId,
+          'Local transcription was unavailable, but the audio file was saved and will be passed to the agent.',
+        ).catch(() => {})
       }
 
-      if (this.config.telegram.replyWithTranscript) {
+      if (this.config.telegram.replyWithTranscript && transcribedText) {
         await this.sendTranscript(chatId, transcribedText, message.message_id)
       }
 
-      const agentText = [
+      const agentText = buildTelegramAudioAgentText({
         caption,
-        `Transcribed ${candidate.type} message:`,
-        transcribedText,
-      ]
-        .filter(Boolean)
-        .join('\n')
+        type: candidate.type,
+        transcript: transcribedText,
+        localPath: audioPath,
+        transcriptionError: attachment.transcriptionError,
+      })
       const activeMode = await this.getChatMode(chatId)
       const effectiveAgentText = applyTelegramResearchMode(activeMode, agentText)
       const providerProfile = await loadProviderProfile()
@@ -2298,10 +2312,10 @@ export class TelegramAgentBridge {
         sessionId,
       })
 
-      // Log the transcribed voice message to chat log
+      // Log the voice command and preserve the file-first fallback in history.
       await appendChatLog({
         direction: 'in',
-        text: `[${candidate.type} transcribed] ${effectiveAgentText}`,
+        text: `[${candidate.type}${transcribedText ? ' transcribed' : ' file'}] ${effectiveAgentText}`,
         chatId,
         ...(sessionId ? { sessionId } : {}),
         messageId: message.message_id,
@@ -2316,7 +2330,7 @@ export class TelegramAgentBridge {
           : {}),
       })
 
-      // Run the agent with the transcribed text
+      // Run the agent with the transcript or the saved audio attachment.
       const prompt = await buildTelegramAgentPromptWithMemory({
         chatId,
         messageId: message.message_id,
@@ -2331,7 +2345,7 @@ export class TelegramAgentBridge {
       const result = await this.runAgentWithProgress(
         chatId,
         prompt,
-        `Running agent from transcribed ${candidate.type}`,
+        `Running agent from ${candidate.type}`,
         { toolPolicy: activeMode === 'pentest' ? 'pentest' : undefined },
       )
 
@@ -2353,9 +2367,7 @@ export class TelegramAgentBridge {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)
       await recordTelegramError(chatId, 'audio-message', detail)
-      const errorMessage = err && (err as NodeJS.ErrnoException).code === 'ENOENT'
-        ? 'Audio transcription unavailable. Install whisper: pip install openai-whisper (ffmpeg also required), or configure OpenAI transcription explicitly.'
-        : `Error processing audio message: ${detail}`
+      const errorMessage = `Error processing audio file: ${detail}`
       await this.sendMessage(chatId, errorMessage)
     }
   }
@@ -2901,7 +2913,7 @@ export class TelegramAgentBridge {
     } else {
       await this.sendMessage(
         chatId,
-        'Audio transcription is NOT available.\nInstall whisper: pip install openai-whisper (ffmpeg also required in PATH), install parakeet-mlx, or set transcriptionProvider=openai with OPENAI_API_KEY.',
+        'Audio transcription is NOT available. The local-transcription adapter, whisper, parakeet-mlx, or an explicitly configured OpenAI STT provider is required.',
       )
     }
   }
@@ -8440,6 +8452,30 @@ export function getAudioTranscriptionCandidate(
   return undefined
 }
 
+export function buildTelegramAudioAgentText(input: {
+  caption?: string
+  type: string
+  transcript?: string
+  localPath: string
+  transcriptionError?: string
+}): string {
+  if (input.transcript?.trim()) {
+    return [
+      input.caption,
+      `Transcribed ${input.type} message:`,
+      input.transcript.trim(),
+    ].filter(Boolean).join('\n')
+  }
+  return [
+    input.caption,
+    `${input.type} message saved as a local audio attachment: ${input.localPath}`,
+    'No transcript is available. Inspect or process the attached local_path with the available audio and terminal tools, then continue the user request from the file contents.',
+    input.transcriptionError
+      ? `Non-fatal transcription detail: ${input.transcriptionError}`
+      : '',
+  ].filter(Boolean).join('\n')
+}
+
 export function selectLargestPhoto(
   photos: TelegramPhotoSize[] | undefined,
 ): TelegramPhotoSize | undefined {
@@ -8675,15 +8711,7 @@ function formatAttachmentForPrompt(attachment: TelegramAttachment): string {
   return lines.join('\n')
 }
 
-function splitTelegramText(text: string): string[] {
-  const maxLength = 3900
-  if (!text) return ['']
-  const chunks: string[] = []
-  for (let index = 0; index < text.length; index += maxLength) {
-    chunks.push(text.slice(index, index + maxLength))
-  }
-  return chunks
-}
+const splitTelegramText = chunkTelegramText
 
 function isTelegramPhotoFile(filePath: string): boolean {
   return ['.jpg', '.jpeg', '.png', '.webp'].includes(

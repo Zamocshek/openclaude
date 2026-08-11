@@ -500,7 +500,7 @@ function normalizeState(input) {
   state.telegram.maxDownloadBytes = Math.max(1_000_000, Number(state.telegram.maxDownloadBytes || DEFAULT_CONFIG.telegram.maxDownloadBytes))
   state.telegram.maxUploadBytes = Math.max(1_000_000, Number(state.telegram.maxUploadBytes || DEFAULT_CONFIG.telegram.maxUploadBytes))
   state.telegram.transcribeAudio = state.telegram.transcribeAudio !== false
-  state.telegram.transcriptionProvider = ['auto', 'whisper', 'parakeet', 'openai'].includes(state.telegram.transcriptionProvider) ? state.telegram.transcriptionProvider : 'auto'
+  state.telegram.transcriptionProvider = ['auto', 'local', 'whisper', 'parakeet', 'openai'].includes(state.telegram.transcriptionProvider) ? state.telegram.transcriptionProvider : 'auto'
   state.telegram.transcriptionWhisperModel = String(state.telegram.transcriptionWhisperModel || DEFAULT_CONFIG.telegram.transcriptionWhisperModel).trim()
   state.telegram.transcriptionOpenAIModel = String(state.telegram.transcriptionOpenAIModel || DEFAULT_CONFIG.telegram.transcriptionOpenAIModel).trim()
   state.telegram.replyWithTranscript = state.telegram.replyWithTranscript !== false
@@ -2242,6 +2242,7 @@ function html() {
         <label>Transcription provider
           <select id="transcriptionProvider">
             <option value="auto">auto</option>
+            <option value="local">local (faster-whisper)</option>
             <option value="whisper">whisper</option>
             <option value="parakeet">parakeet</option>
             <option value="openai">openai</option>

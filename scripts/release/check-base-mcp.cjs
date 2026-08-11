@@ -158,7 +158,7 @@ async function checkCapabilityRouter(server, projectRoot) {
   }))
   const transport = new StdioClientTransport({
     command: server?.command || process.execPath,
-    args: Array.isArray(server?.args) ? server.args.map(String) : ['packages/capability-router/src/mcp.mjs'],
+    args: Array.isArray(server?.args) ? server.args.map(String) : ['scripts/capability-router-launcher.cjs'],
     cwd: projectRoot,
     env: { ...process.env, ...configuredEnv },
     stderr: 'pipe',

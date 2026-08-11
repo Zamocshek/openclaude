@@ -383,6 +383,9 @@ export async function verify(options = {}) {
   await requestOk(`http://127.0.0.1:${apiPort}/files`, {
     key: env.OPENCLAUDE_AGENT_API_KEY,
   })
+  await requestOk(`http://127.0.0.1:${apiPort}/api/files`, {
+    key: env.OPENCLAUDE_AGENT_API_KEY,
+  })
   await requestOk(`http://127.0.0.1:${omniPort}/v1/models`, {
     key: env.OMNIROUTE_API_KEY,
   })

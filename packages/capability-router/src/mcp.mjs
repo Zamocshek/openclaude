@@ -5,7 +5,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CapabilityRouter } from './core.mjs'
 import { createCapabilityMcpServer } from './server.mjs'
 
-const router = new CapabilityRouter()
+// MCP discovery must answer its handshake before bind-mounted skill stores are scanned.
+const router = new CapabilityRouter({ deferSkillDiscovery: true })
 const server = createCapabilityMcpServer(router)
 const transport = new StdioServerTransport()
 let closing = false

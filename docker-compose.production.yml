@@ -6,6 +6,7 @@ services:
     privileged: false
     environment:
       OPENCLAUDE_ROUTER_AUTO_AUTH: "0"
+      OPENCLAUDE_CONSOLE_AUTO_SESSION: "1"
       OPENCLAUDE_AGENT_INFERENCE_API_KEY: "${OPENCLAUDE_AGENT_INFERENCE_API_KEY:?set OPENCLAUDE_AGENT_INFERENCE_API_KEY}"
     volumes: !override
       - type: bind

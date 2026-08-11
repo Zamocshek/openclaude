@@ -142,7 +142,9 @@ Telegram:
   context window for the active model; `unlimited` maps to the 1M client window
 - `/stop`, `/retry` - abort or retry the current Telegram inference task
 - `/files`, `/transcribe`, `/errors [n]` - inspect downloaded files,
-  transcription availability, and recent gateway errors
+  local transcription availability, and recent gateway errors. Voice messages
+  become commands when STT succeeds and remain actionable file attachments when
+  STT is unavailable.
 - `/schedule every 1h | prompt`, `/cron [list|reload|chatid|path|examples]`,
   `/jobs`, `/runjob <id>`, `/pausejob <id>`, `/resumejob <id>`,
   `/deletejob <id>` - manage scheduled agent jobs

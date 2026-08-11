@@ -109,6 +109,18 @@ import {
   runOpenClaudeAgentWithCompletionGate,
 } from './taskQuality.js'
 import { materializeVisionInput } from './vision.js'
+import {
+  buildWebSessionCookie,
+  clearWebSessionCookie,
+  constantTimeSecretEqual,
+  getWebSessionTtlMs,
+  isLoopbackWebRequest,
+  isSecureWebRequest,
+  isWebSessionAutoAuthEnabled,
+  issueWebSession,
+  validateWebSessionMutation,
+  webSessionFromRequest,
+} from './webSessionAuth.js'
 
 type AgentApiServerOptions = {
   config: AgentGatewayConfig
@@ -489,6 +501,7 @@ export class AgentApiServer {
         buildToolRouterHtml(getAgentGatewayWebLinks(this.config), {
           embeddedApiKey: getRouterAutoAuthKey(this.config),
         }),
+        this.webSessionPageHeaders(request),
       )
       return
     }
@@ -498,7 +511,13 @@ export class AgentApiServer {
         response,
         200,
         buildFileManagerHtml({ embeddedApiKey: getRouterAutoAuthKey(this.config) }),
+        this.webSessionPageHeaders(request),
       )
+      return
+    }
+
+    if (url.pathname === '/api/ui/session') {
+      await this.handleWebSession(request, response)
       return
     }
 
@@ -2652,8 +2671,93 @@ export class AgentApiServer {
       return true
     }
 
+    if (adminApiKey && pathname.startsWith('/api/')) {
+      const session = webSessionFromRequest(request, adminApiKey)
+      if (session) {
+        const error = validateWebSessionMutation(request, session)
+        if (!error) return true
+        this.writeJson(response, 403, openAiError(error))
+        return false
+      }
+    }
+
     this.writeJson(response, 401, openAiError('Invalid API key'))
     return false
+  }
+
+  private async handleWebSession(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const method = String(request.method || 'GET').toUpperCase()
+    const apiKey = this.config.api.apiKey
+    const secure = isSecureWebRequest(request)
+    if (method === 'DELETE') {
+      this.writeJson(response, 200, { authenticated: false }, {
+        'Set-Cookie': clearWebSessionCookie({ secure }),
+      })
+      return
+    }
+
+    if (!apiKey) {
+      this.writeJson(response, 200, { authenticated: true, csrfToken: '' })
+      return
+    }
+
+    if (method === 'GET') {
+      const session = webSessionFromRequest(request, apiKey)
+      if (!session) {
+        this.writeJson(response, 401, openAiError('UI session is not authenticated'))
+        return
+      }
+      this.writeJson(response, 200, {
+        authenticated: true,
+        csrfToken: session.csrfToken,
+        expiresAt: session.expiresAt,
+      })
+      return
+    }
+
+    if (method !== 'POST') {
+      this.writeJson(response, 405, openAiError('Method not allowed'))
+      return
+    }
+
+    const body = await this.readJson(request)
+    if (!constantTimeSecretEqual(String(body.apiKey || ''), apiKey)) {
+      this.writeJson(response, 401, openAiError('Invalid API key'))
+      return
+    }
+
+    const ttlMs = getWebSessionTtlMs()
+    const session = issueWebSession(apiKey, { ttlMs })
+    this.writeJson(response, 200, {
+      authenticated: true,
+      csrfToken: session.csrfToken,
+      expiresAt: session.expiresAt,
+    }, {
+      'Set-Cookie': buildWebSessionCookie(session.token, { secure, ttlMs }),
+    })
+  }
+
+  private webSessionPageHeaders(request: IncomingMessage): Record<string, string> {
+    const apiKey = this.config.api.apiKey
+    if (
+      !apiKey ||
+      !isWebSessionAutoAuthEnabled() ||
+      !isLoopbackWebRequest(request)
+    ) {
+      return {}
+    }
+    if (webSessionFromRequest(request, apiKey)) return {}
+    const ttlMs = getWebSessionTtlMs()
+    const session = issueWebSession(apiKey, { ttlMs })
+    return {
+      'Set-Cookie': buildWebSessionCookie(session.token, {
+        secure: isSecureWebRequest(request),
+        ttlMs,
+      }),
+    }
   }
 
   private trackRequestAbort(
@@ -2752,6 +2856,7 @@ export class AgentApiServer {
     response: ServerResponse,
     status: number,
     html: string,
+    headers: Record<string, string> = {},
   ): void {
     response.writeHead(status, {
       ...this.corsHeaders(),
@@ -2761,6 +2866,7 @@ export class AgentApiServer {
       Pragma: 'no-cache',
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
+      ...headers,
     })
     response.end(html)
   }
@@ -2807,7 +2913,7 @@ export class AgentApiServer {
     return {
       'Access-Control-Allow-Origin': allowOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-CSRF-Token, X-Hermes-Session-Id',
       'Access-Control-Expose-Headers': 'X-Hermes-Session-Id, X-Hermes-Queue-Id, X-Hermes-Queue-Position',
     }
   }
