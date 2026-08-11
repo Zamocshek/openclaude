@@ -95,6 +95,14 @@
       "root": "integrations/local-transcription",
       "cliEntrypoint": "transcribe.py",
       "description": "Agent-neutral faster-whisper CLI for local voice commands and audio-file transcription."
+    },
+    {
+      "id": "artifact-transport",
+      "name": "Artifact Transport",
+      "kind": "artifact-adapter",
+      "root": "scripts",
+      "cliEntrypoint": "register-artifact.mjs",
+      "description": "Agent-neutral validated marker contract for returning generated binary files across runtimes and Telegram recovery passes."
     }
   ]
 }

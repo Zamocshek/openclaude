@@ -36,6 +36,7 @@ import {
   formatTelegramConversationTranscript,
   formatTelegramAgentFailureForRecovery,
   getAgentRecoveryFailureSignature,
+  getAgentRecoveryProgressFingerprints,
   getAudioTranscriptionCandidate,
   getAttachmentCandidates,
   getTelegramAgentFailureKindLimit,
@@ -983,6 +984,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     })).toBe(true)
     expect(shouldRetryTelegramAgentFailure({
       ...base,
+      failureKind: 'loop_detected',
+    })).toBe(true)
+    expect(shouldRetryTelegramAgentFailure({
+      ...base,
       failureKind: 'timeout',
     })).toBe(true)
     expect(shouldRetryTelegramAgentFailure({
@@ -1058,6 +1063,11 @@ describe('agent gateway Telegram bridge helpers', () => {
           'Read: "/home/node/.openclaude/agent-gateway/cron-jobs.json"',
           'tool result error (Edit): requested permissions to edit a sensitive file',
         ],
+        artifacts: [{
+          path: '/workspace/output/voice.mp3',
+          kind: 'audio',
+          source: 'Bash',
+        }],
       },
     })
 
@@ -1066,9 +1076,97 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(prompt).toContain('Do not repeat the same failing command')
     expect(prompt).toContain('sensitive-file/tool error')
     expect(prompt).toContain('gateway API')
+    expect(prompt).toContain('Reuse every verified artifact')
+    expect(prompt).toContain('audio: /workspace/output/voice.mp3')
     expect(prompt).toContain('Recovery attempt: 2 / unlimited until Telegram Stop')
     expect(prompt).toContain('Failure kind: tool_error.')
     expect(prompt).toContain('Original Telegram task body')
+  })
+
+  test('requests one independent reviewer after the live loop watchdog fires', () => {
+    const prompt = buildTelegramAgentRecoveryPrompt({
+      originalPrompt: 'Complete the original task.',
+      recoveryAttempt: 1,
+      maxRecoveryAttempts: 2,
+      previousResult: {
+        text: '',
+        stderr: 'Agent loop watchdog detected repeated calls.',
+        exitCode: 1,
+        timedOut: false,
+        failureKind: 'loop_detected',
+        diagnostic: 'The live watchdog stopped a repeated tool route.',
+      },
+    })
+
+    expect(prompt).toContain('exactly one independent review subagent')
+    expect(prompt).toContain('materially different route')
+    expect(prompt).toContain('reuse completed state')
+
+    const laterPrompt = buildTelegramAgentRecoveryPrompt({
+      originalPrompt: 'Complete the original task.',
+      recoveryAttempt: 2,
+      maxRecoveryAttempts: 2,
+      requestLoopReviewer: false,
+      previousResult: {
+        text: '',
+        stderr: 'Agent loop watchdog detected repeated calls again.',
+        exitCode: 1,
+        timedOut: false,
+        failureKind: 'loop_detected',
+      },
+    })
+    expect(laterPrompt).not.toContain('independent review subagent')
+  })
+
+  test('tracks only durable new progress across recovery attempts', () => {
+    const mutationTargets = new Set<string>()
+    const progress = getAgentRecoveryProgressFingerprints({
+      text: '',
+      stderr: 'later provider failure',
+      exitCode: 1,
+      timedOut: false,
+      evidence: [
+        {
+          kind: 'mutation',
+          scope: 'workspace',
+          target: 'file:/workspace/app.ts',
+          sequence: 0,
+          success: true,
+          source: 'Edit',
+          fingerprint: 'edit-v2',
+        },
+        {
+          kind: 'verification',
+          scope: 'workspace',
+          target: 'file:/workspace/app.ts',
+          sequence: 1,
+          success: true,
+          source: 'Read',
+          fingerprint: 'read-v2',
+        },
+        {
+          kind: 'verification',
+          scope: 'workspace',
+          target: 'file:/workspace/unrelated.md',
+          sequence: 2,
+          success: true,
+          source: 'Read',
+          fingerprint: 'unrelated-read',
+        },
+      ],
+      artifacts: [{
+        path: '/workspace/output/voice.wav',
+        kind: 'audio',
+        source: 'Bash',
+      }],
+    }, mutationTargets)
+
+    expect(progress).toEqual([
+      'mutation:edit-v2',
+      'verification:read-v2',
+      'artifact:audio:/workspace/output/voice.wav',
+    ])
+    expect(mutationTargets).toContain('file:/workspace/app.ts')
   })
 
   test('formats failed agent diagnostics for recovery prompts', () => {
@@ -1431,12 +1529,14 @@ describe('agent gateway Telegram bridge helpers', () => {
       'Готово.',
       '[TELEGRAM_SEND_FILE path="C:\\tmp\\out.png" caption="скрин"]',
       '[TELEGRAM_SEND_FILE path=\'C:\\tmp\\report.pdf\']',
+      '[TELEGRAM_SEND_FILE path="C:\\tmp\\voice.mp3" kind="audio"]',
     ].join('\n'))
 
     expect(parsed.text).toBe('Готово.')
     expect(parsed.directives).toEqual([
       { path: 'C:\\tmp\\out.png', caption: 'скрин' },
       { path: 'C:\\tmp\\report.pdf' },
+      { path: 'C:\\tmp\\voice.mp3', kind: 'audio' },
     ])
   })
 
@@ -1468,6 +1568,12 @@ describe('agent gateway Telegram bridge helpers', () => {
           kind: 'image',
           source: 'mcp__camofox__camofox_screenshot',
         },
+        {
+          path: '/workspace/output/voice.mp3',
+          kind: 'audio',
+          source: 'Bash',
+          caption: 'Russian voice sample',
+        },
       ],
     )).toEqual([
       { path: '/workspace/output/browser.png', kind: 'image' },
@@ -1475,6 +1581,11 @@ describe('agent gateway Telegram bridge helpers', () => {
         path: '/workspace/output/second.png',
         kind: 'image',
         caption: 'Camofox browser result',
+      },
+      {
+        path: '/workspace/output/voice.mp3',
+        kind: 'audio',
+        caption: 'Russian voice sample',
       },
     ])
   })

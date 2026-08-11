@@ -17,11 +17,13 @@ import {
   buildPromptFromChatMessages,
   classifyAgentRunFailure,
   classifyAgentToolEvidence,
+  extractAgentArtifacts,
   extractVisualLocalPaths,
   extractCamofoxScreenshotArtifacts,
   extractStreamJsonAssistantText,
   extractStreamJsonResult,
   getAgentStallTimeoutMs,
+  getAgentTerminalResultGraceMs,
   hasStreamJsonToolUse,
   hasCodingMutationIntent,
   hasCodingTaskIntent,
@@ -1122,6 +1124,23 @@ describe('agent gateway prompt builder', () => {
     ).toEqual([])
   })
 
+  test('captures tool-declared binary artifacts without reading their bytes', () => {
+    expect(extractAgentArtifacts(
+      'Bash',
+      'OPENCLAUDE_ARTIFACT {"path":"/workspace/output/voice.mp3","kind":"audio","caption":"Russian sample","bytes":42}',
+    )).toEqual([{
+      path: '/workspace/output/voice.mp3',
+      kind: 'audio',
+      caption: 'Russian sample',
+      source: 'Bash',
+    }])
+
+    expect(extractAgentArtifacts(
+      'Bash',
+      'OPENCLAUDE_ARTIFACT {not-json}',
+    )).toEqual([])
+  })
+
   test('captures a successful Telegram session authorization continuation without secrets', () => {
     const context: StreamProgressContext = {
       toolUseById: new Map(),
@@ -1502,6 +1521,49 @@ describe('agent gateway prompt builder', () => {
     }
   })
 
+  test('finishes after a terminal success event even when the child process lingers', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-terminal-result-cli-'))
+    const fakeCli = join(cwd, 'fake-terminal-result-cli.cjs')
+    await writeFile(fakeCli, [
+      'console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Generated." }))',
+      'setInterval(() => {}, 1000)',
+    ].join('\n'))
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    const previousGrace = process.env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS
+    const previousState = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND =
+      `"${process.execPath}" "${fakeCli}"`
+    process.env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS = '25'
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = join(cwd, 'state')
+    try {
+      const config = getDefaultAgentGatewayConfig()
+      config.runner.timeoutMs = 5_000
+      config.subagents.enabled = false
+      const result = await runOpenClaudeAgent({
+        prompt: 'Generate one artifact.',
+        config,
+        cwd,
+        streamEvents: true,
+        suppressObservers: true,
+      })
+
+      expect(result.exitCode).toBe(0)
+      expect(result.text).toBe('Generated.')
+      expect(result.timedOut).toBe(false)
+      expect(result.durationMs).toBeLessThan(2_000)
+      expect(result.activity).toContain('result: success')
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+      if (previousGrace === undefined) delete process.env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS
+      else process.env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS = previousGrace
+      if (previousState === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousState
+      await new Promise(resolve => setTimeout(resolve, 250))
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   test('does not misclassify tool auth and rate-limit failures as provider state', () => {
     const toolUnauthorized = classifyAgentRunFailure({
       text: '',
@@ -1607,6 +1669,9 @@ describe('agent gateway prompt builder', () => {
     expect(getAgentStallTimeoutMs(60_000, {
       OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS: '0',
     })).toBe(0)
+    expect(getAgentTerminalResultGraceMs({
+      OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS: '750',
+    })).toBe(750)
   })
 
   test('stops a child whose stderr heartbeat does not represent agent progress', async () => {
@@ -1648,6 +1713,104 @@ describe('agent gateway prompt builder', () => {
       else process.env.OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS = previousStall
       if (previousState === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
       else process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousState
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('stops a repeated failed tool route before the global timeout', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-loop-cli-'))
+    const fakeCli = join(cwd, 'fake-loop-cli.cjs')
+    await writeFile(fakeCli, [
+      'for (let index = 0; index < 3; index += 1) {',
+      '  const id = `toolu_${index}`',
+      '  console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id, name: "Read", input: { file_path: "/workspace/missing.wav" } }] } }))',
+      '  console.log(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, is_error: true, content: [{ type: "text", text: "binary files cannot be read as text" }] }] } }))',
+      '}',
+      'setInterval(() => {}, 1000)',
+    ].join('\n'))
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    const previousLoopLimit = process.env.OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT
+    const previousState = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND =
+      `"${process.execPath}" "${fakeCli}"`
+    process.env.OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT = '3'
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = join(cwd, 'state')
+    try {
+      const config = getDefaultAgentGatewayConfig()
+      config.runner.timeoutMs = 5_000
+      config.subagents.enabled = false
+      const result = await runOpenClaudeAgent({
+        prompt: 'Finish the artifact task.',
+        config,
+        cwd,
+        streamEvents: true,
+        suppressObservers: true,
+      })
+
+      expect(result.exitCode).toBe(1)
+      expect(result.timedOut).toBe(false)
+      expect(result.failureKind).toBe('loop_detected')
+      expect(result.diagnostic).toContain('live watchdog')
+      expect(result.durationMs).toBeLessThan(3_000)
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+      if (previousLoopLimit === undefined) delete process.env.OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT
+      else process.env.OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT = previousLoopLimit
+      if (previousState === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousState
+      await new Promise(resolve => setTimeout(resolve, 250))
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('lets a terminal success in the same stream chunk win over loop abort', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'openclaude-agent-loop-success-cli-'))
+    const fakeCli = join(cwd, 'fake-loop-success-cli.cjs')
+    await writeFile(fakeCli, [
+      'const events = []',
+      'for (let index = 0; index < 3; index += 1) {',
+      '  const id = `toolu_${index}`',
+      '  events.push({ type: "assistant", message: { content: [{ type: "tool_use", id, name: "Read", input: { file_path: "/workspace/missing.wav" } }] } })',
+      '  events.push({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, is_error: true, content: [{ type: "text", text: "binary files cannot be read as text" }] }] } })',
+      '}',
+      'events.push({ type: "result", subtype: "success", is_error: false, result: "Recovered inside the turn." })',
+      'process.stdout.write(events.map(event => JSON.stringify(event)).join("\\n") + "\\n")',
+      'setInterval(() => {}, 1000)',
+    ].join('\n'))
+    const previousCommand = process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+    const previousLoopLimit = process.env.OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT
+    const previousGrace = process.env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS
+    const previousState = process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+    process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = `"${process.execPath}" "${fakeCli}"`
+    process.env.OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT = '3'
+    process.env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS = '25'
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = join(cwd, 'state')
+    try {
+      const config = getDefaultAgentGatewayConfig()
+      config.runner.timeoutMs = 5_000
+      config.subagents.enabled = false
+      const result = await runOpenClaudeAgent({
+        prompt: 'Finish the task.',
+        config,
+        cwd,
+        streamEvents: true,
+        suppressObservers: true,
+      })
+
+      expect(result.exitCode).toBe(0)
+      expect(result.text).toBe('Recovered inside the turn.')
+      expect(result.failureKind).toBeUndefined()
+    } finally {
+      if (previousCommand === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_COMMAND = previousCommand
+      if (previousLoopLimit === undefined) delete process.env.OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT
+      else process.env.OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT = previousLoopLimit
+      if (previousGrace === undefined) delete process.env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS
+      else process.env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS = previousGrace
+      if (previousState === undefined) delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+      else process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = previousState
+      await new Promise(resolve => setTimeout(resolve, 250))
       await rm(cwd, { recursive: true, force: true })
     }
   })

@@ -190,6 +190,25 @@ describe('agent gateway curated memory', () => {
     })
   })
 
+  test('loads legacy scratchpad blocks without rewriting their content', async () => {
+    await withGatewayMemoryState(async stateDir => {
+      const path = join(stateDir, 'memory', 'scratchpad_blocks.json')
+      const legacy = JSON.stringify([{
+        ts: '2026-08-11T12:00:00.000Z',
+        content: 'Preserve this legacy memory exactly.',
+      }], null, 2)
+      await mkdir(join(stateDir, 'memory'), { recursive: true })
+      await writeFile(path, legacy)
+
+      expect(await loadScratchpadBlocks()).toEqual([{
+        ts: '2026-08-11T12:00:00.000Z',
+        source: 'legacy-import',
+        content: 'Preserve this legacy memory exactly.',
+      }])
+      expect(await readFile(path, 'utf8')).toBe(legacy)
+    })
+  })
+
   test('preserves concurrent dialogue appends in one atomic state', async () => {
     await withGatewayMemoryState(async stateDir => {
       await Promise.all(Array.from({ length: 40 }, (_, index) =>

@@ -106,6 +106,7 @@ COPY scripts/pentest-mcp.cjs scripts/pentest-mcp.cjs
 # changes do not trigger a fresh apt install during every Docker rebuild.
 COPY scripts/gateway-control-mcp.mjs scripts/gateway-control-mcp.mjs
 COPY scripts/android-mcp-launcher.cjs scripts/android-mcp-launcher.cjs
+COPY scripts/register-artifact.mjs scripts/register-artifact.mjs
 
 COPY scripts/release/test-research-mcp.cjs scripts/release/test-research-mcp.cjs
 COPY scripts/release/test-pentest-mcp.cjs scripts/release/test-pentest-mcp.cjs
@@ -123,6 +124,7 @@ COPY skills/server-access/ skills/server-access/
 
 RUN chmod +x scripts/docker-entrypoint.sh \
     && chmod +x scripts/android-mcp-launcher.cjs \
+    && chmod +x scripts/register-artifact.mjs \
     && chmod +x scripts/release/ssh-doctor.mjs \
     && chmod +x scripts/release/ssh-access.sh \
     && chmod +x scripts/release/vps-ssh-bootstrap.sh \
@@ -131,6 +133,7 @@ RUN chmod +x scripts/docker-entrypoint.sh \
     && ln -sf /app/scripts/release/ssh-doctor.mjs /usr/local/bin/openclaude-ssh-doctor \
     && ln -sf /app/scripts/release/ssh-access.sh /usr/local/bin/openclaude-ssh \
     && ln -sf /app/scripts/agent-migration/cli.mjs /usr/local/bin/openclaude-migrate \
+    && ln -sf /app/scripts/register-artifact.mjs /usr/local/bin/openclaude-artifact \
     && ln -sf /app/integrations/local-transcription/transcribe.py /usr/local/bin/openclaude-transcribe \
     && ln -sf /app/node_modules/@colbymchenry/codegraph/npm-shim.js /usr/local/bin/codegraph \
     && ln -sf /app/node_modules/mcp-searxng/dist/cli.js /usr/local/bin/mcp-searxng \

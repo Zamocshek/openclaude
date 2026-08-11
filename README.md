@@ -569,14 +569,31 @@ passes are retained.
 For streaming OpenAI-compatible coding requests, the final answer is buffered
 until the gate passes while SSE keepalives keep OpenWebUI connections alive.
 
-Docker defaults allow up to 720 turns and 12 hours for the main gateway run;
-replica workers allow 240 turns and 4 hours. An independent structured-progress
+Docker defaults allow up to 720 turns and 30 minutes for the main gateway run;
+replica workers allow 240 turns and 20 minutes. An independent structured-progress
 watchdog stops a stalled child after 900000 ms without output by default; configure it with
 `OPENCLAUDE_AGENT_RUNNER_STALL_TIMEOUT_MS`, or set that variable to `0` to
 disable the watchdog. Telegram Stop still aborts the active child process
 immediately. Override the total run limits with
 `OPENCLAUDE_AGENT_RUNNER_MAX_TURNS`, `OPENCLAUDE_AGENT_RUNNER_TIMEOUT_MS`,
 `OPENCLAUDE_AGENT_WORKER_MAX_TURNS`, and `OPENCLAUDE_AGENT_WORKER_TIMEOUT_MS`.
+After a structured terminal success event, the gateway waits 1000 ms for normal
+CLI shutdown and then closes a lingering completed process; configure that grace
+with `OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS`.
+
+A live tool-loop watchdog also stops only the current execution branch after
+three identical failed tool completions occur without new mutation,
+verification, interaction, or artifact evidence. Successful calls and bounded
+background-task polling have higher derived thresholds. Telegram recovery keeps
+completed state, classifies the branch as `loop_detected`, asks one independent
+reviewer for a changed route when subagents are available, and continues the
+original request. The base failure threshold is exposed as
+`OPENCLAUDE_AGENT_LOOP_REPEAT_LIMIT`, but normally requires no tuning.
+
+Generated binary deliverables should be kept under the workspace and registered
+with `openclaude-artifact --path <file> --kind image|audio|document`. The runner
+captures this generic tool marker, preserves it across recovery attempts, and
+returns the file through Telegram without trying to read binary bytes as text.
 
 Telegram retries transient provider and network failures with exponential
 bounded backoff. The initial and maximum delays default to 1000 ms and 30000 ms

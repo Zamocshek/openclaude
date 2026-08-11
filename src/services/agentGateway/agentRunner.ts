@@ -8,7 +8,7 @@ import {
 } from 'fs'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { randomUUID } from 'crypto'
-import { dirname, join, resolve } from 'path'
+import { dirname, isAbsolute, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import stripAnsi from 'strip-ansi'
 import { isInBundledMode } from '../../utils/bundledMode.js'
@@ -57,6 +57,11 @@ import {
   gatewayAgentExecutionScheduler,
   type AgentExecutionClass,
 } from './agentExecutionScheduler.js'
+import {
+  AgentLoopWatchdog,
+  getAgentToolCompletionSignature,
+  type AgentLoopDetection,
+} from './agentLoopWatchdog.js'
 
 export { redactAgentText } from './redaction.js'
 export type { AgentRunPendingInteraction } from './agentInteractions.js'
@@ -115,16 +120,19 @@ export type AgentRunEvidence = {
   sequence: number
   success: boolean
   source: string
+  fingerprint?: string
 }
 
 export type AgentRunArtifact = {
   path: string
-  kind: 'image' | 'document'
+  kind: 'image' | 'audio' | 'document'
   source: string
+  caption?: string
 }
 
 export type AgentRunFailureKind =
   | 'timeout'
+  | 'loop_detected'
   | 'transient_network'
   | 'quality_gate'
   | 'rate_limit'
@@ -146,6 +154,7 @@ export type StreamProgressContext = {
   evidence?: AgentRunEvidence[]
   interactionCandidateByToolUseId?: Map<string, AgentRunPendingInteraction>
   pendingInteractions?: Map<string, AgentRunPendingInteraction>
+  assistantTurn?: number
 }
 
 export type AgentRunObserverContext = {
@@ -223,6 +232,12 @@ const TERMINAL_BENCH_APPEND_SYSTEM_PROMPT = [
   'After an error, classify it as command syntax, environment, dependency, permissions, timeout, test failure, or implementation failure and continue with a corrected action.',
   'Finish by running the relevant verifier or tests, inspecting generated artifacts and the final diff, and report any unverified requirement explicitly.',
 ].join(' ')
+const ARTIFACT_WORKFLOW_APPEND_SYSTEM_PROMPT = [
+  'Treat generated binary files as deliverables, not text input. Never call Read on audio, video, image, archive, database, model-weight, or other binary files.',
+  'Put requested outputs in a durable workspace directory such as /workspace/output instead of /tmp, then verify them with format-aware metadata tools such as file, ffprobe, identify, archive listing, checksums, or the project verifier; do not try to play media in a headless runtime.',
+  'After a generated file passes verification, register it with `openclaude-artifact --path <absolute-path> --kind image|audio|document --caption <optional>` (or `node scripts/register-artifact.mjs ...` outside Docker). The gateway captures that tool marker and returns the file to Telegram even across a recovery pass.',
+  'For a genuinely long command, use the runtime background-task mechanism, poll it with bounded status calls, and preserve downloads/caches outside /tmp. Once the required artifact exists, a failed optional inspection is not a reason to regenerate it; correct the verifier and continue from the existing output.',
+].join(' ')
 const OUROBOROS_HARNESS_APPEND_SYSTEM_PROMPT = [
   'Ouroboros evidence loop is active for this task.',
   'Before acting, turn the literal request into a compact task contract: objective, expected outputs, constraints, affected workspace, and a machine-checkable acceptance plan; keep it in TodoWrite when available.',
@@ -230,6 +245,8 @@ const OUROBOROS_HARNESS_APPEND_SYSTEM_PROMPT = [
   'After every mutation, run an unmasked verifier whose exit status represents the real command. A pipeline, `|| true`, or a success echo that can hide failure is not completion evidence.',
   'Before the final answer, inspect the final diff and artifacts, reconcile every failed verifier, and check each original requirement. State a concrete blocker or residual unverified boundary instead of claiming success without evidence.',
   'Delegate independent substantial branches when useful, but integrate their outputs and rerun root-level acceptance checks before delivery.',
+  'Self-correct before the runtime watchdog has to intervene: compare each failed tool result with the recent route, and after two failures of the same class stop changing only cosmetic arguments. Re-check the active task contract, inspect existing evidence, and switch the tool, prerequisite, scope, or verifier.',
+  'If failures keep accumulating without a new mutation, verified artifact, answered interaction, or acceptance result, request one independent reviewer subagent when available. Give it the active goal and compact failure evidence, use its recommendation once, then continue through a materially different route instead of recursively spawning reviewers.',
 ].join(' ')
 const HINDSIGHT_APPEND_SYSTEM_PROMPT = [
   'This request concerns durable memory. Use hindsight_recall for remembered facts, hindsight_retain for an explicit save, hindsight_forget for an explicit deletion, and hindsight_reflect only for synthesis.',
@@ -654,6 +671,12 @@ function getApiGatewayAppendSystemPrompt(
     parts.push(CODE_SKILL_PROMPT)
   }
   if (ouroborosTaskIntent) parts.push(OUROBOROS_HARNESS_APPEND_SYSTEM_PROMPT)
+  if (
+    ouroborosTaskIntent
+    && (hasRunnerTool('Bash') || hasRunnerTool('PowerShell'))
+  ) {
+    parts.push(ARTIFACT_WORKFLOW_APPEND_SYSTEM_PROMPT)
+  }
   const configuredModel =
     process.env.OPENCLAUDE_MODEL || process.env.OPENAI_MODEL || ''
   if (
@@ -1528,11 +1551,15 @@ function runOpenClaudeAgentProcess(
     let stderr = ''
     let timedOut = false
     let stalled = false
+    let loopDetected = false
     let settled = false
     let timeoutTimer: ReturnType<typeof setTimeout>
     let firstOutputTimer: ReturnType<typeof setTimeout> | undefined
     let stallTimer: ReturnType<typeof setTimeout> | undefined
+    let terminalResultTimer: ReturnType<typeof setTimeout> | undefined
     let forceResolveTimer: ReturnType<typeof setTimeout> | undefined
+    let abortDetectedLoop: ((detection: AgentLoopDetection) => void) | undefined
+    let pendingLoopDetection: AgentLoopDetection | undefined
     const activity: string[] = []
     const seenProgress = new Set<string>()
     const progressContext: StreamProgressContext = {
@@ -1544,6 +1571,7 @@ function runOpenClaudeAgentProcess(
       interactionCandidateByToolUseId: new Map(),
       pendingInteractions: new Map(),
     }
+    const loopWatchdog = new AgentLoopWatchdog()
 
     const recordProgress = (label: string) => {
       const normalized = redactAgentText(stripAnsi(label)).replace(/\s+/g, ' ').trim()
@@ -1627,6 +1655,12 @@ function runOpenClaudeAgentProcess(
       for (const event of summarizeStreamJsonProgress(message, progressContext)) {
         recordProgress(event)
       }
+      const loopDetection = observeStreamJsonLoop(
+        message,
+        progressContext,
+        loopWatchdog,
+      )
+      if (loopDetection) pendingLoopDetection ||= loopDetection
 
       const assistantText = extractStreamJsonAssistantText(message)
       if (hasStreamJsonToolUse(message)) {
@@ -1688,6 +1722,7 @@ function runOpenClaudeAgentProcess(
       clearTimeout(timeoutTimer)
       if (firstOutputTimer) clearTimeout(firstOutputTimer)
       if (stallTimer) clearTimeout(stallTimer)
+      if (terminalResultTimer) clearTimeout(terminalResultTimer)
       if (forceResolveTimer) clearTimeout(forceResolveTimer)
       options.signal?.removeEventListener('abort', onAbort)
       if (options.streamEvents && streamLineBuffer.trim()) {
@@ -1795,6 +1830,19 @@ function runOpenClaudeAgentProcess(
       resolve(result)
     }
 
+    abortDetectedLoop = detection => {
+      if (settled || loopDetected) return
+      loopDetected = true
+      recordProgress(`loop watchdog: repeated tool route stopped after ${detection.count} attempts`)
+      stderr = appendTailText(
+        stderr,
+        `\n${detection.diagnostic}`,
+        MAX_AGENT_STDERR_BUFFER_CHARS,
+      )
+      killProcessTree(proc)
+      forceResolveTimer = setTimeout(() => finish(1), 1000)
+    }
+
     const onAbort = () => {
       killProcessTree(proc)
       forceResolveTimer = setTimeout(() => finish(1), 1000)
@@ -1811,6 +1859,20 @@ function runOpenClaudeAgentProcess(
         firstOutputTimer = undefined
       }
       handleStdoutChunk(data)
+      if (sawSuccessfulStreamResult) {
+        pendingLoopDetection = undefined
+      } else if (pendingLoopDetection && !settled) {
+        const detection = pendingLoopDetection
+        pendingLoopDetection = undefined
+        abortDetectedLoop?.(detection)
+      }
+      if (sawSuccessfulStreamResult && !terminalResultTimer && !settled) {
+        terminalResultTimer = setTimeout(() => {
+          recordProgress('terminal result received; closing completed runtime')
+          finish(0)
+          killProcessTree(proc)
+        }, getAgentTerminalResultGraceMs())
+      }
     })
 
     proc.stderr.on('data', data => {
@@ -1895,6 +1957,16 @@ function invokeObserverSafely(callback: () => void | Promise<void> | undefined):
   } catch {
     // Observability hooks must not affect process lifecycle or cleanup.
   }
+}
+
+export function getAgentTerminalResultGraceMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.OPENCLAUDE_AGENT_TERMINAL_RESULT_GRACE_MS
+  if (raw === undefined || raw.trim() === '') return 1_000
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed < 0) return 1_000
+  return Math.min(Math.floor(parsed), 30_000)
 }
 
 function getFirstOutputProgressMs(totalTimeoutMs: number): number {
@@ -1991,6 +2063,7 @@ export function summarizeStreamJsonProgress(
       events.push(`system: ${subtype}`)
     }
   } else if (type === 'assistant') {
+    if (context) context.assistantTurn = (context.assistantTurn ?? 0) + 1
     for (const block of getMessageContentBlocks(message)) {
       if (!block || typeof block !== 'object') continue
       const record = block as Record<string, unknown>
@@ -2065,7 +2138,7 @@ export function summarizeStreamJsonProgress(
           )
         }
         if (toolName && context?.artifacts) {
-          for (const artifact of extractCamofoxScreenshotArtifacts(
+          for (const artifact of extractAgentArtifacts(
             toolName,
             output,
           )) {
@@ -2117,6 +2190,48 @@ export function summarizeStreamJsonProgress(
   return events
     .map(event => redactAgentText(event).replace(/\s+/g, ' ').trim())
     .filter(Boolean)
+}
+
+function observeStreamJsonLoop(
+  message: Record<string, unknown>,
+  context: StreamProgressContext,
+  watchdog: AgentLoopWatchdog,
+): AgentLoopDetection | undefined {
+  const successfulMutations = (context.evidence || [])
+    .filter(item => item.success && item.kind === 'mutation')
+  const mutatedTargets = new Set(successfulMutations.map(item => item.target))
+  watchdog.syncProgress({
+    evidence: [
+      ...successfulMutations,
+      ...(context.evidence || []).filter(item =>
+        item.success
+        && item.kind === 'verification'
+        && mutatedTargets.has(item.target),
+      ),
+    ].map(item => item.fingerprint || [item.kind, item.scope, item.target, item.source].join(':')),
+    artifacts: [...(context.artifacts?.values() || [])]
+      .map(item => `${item.kind}:${item.path}`),
+    pendingInteractions: [...(context.pendingInteractions?.keys() || [])],
+  })
+  if (String(message.type || '') !== 'user') return undefined
+
+  for (const block of getMessageContentBlocks(message)) {
+    if (!block || typeof block !== 'object') continue
+    const record = block as Record<string, unknown>
+    if (record.type !== 'tool_result') continue
+    const id = typeof record.tool_use_id === 'string' ? record.tool_use_id : ''
+    const toolName = id ? context.toolNameById?.get(id) : undefined
+    if (!toolName) continue
+    const detection = watchdog.observeToolCompletion({
+      toolName,
+      toolInput: id ? context.toolInputById?.get(id) || {} : {},
+      success: record.is_error !== true,
+      output: normalizeMessageContent(record.content),
+      turn: context.assistantTurn ?? 0,
+    })
+    if (detection) return detection
+  }
+  return undefined
 }
 
 export function classifyAgentToolEvidence(input: {
@@ -2304,13 +2419,20 @@ function appendAgentToolEvidence(
   output: string,
   success: boolean,
 ): void {
+  const fingerprint = getAgentToolCompletionSignature({
+    toolName,
+    toolInput,
+    output,
+    success,
+    turn: 0,
+  })
   for (const item of classifyAgentToolEvidence({
     toolName,
     toolInput,
     output,
     success,
   })) {
-    evidence.push({ ...item, sequence: evidence.length })
+    evidence.push({ ...item, fingerprint, sequence: evidence.length })
   }
 }
 
@@ -2484,6 +2606,45 @@ export function extractCamofoxScreenshotArtifacts(
       kind: 'image',
       source: toolName,
     })
+  }
+  return artifacts
+}
+
+export function extractAgentArtifacts(
+  toolName: string,
+  output: string,
+): AgentRunArtifact[] {
+  const artifacts = extractCamofoxScreenshotArtifacts(toolName, output)
+  for (const line of output.split(/\r?\n/u)) {
+    const match = line.trim().match(/^OPENCLAUDE_ARTIFACT\s+(\{.+\})$/u)
+    if (!match?.[1]) continue
+    try {
+      const value = JSON.parse(match[1]) as Record<string, unknown>
+      const path = typeof value.path === 'string' ? value.path.trim() : ''
+      const rawKind = typeof value.kind === 'string'
+        ? value.kind.trim().toLowerCase()
+        : 'document'
+      const kind = rawKind === 'image' || rawKind === 'audio'
+        ? rawKind
+        : 'document'
+      if (
+        !path
+        || (!isAbsolute(path) && !/^[A-Za-z]:[\\/]/u.test(path))
+      ) {
+        continue
+      }
+      const caption = typeof value.caption === 'string'
+        ? value.caption.trim().slice(0, 1_024)
+        : ''
+      artifacts.push({
+        path,
+        kind,
+        source: toolName,
+        ...(caption ? { caption } : {}),
+      })
+    } catch {
+      // A malformed marker is ordinary tool output, not a runner failure.
+    }
   }
   return artifacts
 }
@@ -2698,7 +2859,9 @@ export function classifyAgentRunFailure(input: {
   const hasToolActivity = /(tool result error|tool .*timed out|mcp server .*timed out|mcp.*error|no such tool available|tool_use_error)/i.test(activityCombined)
 
   let kind: AgentRunFailureKind = 'unknown'
-  if (/(429|rate[_ -]?limit|too many requests|quota)/i.test(providerCombined)
+  if (/agent loop watchdog detected/i.test(providerCombined)) {
+    kind = 'loop_detected'
+  } else if (/(429|rate[_ -]?limit|too many requests|quota)/i.test(providerCombined)
     || /api retry:[^\n]*\b(?:429|rate[_ -]?limit|too many requests|quota)\b/i.test(activityCombined)
   ) {
     kind = 'rate_limit'
@@ -2748,6 +2911,8 @@ function buildFailureDiagnostic(
     lines.push('Provider rate limit or quota retry detected. Try another model/provider, wait for quota reset, or reduce max turns/tool fanout.')
   } else if (kind === 'transient_network') {
     lines.push('A transient provider/network failure interrupted the run. Retry with bounded backoff and preserve completed workspace changes.')
+  } else if (kind === 'loop_detected') {
+    lines.push('The live watchdog stopped a repeated tool route that produced no new mutation, verification, interaction, or artifact evidence. Preserve completed work, review the trace once, and continue with a materially different strategy.')
   } else if (kind === 'auth') {
     lines.push('Provider authentication/billing rejection detected. Check API key, account credits, base URL, and model access.')
   } else if (kind === 'model_not_found') {

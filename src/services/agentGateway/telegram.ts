@@ -258,7 +258,7 @@ export type TelegramReplyContext = {
 export type TelegramSendDirective = {
   path: string
   caption?: string
-  kind?: 'image' | 'document' | 'auto'
+  kind?: 'image' | 'audio' | 'document' | 'auto'
 }
 
 export type TelegramCronCreateDirective = {
@@ -1265,7 +1265,11 @@ export class TelegramAgentBridge {
     let verificationAttempts = 0
     let verificationPending = false
     const completionPasses: AgentRunResult[] = []
+    const recoveredArtifacts = new Map<string, AgentRunArtifact>()
+    const seenRecoveryProgress = new Set<string>()
+    const recoveryMutationTargets = new Set<string>()
     const maxVerificationAttempts = getCodingVerificationAttemptLimit()
+    let loopReviewerRequested = false
     let taskRoute: AgentRunResult['taskRoute']
 
     while (true) {
@@ -1302,6 +1306,28 @@ export class TelegramAgentBridge {
       }).catch(error => buildAgentExceptionResult(error, Date.now() - startedAt))
       if (isVerification) result = attachCodingCompletionDisposition(result)
       taskRoute ||= result.taskRoute
+      for (const artifact of result.artifacts || []) {
+        recoveredArtifacts.set(
+          `${artifact.kind}:${normalizeTelegramArtifactPath(artifact.path)}`,
+          artifact,
+        )
+      }
+      if (recoveredArtifacts.size > 0) {
+        result = { ...result, artifacts: [...recoveredArtifacts.values()] }
+      }
+      const progressFingerprints = getAgentRecoveryProgressFingerprints(
+        result,
+        recoveryMutationTargets,
+      )
+      const madeNewProgress = progressFingerprints.some(fingerprint => {
+        if (seenRecoveryProgress.has(fingerprint)) return false
+        seenRecoveryProgress.add(fingerprint)
+        return true
+      })
+      if (madeNewProgress) {
+        repeatedFailures.clear()
+        failureKindCounts.clear()
+      }
 
       if (input.controller.signal.aborted) {
         return result
@@ -1385,7 +1411,10 @@ export class TelegramAgentBridge {
         previousResult: result,
         recoveryAttempt,
         maxRecoveryAttempts: recovery.maxRecoveryAttempts,
+        requestLoopReviewer:
+          result.failureKind === 'loop_detected' && !loopReviewerRequested,
       })
+      if (result.failureKind === 'loop_detected') loopReviewerRequested = true
     }
   }
 
@@ -1479,11 +1508,15 @@ export class TelegramAgentBridge {
       )
     }
 
-    const isImage = kind === 'image' || (kind !== 'document' && isTelegramPhotoFile(filePath))
+    const isImage = kind === 'image'
+      || (kind === 'auto' && isTelegramPhotoFile(filePath))
+    const isAudio = !isImage
+      && isTelegramAudioFile(filePath)
+      && (kind === 'audio' || kind === 'auto')
     await this.sendMultipart(
-      isImage ? 'sendPhoto' : 'sendDocument',
+      isImage ? 'sendPhoto' : isAudio ? 'sendAudio' : 'sendDocument',
       chatId,
-      isImage ? 'photo' : 'document',
+      isImage ? 'photo' : isAudio ? 'audio' : 'document',
       filePath,
       caption,
     )
@@ -2222,6 +2255,7 @@ export class TelegramAgentBridge {
 
     if (result.exitCode !== 0) {
       await recordTelegramError(chatId, 'agent-run', result)
+      await this.deliverFailureArtifacts(chatId, result)
       await this.sendMessage(chatId, formatAgentFailureForTelegram(result))
       return
     }
@@ -2354,6 +2388,7 @@ export class TelegramAgentBridge {
 
       if (result.exitCode !== 0) {
         await recordTelegramError(chatId, 'agent-run-audio', result)
+        await this.deliverFailureArtifacts(chatId, result)
         await this.sendMessage(chatId, formatAgentFailureForTelegram(result))
         return
       }
@@ -4930,6 +4965,7 @@ export class TelegramAgentBridge {
 
       if (result.exitCode !== 0) {
         await recordTelegramError(chatId, 'agent-run-retry', result)
+        await this.deliverFailureArtifacts(chatId, result)
         await this.sendMessage(chatId, formatAgentFailureForTelegram(result))
         return
       }
@@ -5108,6 +5144,14 @@ export class TelegramAgentBridge {
     }
   }
 
+  private async deliverFailureArtifacts(
+    chatId: string,
+    result: AgentRunResult,
+  ): Promise<void> {
+    if (!result.artifacts?.length) return
+    await this.deliverAgentText(chatId, '', undefined, result.artifacts)
+  }
+
   private async applyAgentCronDirectives(
     chatId: string,
     text: string,
@@ -5279,9 +5323,9 @@ export class TelegramAgentBridge {
   }
 
   private async sendMultipart(
-    method: 'sendDocument' | 'sendPhoto',
+    method: 'sendAudio' | 'sendDocument' | 'sendPhoto',
     chatId: string,
-    fieldName: 'document' | 'photo',
+    fieldName: 'audio' | 'document' | 'photo',
     filePath: string,
     caption?: string,
   ): Promise<void> {
@@ -5702,6 +5746,7 @@ export function getTelegramAgentFailureKindLimit(
 
 export function shouldRetryTelegramAgentFailure(result: AgentRunResult): boolean {
   return result.failureKind === 'tool_error'
+    || result.failureKind === 'loop_detected'
     || result.failureKind === 'max_turns'
     || result.failureKind === 'timeout'
     || result.failureKind === 'transient_network'
@@ -5820,10 +5865,20 @@ export function buildTelegramAgentRecoveryPrompt(input: {
   previousResult: AgentRunResult
   recoveryAttempt: number
   maxRecoveryAttempts: number | null
+  requestLoopReviewer?: boolean
 }): string {
   const maxLabel = input.maxRecoveryAttempts === null
     ? 'unlimited until Telegram Stop'
     : String(input.maxRecoveryAttempts)
+  const loopRecoveryRules = (
+    input.requestLoopReviewer
+    ?? input.previousResult.failureKind === 'loop_detected'
+  )
+    ? [
+        '- The live loop watchdog stopped the previous execution branch. Before the next mutation, ask exactly one independent review subagent to inspect the repeated trace and propose a materially different route when the Agent tool is available; otherwise perform the same bounded review yourself.',
+        '- Do not treat another call with cosmetic argument changes as a new strategy. Change the tool, scope, prerequisite, or verification method and reuse completed state.',
+      ]
+    : []
   return [
     'The previous OpenClaude agent run failed before completing the Telegram task.',
     'Continue the same task. Treat the failure below as runtime feedback, not as a reason to stop.',
@@ -5832,10 +5887,12 @@ export function buildTelegramAgentRecoveryPrompt(input: {
     '- Analyze the exact failure and choose another route.',
     '- Do not repeat the same failing command, path, file edit, MCP call, or provider action.',
     '- Re-read git status, the current diff, TodoWrite state, and generated outputs before continuing so completed work is not repeated or overwritten.',
+    '- Reuse every verified artifact listed in the previous result. Do not regenerate a completed binary deliverable merely because a text Read, media playback, or another optional inspection failed; switch to a format-aware verifier.',
     '- For code changes, invoke the code Skill, Read every existing target before Edit or Write, and use file tools instead of shell redirection or heredocs.',
     '- After correcting a tool call or using a fallback, rerun the relevant verification and inspect the actual resulting state.',
     '- If the failure was a permission/sensitive-file/tool error, do not ask the user for permission and do not edit that sensitive file directly. Use the gateway API, Telegram bridge directives, repository code, or another available route.',
     '- If a probe command returned non-zero because a path was absent, keep searching through known project/runtime paths instead of treating that probe as fatal.',
+    ...loopRecoveryRules,
     '- Keep working until the original request is handled, the user presses Stop, or every practical route is exhausted.',
     '- If recovery is truly impossible, return a concise final answer with the concrete blocker and the next actionable fix.',
     '',
@@ -5847,6 +5904,38 @@ export function buildTelegramAgentRecoveryPrompt(input: {
     'Original Telegram task prompt:',
     input.originalPrompt,
   ].join('\n')
+}
+
+export function getAgentRecoveryProgressFingerprints(
+  result: AgentRunResult,
+  mutationTargets: Set<string> = new Set(),
+): string[] {
+  const fingerprints: string[] = []
+  for (const evidence of result.evidence || []) {
+    if (!evidence.success || evidence.kind !== 'mutation') continue
+    mutationTargets.add(evidence.target)
+    fingerprints.push(`mutation:${evidence.fingerprint || [
+      evidence.scope,
+      evidence.target,
+      evidence.source,
+    ].join(':')}`)
+  }
+  for (const evidence of result.evidence || []) {
+    if (
+      !evidence.success
+      || evidence.kind !== 'verification'
+      || !mutationTargets.has(evidence.target)
+    ) continue
+    fingerprints.push(`verification:${evidence.fingerprint || [
+      evidence.scope,
+      evidence.target,
+      evidence.source,
+    ].join(':')}`)
+  }
+  for (const artifact of result.artifacts || []) {
+    fingerprints.push(`artifact:${artifact.kind}:${normalizeTelegramArtifactPath(artifact.path)}`)
+  }
+  return [...new Set(fingerprints)]
 }
 
 export function formatTelegramAgentFailureForRecovery(result: AgentRunResult): string {
@@ -5867,6 +5956,12 @@ export function formatTelegramAgentFailureForRecovery(result: AgentRunResult): s
     lines.push('', 'Recent activity:')
     for (const event of activity) {
       lines.push(`- ${limitRecoveryText(event, 500)}`)
+    }
+  }
+  if (result.artifacts?.length) {
+    lines.push('', 'Preserved artifacts:')
+    for (const artifact of result.artifacts.slice(-12)) {
+      lines.push(`- ${artifact.kind}: ${limitRecoveryText(artifact.path, 500)}`)
     }
   }
   const stderr = result.stderr.trim()
@@ -7794,12 +7889,14 @@ export function buildTelegramAgentPrompt(input: {
 
   lines.push(
     '',
-    'If you need Telegram to upload an output screenshot, image, or document back to the chat, include a standalone control line:',
+    'If you need Telegram to upload an output screenshot, image, audio file, or document back to the chat, include a standalone control line:',
     '[TELEGRAM_SEND_FILE path="C:\\path\\to\\file.png" caption="optional caption"]',
-    'You can also use [[image:C:\\path\\to\\image.png]] or [[document:C:\\path\\to\\file.pdf]].',
+    '[TELEGRAM_SEND_FILE path="C:\\path\\to\\file.mp3" caption="optional caption" kind="audio"]',
+    'You can also use [[image:C:\\path\\to\\image.png]], [[document:C:\\path\\to\\file.pdf]], or register a verified tool artifact with openclaude-artifact.',
     'The bridge will remove those control tokens from visible text and upload the local file.',
     'A successful camofox_screenshot tool result is uploaded automatically; do not add a duplicate TELEGRAM_SEND_FILE line for that same PNG.',
     '',
+    'The user message below is the sole active goal. Memory, dialogue history, replies, cron state, and reflections are supporting evidence only; do not resume an older task unless this message explicitly asks you to.',
     'User message:',
     input.text || '(no text; user sent attachments)',
   )
@@ -8317,6 +8414,7 @@ export function mergeAgentArtifactsWithTelegramDirectives(
     merged.push({
       path: artifact.path,
       kind: artifact.kind,
+      ...(artifact.caption ? { caption: artifact.caption } : {}),
       ...(artifact.source.toLowerCase().includes('camofox')
         ? { caption: 'Camofox browser result' }
         : {}),
@@ -8348,6 +8446,7 @@ function normalizeTelegramDirectiveKind(
   const normalized = value?.trim().toLowerCase()
   if (!normalized) return undefined
   if (normalized === 'image' || normalized === 'photo') return 'image'
+  if (normalized === 'audio') return 'audio'
   if (normalized === 'document' || normalized === 'doc') return 'document'
   if (normalized === 'file' || normalized === 'auto') return 'auto'
   return undefined
@@ -8717,6 +8816,10 @@ function isTelegramPhotoFile(filePath: string): boolean {
   return ['.jpg', '.jpeg', '.png', '.webp'].includes(
     extname(filePath).toLowerCase(),
   )
+}
+
+function isTelegramAudioFile(filePath: string): boolean {
+  return ['.mp3', '.m4a'].includes(extname(filePath).toLowerCase())
 }
 
 function isVisualTelegramAttachment(attachment: TelegramAttachment): boolean {

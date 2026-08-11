@@ -1595,10 +1595,18 @@ export async function loadScratchpadBlocks(): Promise<MemoryBlock[]> {
   try {
     const raw = await readFile(scratchpadBlocksPath(), 'utf8')
     const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed) || parsed.some(block => !isMemoryBlock(block))) {
+    if (!Array.isArray(parsed)) {
       throw new Error('Scratchpad block store has an invalid schema')
     }
-    return parsed
+    const blocks: MemoryBlock[] = []
+    for (const value of parsed) {
+      const block = normalizeMemoryBlock(value)
+      if (!block) {
+        throw new Error('Scratchpad block store has an invalid schema')
+      }
+      blocks.push(block)
+    }
+    return blocks
   } catch (error) {
     if (isMissingFile(error)) return []
     throw error
@@ -1846,11 +1854,23 @@ async function saveDialogueStateUnlocked(state: DialogueState): Promise<void> {
 }
 
 function isMemoryBlock(value: unknown): value is MemoryBlock {
-  if (!value || typeof value !== 'object') return false
+  return normalizeMemoryBlock(value) !== undefined
+}
+
+function normalizeMemoryBlock(value: unknown): MemoryBlock | undefined {
+  if (!value || typeof value !== 'object') return undefined
   const block = value as Record<string, unknown>
-  return typeof block.ts === 'string'
-    && typeof block.source === 'string'
-    && typeof block.content === 'string'
+  if (typeof block.ts !== 'string' || typeof block.content !== 'string') {
+    return undefined
+  }
+  if (block.source !== undefined && typeof block.source !== 'string') {
+    return undefined
+  }
+  return {
+    ts: block.ts,
+    source: typeof block.source === 'string' ? block.source : 'legacy-import',
+    content: block.content,
+  }
 }
 
 function isDialogueBlock(value: unknown): value is DialogueBlock {

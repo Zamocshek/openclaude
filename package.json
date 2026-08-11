@@ -11,6 +11,7 @@
     "bin/",
     "dist/cli.mjs",
     "scripts/agent-migration/",
+    "scripts/register-artifact.mjs",
     "packages/capability-router/",
     "scripts/release/ssh-access.sh",
     "scripts/release/ssh-doctor.mjs",

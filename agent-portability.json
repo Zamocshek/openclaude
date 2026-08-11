@@ -53,6 +53,10 @@
       {
         "id": "local-transcription",
         "root": "integrations/local-transcription"
+      },
+      {
+        "id": "artifact-transport",
+        "root": "scripts"
       }
     ],
     "skillRoots": [
