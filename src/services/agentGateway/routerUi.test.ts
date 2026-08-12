@@ -9,7 +9,7 @@ describe('Tool Router UI', () => {
       fileManager: 'http://localhost:8642/files',
       openWebUI: 'http://localhost:3000',
       hindsight: 'http://localhost:8888',
-      openRAG: 'http://localhost:18000',
+      lightRAG: 'http://localhost:9621/webui',
       telegramMcp: 'http://localhost:19765',
       omniRoute: 'http://localhost:20128',
     })

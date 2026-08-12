@@ -204,11 +204,11 @@ only. Authentication is completed by the user with
 
 See `docs/camofox-integration.md`.
 
-## OpenRAG And Hindsight
+## LightRAG And Hindsight
 
 Use these as different memory surfaces:
 
-- OpenRAG: document-grounded retrieval and ingestion. Prefer `openrag_search`
+- LightRAG: document-grounded graph retrieval and ingestion. Prefer `lightrag_search`
   when answering from indexed files, project documents, or an explicit RAG base.
 - Hindsight: durable agent/user/project memory. Prefer `hindsight_recall` for
   remembered preferences, prior decisions, recurring failures, and learned
@@ -230,7 +230,7 @@ preferences; retain after stable project decisions, recurring fixes, or changes
 to how the agent should operate. Never claim a memory read/write happened unless
 the `hindsight_*` tool succeeded.
 
-See `docs/openrag-integration.md` and `docs/hindsight-integration.md`.
+See `docs/lightrag-integration.md` and `docs/hindsight-integration.md`.
 
 ## Personal RPG / Life System
 

@@ -142,7 +142,7 @@ async function main() {
     const retain = textContent(await client.callTool({
       name: 'hindsight_retain',
       arguments: {
-        content: 'OpenClaude remembers Camofox for browser automation and OpenRAG for document retrieval.',
+        content: 'OpenClaude remembers Camofox for browser automation and LightRAG for document retrieval.',
         context: 'agent capabilities',
         tags: ['openclaude', 'capability'],
       },

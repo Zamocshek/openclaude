@@ -23,8 +23,8 @@ if "%OPENCLAUDE_AGENT_RUNNER_PERMISSION_MODE%"=="" set "OPENCLAUDE_AGENT_RUNNER_
 if "%OPENCLAUDE_AGENT_RUNNER_DISALLOWED_TOOLS%"=="" set "OPENCLAUDE_AGENT_RUNNER_DISALLOWED_TOOLS="
 if "%MCPR_HOST%"=="" set "MCPR_HOST=host.docker.internal"
 if "%MCPR_PORT%"=="" set "MCPR_PORT=3282"
-if "%OPENRAG_URL%"=="" set "OPENRAG_URL=http://host.docker.internal:3000"
-if "%OPENRAG_MCP_TIMEOUT%"=="" set "OPENRAG_MCP_TIMEOUT=60"
+if "%LIGHTRAG_URL%"=="" set "LIGHTRAG_URL=http://host.docker.internal:9621"
+if "%LIGHTRAG_MCP_TIMEOUT%"=="" set "LIGHTRAG_MCP_TIMEOUT=180"
 if "%CAMOFOX_URL%"=="" set "CAMOFOX_URL=http://host.docker.internal:9377"
 if "%CAMOFOX_MCP_TIMEOUT%"=="" set "CAMOFOX_MCP_TIMEOUT=60"
 if "%HINDSIGHT_URL%"=="" set "HINDSIGHT_URL=http://host.docker.internal:8888"
@@ -115,7 +115,7 @@ if /I "%DRY_RUN%"=="--dry-run" (
   echo Provider model: %PROVIDER_MODEL_SUMMARY%
   echo WebSearch provider: %WEB_SEARCH_PROVIDER%
   echo MCP Router: %MCPR_HOST%:%MCPR_PORT%
-  echo OpenRAG: %OPENRAG_URL%
+  echo LightRAG: %LIGHTRAG_URL%
   echo Camofox: %CAMOFOX_URL%
   echo Hindsight: %HINDSIGHT_URL% bank=%HINDSIGHT_BANK_ID%
   exit /b 0
@@ -189,9 +189,9 @@ docker run -d ^
   -e LINKUP_API_KEY="%LINKUP_API_KEY%" ^
   -e MCPR_HOST="%MCPR_HOST%" ^
   -e MCPR_PORT="%MCPR_PORT%" ^
-  -e OPENRAG_URL="%OPENRAG_URL%" ^
-  -e OPENRAG_API_KEY="%OPENRAG_API_KEY%" ^
-  -e OPENRAG_MCP_TIMEOUT="%OPENRAG_MCP_TIMEOUT%" ^
+  -e LIGHTRAG_URL="%LIGHTRAG_URL%" ^
+  -e LIGHTRAG_API_KEY="%LIGHTRAG_API_KEY%" ^
+  -e LIGHTRAG_MCP_TIMEOUT="%LIGHTRAG_MCP_TIMEOUT%" ^
   -e CAMOFOX_URL="%CAMOFOX_URL%" ^
   -e CAMOFOX_ACCESS_KEY="%CAMOFOX_ACCESS_KEY%" ^
   -e CAMOFOX_API_KEY="%CAMOFOX_API_KEY%" ^

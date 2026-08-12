@@ -208,9 +208,9 @@ const CODING_EXECUTION_APPEND_SYSTEM_PROMPT = [
   'This request changes code or configuration. Invoke the code Skill when available, inspect the real target state, preserve unrelated changes, edit narrowly, and run a relevant verifier after the final mutation.',
   'Correct a failed tool call instead of repeating it, and do not report completion without evidence from the resulting files or checks.',
 ].join(' ')
-const OPENRAG_APPEND_SYSTEM_PROMPT = [
-  'For this document or knowledge-base request, use OpenRAG retrieval or ingestion tools and ground the answer in successful tool output.',
-  'Prefer openrag_search for evidence; use openrag_ingest_file for requested ingestion and do not fabricate retrieval results.',
+const LIGHTRAG_APPEND_SYSTEM_PROMPT = [
+  'For this document or knowledge-base request, use LightRAG retrieval or ingestion tools and ground the answer in successful tool output.',
+  'Prefer lightrag_search for evidence; use lightrag_ingest_text or lightrag_ingest_file only when ingestion is requested, track asynchronous indexing to a terminal status, and never fabricate retrieval results.',
 ].join(' ')
 const CAMOFOX_APPEND_SYSTEM_PROMPT = [
   'For this interactive browser request, use Camofox tabs and snapshots, act through stable element references, and take a final screenshot when the user asks to see the result.',
@@ -692,7 +692,7 @@ function getApiGatewayAppendSystemPrompt(
   if (hasRoutedMcp('codegraph')) parts.push(CODEGRAPH_APPEND_SYSTEM_PROMPT)
   if (hasRoutedMcp('searxng')) parts.push(SEARXNG_APPEND_SYSTEM_PROMPT)
   if (hasRoutedMcp('context7')) parts.push(CONTEXT7_APPEND_SYSTEM_PROMPT)
-  if (hasRoutedMcp('openrag')) parts.push(OPENRAG_APPEND_SYSTEM_PROMPT)
+  if (hasRoutedMcp('lightrag')) parts.push(LIGHTRAG_APPEND_SYSTEM_PROMPT)
   if (hasRoutedMcp('camofox')) parts.push(CAMOFOX_APPEND_SYSTEM_PROMPT)
   if (
     browserModelIntent
@@ -878,13 +878,10 @@ export function buildAgentChildEnv(
     'MCPR_PORT',
     'MCP_TIMEOUT',
     'MCP_TOOL_TIMEOUT',
-    'OPENRAG_URL',
-    'OPENRAG_API_KEY',
-    'OPENRAG_MCP_TIMEOUT',
-    'OPENRAG_MCP_MAX_CONNECTIONS',
-    'OPENRAG_MCP_MAX_KEEPALIVE_CONNECTIONS',
-    'OPENRAG_MCP_MAX_RETRIES',
-    'OPENRAG_MCP_FOLLOW_REDIRECTS',
+    'LIGHTRAG_URL',
+    'LIGHTRAG_API_KEY',
+    'LIGHTRAG_MCP_TIMEOUT',
+    'LIGHTRAG_MCP_MAX_RETRIES',
     'CAMOFOX_URL',
     'CAMOFOX_PORT',
     'CAMOFOX_ACCESS_KEY',

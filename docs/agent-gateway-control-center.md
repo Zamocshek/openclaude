@@ -506,7 +506,7 @@ HINDSIGHT_MCP_TIMEOUT=60
 OPENCLAUDE_DOCKER_HINDSIGHT_URL=http://host.docker.internal:8888
 ```
 
-The agent prompt teaches the child runner to use OpenRAG for document RAG,
+The agent prompt teaches the child runner to use LightRAG for document RAG,
 Camofox for browser automation, and Hindsight for durable memory.
 
 For the product-style launcher, use `scripts/release/control-center.bat` on

@@ -5,7 +5,7 @@ export type AgentGatewayWebLinks = {
   fileManager: string
   openWebUI: string
   hindsight: string
-  openRAG: string
+  lightRAG: string
   telegramMcp: string
   omniRoute: string
 }
@@ -30,9 +30,9 @@ export function getAgentGatewayWebLinks(
       process.env.HINDSIGHT_PUBLIC_URL,
       process.env.HINDSIGHT_URL || 'http://localhost:8888',
     ),
-    openRAG: publicUrl(
-      process.env.OPENRAG_PUBLIC_URL,
-      process.env.OPENRAG_URL || config.openRAG.url,
+    lightRAG: publicUrl(
+      process.env.LIGHTRAG_PUBLIC_URL,
+      `${(process.env.LIGHTRAG_URL || config.openRAG.url).replace(/\/+$/u, '')}/webui`,
     ),
     telegramMcp: publicUrl(
       process.env.TELEGRAM_MCP_WEB_PUBLIC_URL,

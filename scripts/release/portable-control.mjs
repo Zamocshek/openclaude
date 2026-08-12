@@ -29,6 +29,7 @@ const COMPOSE_FILES = [
 const COMPOSE_ARGS = COMPOSE_FILES.flatMap(file => ['-f', file])
 const COMPOSE_PROFILE_ARGS = [...COMPOSE_ARGS, '--profile', 'workers']
 const DEFAULT_MODEL = 'qwen3:1.7b'
+const DEFAULT_LIGHTRAG_MODEL = 'qwen3-lightrag:1.7b'
 const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text:latest'
 const REQUIRED_TELEGRAM_REPOSITORY_FILES = [
   'integrations/telegram-mcp/Dockerfile',
@@ -52,8 +53,7 @@ export function portableDirectories(root = ROOT) {
     join(data, 'telegram-mcp'),
     join(data, 'camofox'),
     join(data, 'hindsight'),
-    join(data, 'openrag'),
-    join(data, 'openrag-workspace'),
+    join(data, 'migrations'),
   ]
 }
 
@@ -73,16 +73,16 @@ export function renderPortableDefaults() {
     `OPENCLAUDE_DOCKER_MODEL=${DEFAULT_MODEL}`,
     `OPENCLAUDE_BOOTSTRAP_OLLAMA_MODEL=${DEFAULT_MODEL}`,
     `OPENCLAUDE_BOOTSTRAP_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL}`,
-    'OPENCLAUDE_OPENRAG_ENABLED=0',
-    'OPENCLAUDE_OPENRAG_VERSION=0.5.1',
-    'OPENCLAUDE_OPENRAG_REPO_DIR=./.openclaude-data/openrag',
-    'OPENCLAUDE_OPENRAG_WORKSPACE_DIR=./.openclaude-data/openrag-workspace',
-    'OPENCLAUDE_OPENRAG_LLM_PROVIDER=ollama',
-    `OPENCLAUDE_OPENRAG_LLM_MODEL=${DEFAULT_MODEL}`,
-    'OPENCLAUDE_OPENRAG_EMBEDDING_PROVIDER=ollama',
-    `OPENCLAUDE_OPENRAG_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL}`,
-    'OPENCLAUDE_OPENRAG_OLLAMA_ENDPOINT=http://openclaude-ollama:11434',
-    'OPENCLAUDE_DOCKER_OPENRAG_URL=http://openrag-frontend:3000',
+    'OPENCLAUDE_LIGHTRAG_ENABLED=1',
+    'OPENCLAUDE_LIGHTRAG_MCP_ENABLED=1',
+    'OPENCLAUDE_DOCKER_LIGHTRAG_URL=http://lightrag:9621',
+    'LIGHTRAG_LLM_BINDING=ollama',
+    'LIGHTRAG_LLM_BINDING_HOST=http://lightrag-ollama-adapter:11435',
+    `LIGHTRAG_LLM_MODEL=${DEFAULT_LIGHTRAG_MODEL}`,
+    'LIGHTRAG_EMBEDDING_BINDING=ollama',
+    'LIGHTRAG_EMBEDDING_BINDING_HOST=http://lightrag-ollama:11434',
+    `LIGHTRAG_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL}`,
+    'LIGHTRAG_EMBEDDING_DIM=768',
     'OPENCLAUDE_DOCKER_HINDSIGHT_URL=http://openclaude-hindsight:8888',
     'OPENCLAUDE_SHARED_DOCKER_NETWORK=openclaude_default',
     'OPENCLAUDE_ROUTER_AUTO_AUTH=0',
@@ -172,30 +172,9 @@ export function initializePortableLayout(root = ROOT) {
   return { created, envPath }
 }
 
-function ensureOpenRagSecrets() {
-  const env = readEnv()
-  const additions = []
-  if (!env.OPENCLAUDE_OPENRAG_OPENSEARCH_PASSWORD) {
-    additions.push(['OPENCLAUDE_OPENRAG_OPENSEARCH_PASSWORD', cryptoSecret()])
-  }
-  if (!env.OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER) {
-    additions.push(['OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER', 'openclaude'])
-  }
-  if (!env.OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER_PASSWORD) {
-    additions.push(['OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER_PASSWORD', cryptoSecret()])
-  }
-  for (const [name, value] of additions) setProjectEnvValue(name, value)
-}
-
-function cryptoSecret() {
-  return globalThis.crypto.getRandomValues(new Uint8Array(32))
-    .reduce((result, value) => result + value.toString(16).padStart(2, '0'), '')
-}
-
 export function initialize() {
   const result = initializePortableLayout()
   ensureProductionSecrets()
-  ensureOpenRagSecrets()
   console.log(
     result.created
       ? `Portable state initialized in ${DATA_DIR}`
@@ -215,15 +194,10 @@ function runtimeEnv(overrides = {}) {
     OPENCLAUDE_HINDSIGHT_HOME: join(DATA_DIR, 'hindsight-source'),
     OPENCLAUDE_CAMOFOX_HOME: join(DATA_DIR, 'camofox'),
     HINDSIGHT_DATA_DIR: join(DATA_DIR, 'hindsight'),
-    OPENCLAUDE_OPENRAG_REPO_DIR: join(DATA_DIR, 'openrag'),
-    OPENCLAUDE_OPENRAG_WORKSPACE_DIR: join(DATA_DIR, 'openrag-workspace'),
     OPENCLAUDE_SHARED_DOCKER_NETWORK: sharedNetwork,
-    OPENCLAUDE_OPENRAG_DOCKER_NETWORK: sharedNetwork,
     HINDSIGHT_DOCKER_NETWORK: sharedNetwork,
-    OPENCLAUDE_OPENRAG_OLLAMA_ENDPOINT:
-      env.OPENCLAUDE_OPENRAG_OLLAMA_ENDPOINT || 'http://openclaude-ollama:11434',
-    OPENCLAUDE_DOCKER_OPENRAG_URL:
-      env.OPENCLAUDE_DOCKER_OPENRAG_URL || 'http://openrag-frontend:3000',
+    OPENCLAUDE_DOCKER_LIGHTRAG_URL:
+      env.OPENCLAUDE_DOCKER_LIGHTRAG_URL || 'http://lightrag:9621',
     OPENCLAUDE_DOCKER_HINDSIGHT_URL:
       env.OPENCLAUDE_DOCKER_HINDSIGHT_URL || 'http://openclaude-hindsight:8888',
     ...overrides,
@@ -300,18 +274,9 @@ async function startCamofox() {
   await waitForEndpoint(`${url}/health`)
 }
 
-function startOpenRag() {
-  if (!commandAvailable('git')) {
-    throw new Error('Git is required to install the pinned OpenRAG source')
-  }
-  runNodeScript('scripts/release/run-platform-script.mjs', ['install-openrag'])
-  setProjectEnvValue('OPENCLAUDE_OPENRAG_ENABLED', '1')
-  runNodeScript('scripts/release/run-platform-script.mjs', ['openrag-docker-up'])
-}
-
 function verifyFullContainerConnectivity() {
   const script = [
-    "const checks = [['Hindsight', process.env.HINDSIGHT_URL + '/docs'], ['OpenRAG', process.env.OPENRAG_URL + '/']];",
+    "const checks = [['Hindsight', process.env.HINDSIGHT_URL + '/docs'], ['LightRAG', process.env.LIGHTRAG_URL + '/health']];",
     'for (const [name, url] of checks) {',
     '  const response = await fetch(url, { signal: AbortSignal.timeout(15000) });',
     "  if (!response.ok) throw new Error(`${name} returned HTTP ${response.status} from ${url}`);",
@@ -329,7 +294,6 @@ export async function start(options = {}) {
   if (options.full) {
     startHindsight()
     await startCamofox()
-    startOpenRag()
   }
   await verifyProduction({
     composeArgs: ['compose', ...COMPOSE_PROFILE_ARGS],
@@ -340,11 +304,6 @@ export async function start(options = {}) {
     verifyFullContainerConnectivity()
   }
   printEndpoints()
-}
-
-function stopOpenRag() {
-  if (!existsSync(join(DATA_DIR, 'openrag'))) return
-  runNodeScript('scripts/release/run-platform-script.mjs', ['openrag-docker-down'])
 }
 
 function stopCamofox() {
@@ -370,8 +329,6 @@ function stopCamofox() {
 
 export function stop(options = {}) {
   if (options.full) {
-    stopOpenRag()
-    setProjectEnvValue('OPENCLAUDE_OPENRAG_ENABLED', '0')
     runNodeScript('scripts/release/hindsight-control.mjs', ['docker-down'])
     stopCamofox()
   }
@@ -400,13 +357,12 @@ export function doctor() {
     ['Node.js 22+', Number(process.versions.node.split('.')[0]) >= 22, true],
     ['Docker', commandAvailable('docker'), true],
     ['Docker Compose 2.24.4+', composeSupportsOverride(), true],
-    ['Git (required for full OpenRAG)', commandAvailable('git'), true],
+    ['Git', commandAvailable('git'), true],
     [
       'Bundled Telegram MCP and skills',
       hasRequiredTelegramRepositoryFiles(),
       true,
     ],
-    ['uv (auto-installed for full OpenRAG)', commandAvailable('uv'), false],
   ]
   if (existsSync(ENV_PATH)) {
     checks.push(['Production secrets', validateProductionEnv({
@@ -429,7 +385,7 @@ OpenClaude is ready:
   OmniRoute:   http://127.0.0.1:20128
   Telegram MCP:http://127.0.0.1:19765
   Hindsight:   http://127.0.0.1:9999
-  OpenRAG:     http://127.0.0.1:3000
+  LightRAG:    http://127.0.0.1:9621/webui
 `)
 }
 
@@ -446,8 +402,8 @@ Usage:
   node scripts/release/portable-control.mjs status
 
 The default up command starts the agent, OpenWebUI, Tool Router, File Manager,
-OmniRoute, SearXNG, Telegram MCP, workers, and local Ollama. --full also starts
-Hindsight and the pinned OpenRAG stack.`)
+OmniRoute, SearXNG, Telegram MCP, workers, local Ollama, and pinned LightRAG.
+--full also starts Hindsight and Camofox.`)
 }
 
 async function main() {

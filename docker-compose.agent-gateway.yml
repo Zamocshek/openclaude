@@ -29,6 +29,8 @@ services:
         condition: service_healthy
       capability-router:
         condition: service_healthy
+      lightrag:
+        condition: service_healthy
       qwen-mm-bootstrap:
         condition: service_completed_successfully
     environment:
@@ -55,7 +57,9 @@ services:
       OPENCLAUDE_CONSOLE_SESSION_TTL_MS: "${OPENCLAUDE_CONSOLE_SESSION_TTL_MS:-43200000}"
       OPENCLAUDE_OPEN_WEBUI_PUBLIC_URL: "${OPENCLAUDE_OPEN_WEBUI_PUBLIC_URL:-}"
       HINDSIGHT_PUBLIC_URL: "${HINDSIGHT_PUBLIC_URL:-}"
-      OPENRAG_PUBLIC_URL: "${OPENRAG_PUBLIC_URL:-}"
+      LIGHTRAG_PUBLIC_URL: "${LIGHTRAG_PUBLIC_URL:-http://localhost:9621/webui}"
+      OPENCLAUDE_LIGHTRAG_ENABLED: "${OPENCLAUDE_LIGHTRAG_ENABLED:-1}"
+      OPENCLAUDE_LIGHTRAG_MCP_ENABLED: "${OPENCLAUDE_LIGHTRAG_MCP_ENABLED:-1}"
       TELEGRAM_MCP_WEB_PUBLIC_URL: "${TELEGRAM_MCP_WEB_PUBLIC_URL:-http://localhost:19765}"
       OMNIROUTE_PUBLIC_URL: "${OMNIROUTE_PUBLIC_URL:-http://localhost:20128}"
       OPENCLAUDE_AGENT_WEB_BIND_HOST: "0.0.0.0"
@@ -220,9 +224,10 @@ services:
       MCPR_HOST: "${OPENCLAUDE_DOCKER_MCPR_HOST:-host.docker.internal}"
       MCPR_PORT: "${MCPR_PORT:-3282}"
       MCP_TIMEOUT: "${MCP_TIMEOUT:-5000}"
-      OPENRAG_URL: "${OPENCLAUDE_DOCKER_OPENRAG_URL:-${OPENRAG_URL:-http://host.docker.internal:3000}}"
-      OPENRAG_API_KEY: "${OPENRAG_API_KEY:-}"
-      OPENRAG_MCP_TIMEOUT: "${OPENRAG_MCP_TIMEOUT:-60}"
+      LIGHTRAG_URL: "${OPENCLAUDE_DOCKER_LIGHTRAG_URL:-http://lightrag:9621}"
+      LIGHTRAG_API_KEY: "${LIGHTRAG_API_KEY:-}"
+      LIGHTRAG_MCP_TIMEOUT: "${LIGHTRAG_MCP_TIMEOUT:-180}"
+      LIGHTRAG_MCP_MAX_RETRIES: "${LIGHTRAG_MCP_MAX_RETRIES:-2}"
       CAMOFOX_URL: "${OPENCLAUDE_DOCKER_CAMOFOX_URL:-${CAMOFOX_URL:-http://host.docker.internal:9377}}"
       CAMOFOX_ACCESS_KEY: "${CAMOFOX_ACCESS_KEY:-}"
       CAMOFOX_API_KEY: "${CAMOFOX_API_KEY:-}"
@@ -438,9 +443,10 @@ services:
       MCPR_HOST: "${OPENCLAUDE_DOCKER_MCPR_HOST:-host.docker.internal}"
       MCPR_PORT: "${MCPR_PORT:-3282}"
       MCP_TIMEOUT: "${MCP_TIMEOUT:-5000}"
-      OPENRAG_URL: "${OPENCLAUDE_DOCKER_OPENRAG_URL:-${OPENRAG_URL:-http://host.docker.internal:3000}}"
-      OPENRAG_API_KEY: "${OPENRAG_API_KEY:-}"
-      OPENRAG_MCP_TIMEOUT: "${OPENRAG_MCP_TIMEOUT:-60}"
+      LIGHTRAG_URL: "${OPENCLAUDE_DOCKER_LIGHTRAG_URL:-http://lightrag:9621}"
+      LIGHTRAG_API_KEY: "${LIGHTRAG_API_KEY:-}"
+      LIGHTRAG_MCP_TIMEOUT: "${LIGHTRAG_MCP_TIMEOUT:-180}"
+      LIGHTRAG_MCP_MAX_RETRIES: "${LIGHTRAG_MCP_MAX_RETRIES:-2}"
       CAMOFOX_URL: "${OPENCLAUDE_DOCKER_CAMOFOX_URL:-${CAMOFOX_URL:-http://host.docker.internal:9377}}"
       CAMOFOX_ACCESS_KEY: "${CAMOFOX_ACCESS_KEY:-}"
       CAMOFOX_API_KEY: "${CAMOFOX_API_KEY:-}"
@@ -627,9 +633,10 @@ services:
       MCPR_HOST: "${OPENCLAUDE_DOCKER_MCPR_HOST:-host.docker.internal}"
       MCPR_PORT: "${MCPR_PORT:-3282}"
       MCP_TIMEOUT: "${MCP_TIMEOUT:-5000}"
-      OPENRAG_URL: "${OPENCLAUDE_DOCKER_OPENRAG_URL:-${OPENRAG_URL:-http://host.docker.internal:3000}}"
-      OPENRAG_API_KEY: "${OPENRAG_API_KEY:-}"
-      OPENRAG_MCP_TIMEOUT: "${OPENRAG_MCP_TIMEOUT:-60}"
+      LIGHTRAG_URL: "${OPENCLAUDE_DOCKER_LIGHTRAG_URL:-http://lightrag:9621}"
+      LIGHTRAG_API_KEY: "${LIGHTRAG_API_KEY:-}"
+      LIGHTRAG_MCP_TIMEOUT: "${LIGHTRAG_MCP_TIMEOUT:-180}"
+      LIGHTRAG_MCP_MAX_RETRIES: "${LIGHTRAG_MCP_MAX_RETRIES:-2}"
       CAMOFOX_URL: "${OPENCLAUDE_DOCKER_CAMOFOX_URL:-${CAMOFOX_URL:-http://host.docker.internal:9377}}"
       CAMOFOX_ACCESS_KEY: "${CAMOFOX_ACCESS_KEY:-}"
       CAMOFOX_API_KEY: "${CAMOFOX_API_KEY:-}"
@@ -813,8 +820,10 @@ services:
       MCPR_TOKEN: "${MCPR_TOKEN:-}"
       MCPR_HOST: "${OPENCLAUDE_DOCKER_MCPR_HOST:-host.docker.internal}"
       MCPR_PORT: "${MCPR_PORT:-3282}"
-      OPENRAG_URL: "${OPENCLAUDE_DOCKER_OPENRAG_URL:-${OPENRAG_URL:-http://host.docker.internal:3000}}"
-      OPENRAG_API_KEY: "${OPENRAG_API_KEY:-}"
+      LIGHTRAG_URL: "${OPENCLAUDE_DOCKER_LIGHTRAG_URL:-http://lightrag:9621}"
+      LIGHTRAG_API_KEY: "${LIGHTRAG_API_KEY:-}"
+      LIGHTRAG_MCP_TIMEOUT: "${LIGHTRAG_MCP_TIMEOUT:-180}"
+      LIGHTRAG_MCP_MAX_RETRIES: "${LIGHTRAG_MCP_MAX_RETRIES:-2}"
       CAMOFOX_URL: "${OPENCLAUDE_DOCKER_CAMOFOX_URL:-${CAMOFOX_URL:-http://host.docker.internal:9377}}"
       CAMOFOX_ACCESS_KEY: "${CAMOFOX_ACCESS_KEY:-}"
       CAMOFOX_API_KEY: "${CAMOFOX_API_KEY:-}"
@@ -865,6 +874,130 @@ services:
       retries: 12
       start_period: 20s
 
+  lightrag-ollama:
+    image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      OLLAMA_KEEP_ALIVE: "${LIGHTRAG_OLLAMA_KEEP_ALIVE:-30m}"
+    volumes:
+      - lightrag-ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+  lightrag-models-bootstrap:
+    image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee
+    restart: "no"
+    logging: *default-logging
+    depends_on:
+      lightrag-ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://lightrag-ollama:11434"
+      LIGHTRAG_LOCAL_LLM_BASE_MODEL: "${LIGHTRAG_LOCAL_LLM_BASE_MODEL:-qwen3:1.7b}"
+      LIGHTRAG_LOCAL_LLM_MODEL: "${LIGHTRAG_LOCAL_LLM_MODEL:-qwen3-lightrag:1.7b}"
+      LIGHTRAG_EMBEDDING_MODEL: "${LIGHTRAG_EMBEDDING_MODEL:-nomic-embed-text:latest}"
+    volumes:
+      - ./scripts/release/ollama/Modelfile.lightrag-qwen3:/opt/openclaude/Modelfile.lightrag-qwen3:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        ollama pull "$${LIGHTRAG_LOCAL_LLM_BASE_MODEL}" &&
+        ollama create "$${LIGHTRAG_LOCAL_LLM_MODEL}" -f /opt/openclaude/Modelfile.lightrag-qwen3 &&
+        ollama pull "$${LIGHTRAG_EMBEDDING_MODEL}"
+
+  lightrag-ollama-adapter:
+    image: ghcr.io/hkuds/lightrag:latest@sha256:ab23a9c83a735901b18c8960b6b482b602d5b6291abb7e07c5776f7bb2da504e
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    depends_on:
+      lightrag-ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_UPSTREAM_URL: "http://lightrag-ollama:11434"
+      OLLAMA_FORCE_NO_THINK: "${LIGHTRAG_FORCE_NO_THINK:-1}"
+      OLLAMA_KEEP_ALIVE: "${LIGHTRAG_OLLAMA_KEEP_ALIVE:-30m}"
+    volumes:
+      - ./scripts/release/lightrag-ollama-adapter.py:/opt/openclaude/lightrag-ollama-adapter.py:ro
+    entrypoint: ["python", "/opt/openclaude/lightrag-ollama-adapter.py"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:11435/healthz',timeout=5)",
+        ]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+      start_period: 15s
+
+  lightrag:
+    image: ghcr.io/hkuds/lightrag:latest@sha256:ab23a9c83a735901b18c8960b6b482b602d5b6291abb7e07c5776f7bb2da504e
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 60s
+    logging: *default-logging
+    depends_on:
+      lightrag-models-bootstrap:
+        condition: service_completed_successfully
+      lightrag-ollama-adapter:
+        condition: service_healthy
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "9621"
+      WORKING_DIR: "/app/data/rag_storage"
+      INPUT_DIR: "/app/data/inputs"
+      PROMPT_DIR: "/app/data/prompts"
+      WORKSPACE: "${LIGHTRAG_WORKSPACE:-openclaude}"
+      WEBUI_TITLE: "NOVA LightRAG"
+      LIGHTRAG_API_KEY: "${LIGHTRAG_API_KEY:-}"
+      LLM_BINDING: "${LIGHTRAG_LLM_BINDING:-ollama}"
+      LLM_BINDING_HOST: "${LIGHTRAG_LLM_BINDING_HOST:-http://lightrag-ollama-adapter:11435}"
+      LLM_BINDING_API_KEY: "${LIGHTRAG_LLM_BINDING_API_KEY:-${DEEPSEEK_API_KEY:-}}"
+      LLM_MODEL: "${LIGHTRAG_LLM_MODEL:-qwen3-lightrag:1.7b}"
+      LLM_TIMEOUT: "${LIGHTRAG_LLM_TIMEOUT:-900}"
+      OLLAMA_LLM_NUM_CTX: "${LIGHTRAG_LLM_NUM_CTX:-8192}"
+      OLLAMA_LLM_NUM_PREDICT: "${LIGHTRAG_LLM_NUM_PREDICT:-2048}"
+      EMBEDDING_BINDING: "${LIGHTRAG_EMBEDDING_BINDING:-ollama}"
+      EMBEDDING_BINDING_HOST: "${LIGHTRAG_EMBEDDING_BINDING_HOST:-http://lightrag-ollama:11434}"
+      EMBEDDING_BINDING_API_KEY: "${LIGHTRAG_EMBEDDING_BINDING_API_KEY:-}"
+      EMBEDDING_MODEL: "${LIGHTRAG_EMBEDDING_MODEL:-nomic-embed-text:latest}"
+      EMBEDDING_DIM: "${LIGHTRAG_EMBEDDING_DIM:-768}"
+      EMBEDDING_TOKEN_LIMIT: "${LIGHTRAG_EMBEDDING_TOKEN_LIMIT:-8192}"
+      SUMMARY_LANGUAGE: "${LIGHTRAG_SUMMARY_LANGUAGE:-Russian}"
+      MAX_EXTRACTION_RECORDS: "${LIGHTRAG_MAX_EXTRACTION_RECORDS:-60}"
+      MAX_EXTRACTION_ENTITIES: "${LIGHTRAG_MAX_EXTRACTION_ENTITIES:-30}"
+      MAX_ASYNC_LLM: "${LIGHTRAG_MAX_ASYNC_LLM:-1}"
+      MAX_PARALLEL_INSERT: "${LIGHTRAG_MAX_PARALLEL_INSERT:-1}"
+      RERANK_BINDING: "${LIGHTRAG_RERANK_BINDING:-null}"
+      RERANK_BY_DEFAULT: "${LIGHTRAG_RERANK_BY_DEFAULT:-false}"
+      MAX_REQUEST_BODY_BYTES: "${LIGHTRAG_MAX_REQUEST_BODY_BYTES:-0}"
+      MAX_UPLOAD_SIZE: "${LIGHTRAG_MAX_UPLOAD_SIZE:-0}"
+      MAX_TEXTS_PER_REQUEST: "${LIGHTRAG_MAX_TEXTS_PER_REQUEST:-0}"
+    ports:
+      - "${LIGHTRAG_BIND_ADDRESS:-127.0.0.1}:${LIGHTRAG_HOST_PORT:-9621}:9621"
+    volumes:
+      - lightrag-data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9621/health',timeout=5)",
+        ]
+      interval: 15s
+      timeout: 8s
+      retries: 30
+      start_period: 30s
+
   open-webui:
     image: ghcr.io/open-webui/open-webui:main@sha256:b8095f79a6a8ffad8f830bdacc9b5b0aef805689b31bca0b065cc2424d3cfaeb
     restart: unless-stopped
@@ -872,9 +1005,12 @@ services:
     depends_on:
       openclaude-agent:
         condition: service_healthy
+      lightrag:
+        condition: service_healthy
     environment:
       OPENAI_API_BASE_URLS: "http://openclaude-agent:8642/v1"
       OPENAI_API_KEYS: "${OPENCLAUDE_AGENT_INFERENCE_API_KEY:-${OPENCLAUDE_AGENT_API_KEY:-change-me}}"
+      OLLAMA_BASE_URLS: "http://openclaude-ollama:11434;http://lightrag:9621"
       WEBUI_AUTH: "${OPEN_WEBUI_AUTH:-False}"
       # Keep voice input local by default. An empty STT engine selects the
       # bundled faster-whisper backend; an empty TTS engine uses the browser.
@@ -909,6 +1045,8 @@ services:
     image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee
     restart: unless-stopped
     logging: *default-logging
+    environment:
+      OLLAMA_KEEP_ALIVE: "${OPENCLAUDE_OLLAMA_KEEP_ALIVE:-30m}"
     ports:
       - "${OPENCLAUDE_OLLAMA_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_OLLAMA_HOST_PORT:-11434}:11434"
     volumes:
@@ -926,7 +1064,9 @@ volumes:
   openclaude-worker-2-config:
   open-webui:
   openclaude-ollama:
+  lightrag-ollama:
   searxng-cache:
   omniroute-data:
   omniroute-redis:
   capability-router-data:
+  lightrag-data:

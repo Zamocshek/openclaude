@@ -16,9 +16,9 @@
       "tags": ["mcp", "integration", "configuration", "router"],
       "intents": ["add mcp server", "configure integration", "manage tools"]
     },
-    "openrag": {
-      "description": "Search and ingest the OpenRAG knowledge base.",
-      "tags": ["rag", "documents", "retrieval", "knowledge"],
+    "lightrag": {
+      "description": "Search, answer from, and ingest the LightRAG knowledge graph and vector index.",
+      "tags": ["lightrag", "rag", "documents", "retrieval", "knowledge", "graph"],
       "intents": ["search documents", "ingest document", "ground answer"]
     },
     "camofox": {
@@ -75,6 +75,15 @@
     }
   },
   "components": [
+    {
+      "id": "lightrag",
+      "name": "LightRAG",
+      "kind": "rag-service",
+      "image": "ghcr.io/hkuds/lightrag:latest",
+      "port": 9621,
+      "mcpEntrypoint": "scripts/release/lightrag-mcp-bridge.cjs",
+      "description": "Portable knowledge-graph and vector RAG service with a standalone MCP bridge."
+    },
     {
       "id": "capability-router",
       "name": "Capability Router",

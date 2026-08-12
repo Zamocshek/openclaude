@@ -20,15 +20,16 @@
         "MCPR_TOKEN": "${MCPR_TOKEN:-}"
       }
     },
-    "openrag": {
+    "lightrag": {
       "command": "node",
       "args": [
-        "scripts/release/openrag-mcp-bridge.cjs"
+        "scripts/release/lightrag-mcp-bridge.cjs"
       ],
       "env": {
-        "OPENRAG_URL": "${OPENRAG_URL}",
-        "OPENRAG_API_KEY": "${OPENRAG_API_KEY:-}",
-        "OPENRAG_MCP_TIMEOUT": "60"
+        "LIGHTRAG_URL": "${LIGHTRAG_URL:-http://localhost:9621}",
+        "LIGHTRAG_API_KEY": "${LIGHTRAG_API_KEY:-}",
+        "LIGHTRAG_MCP_TIMEOUT": "180",
+        "LIGHTRAG_MCP_MAX_RETRIES": "2"
       }
     },
     "camofox": {

@@ -160,7 +160,7 @@ describe('agent gateway Telegram bridge helpers', () => {
       `Open WebUI: http://localhost:${process.env.OPENCLAUDE_OPEN_WEBUI_HOST_PORT || '8080'}`,
     )
     expect(help).toContain('Hindsight: http://localhost:8888')
-    expect(help).toContain('OpenRAG: http://localhost:3000')
+    expect(help).toContain('LightRAG: http://localhost:9621/webui')
     expect(help).toContain('Telegram MCP: http://localhost:19765')
     expect(help).toContain('OmniRoute: http://localhost:20128')
     expect(help).toEndWith('OmniRoute: http://localhost:20128')

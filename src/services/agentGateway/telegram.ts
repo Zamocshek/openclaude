@@ -713,7 +713,7 @@ export function buildTelegramHelpText(
     `Tool Router: ${links.toolRouter}`,
     `Open WebUI: ${links.openWebUI}`,
     `Hindsight: ${links.hindsight}`,
-    `OpenRAG: ${links.openRAG}`,
+    `LightRAG: ${links.lightRAG}`,
     `Telegram MCP: ${links.telegramMcp}`,
     `File Manager: ${links.fileManager}`,
     `OmniRoute: ${links.omniRoute}`,

@@ -158,7 +158,7 @@ Persistent memory structures:
 External memory/RAG/browser surfaces are exposed to child agent runs through
 MCP and documented in `docs/REPO_GUIDE.md`:
 - **Hindsight**: durable user/project/agent memory (`hindsight_*` tools)
-- **OpenRAG**: document-grounded retrieval and ingestion (`openrag_*` tools)
+- **LightRAG**: document-grounded graph retrieval and ingestion (`lightrag_*` tools)
 - **Camofox**: live browser automation, screenshots, and isolated persistent
   browser-AI profiles (`camofox_*` tools). Non-secret profile routing lives in
   `~/.openclaude/camofox-auth/browser-model-profiles.json`; browser

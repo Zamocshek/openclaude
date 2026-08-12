@@ -3,7 +3,7 @@ import {
   REQUIRED_BASE_MCP_SERVERS,
   PRODUCTION_BUILD_SERVICES,
   buildComposeEnv,
-  getOpenRagVerificationUrls,
+  getLightRagVerificationUrls,
   mergeProductionEnv,
   parseEnv,
   removeLegacyOpenRagJwtSigningKey,
@@ -116,19 +116,16 @@ describe('production control', () => {
     )).toContain('required base MCP server is disabled: searxng')
   })
 
-  test('checks Docling only when the OpenRAG stack explicitly publishes it', () => {
-    expect(getOpenRagVerificationUrls({})).toEqual([
-      'http://127.0.0.1:3000/',
-      'http://127.0.0.1:7860/health',
+  test('checks the LightRAG health endpoint and WebUI on its configured port', () => {
+    expect(getLightRagVerificationUrls({})).toEqual([
+      'http://127.0.0.1:9621/health',
+      'http://127.0.0.1:9621/webui',
     ])
-    expect(getOpenRagVerificationUrls({
-      OPENCLAUDE_OPENRAG_FRONTEND_PORT: '3100',
-      OPENCLAUDE_OPENRAG_LANGFLOW_PORT: '7861',
-      OPENCLAUDE_OPENRAG_DOCLING_PORT: '5001',
+    expect(getLightRagVerificationUrls({
+      LIGHTRAG_HOST_PORT: '19621',
     })).toEqual([
-      'http://127.0.0.1:3100/',
-      'http://127.0.0.1:7861/health',
-      'http://127.0.0.1:5001/docs',
+      'http://127.0.0.1:19621/health',
+      'http://127.0.0.1:19621/webui',
     ])
   })
 

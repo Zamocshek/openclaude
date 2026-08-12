@@ -46,7 +46,7 @@ describe('task-aware MCP routing', () => {
 
     expect(route.servers.has('camofox')).toBe(true)
     expect(route.servers.has('gateway-control')).toBe(true)
-    expect(route.servers.has('openrag')).toBe(false)
+    expect(route.servers.has('lightrag')).toBe(false)
   })
 
   test('routes visual work to local Qwen-MM without unrelated tools', () => {

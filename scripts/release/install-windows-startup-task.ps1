@@ -34,7 +34,7 @@ try {
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
-    -Description 'Starts the OpenClaude agent gateway, Open WebUI, OpenRAG, Hindsight, and Camofox after Windows logon.' `
+    -Description 'Starts the OpenClaude agent gateway, Open WebUI, LightRAG, Hindsight, and Camofox after Windows logon.' `
     -Force | Out-Null
 
   Write-Host "Registered scheduled task: $taskName"

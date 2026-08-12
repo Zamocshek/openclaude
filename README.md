@@ -68,10 +68,19 @@ cd openclaude
 ./openclaude.sh up
 ```
 
-Add `-Full` on PowerShell or `--full` on POSIX to include Hindsight and the
-pinned OpenRAG stack. See the
+The Docker stack includes the pinned LightRAG service and its local Ollama
+embedding/LLM defaults. Add `-Full` on PowerShell or `--full` on POSIX to include
+the remaining optional companion services. See the
 [portable deployment guide](docs/portable-deployment.md) for Telegram,
 provider, Codex subscription, and public-server setup.
+
+LightRAG WebUI is available at `http://localhost:9621/webui`. Existing OpenRAG
+indexes can be exported, reconstructed, re-indexed, and verified without
+deleting the source volume:
+
+```bash
+npm run release:lightrag:migrate
+```
 
 ### Install
 

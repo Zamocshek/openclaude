@@ -18,7 +18,7 @@ const LOOPBACKS = new Set(['127.0.0.1', '::1', 'localhost'])
 export const PRODUCTION_BUILD_SERVICES = ['openclaude-agent', 'telegram-mcp']
 export const REQUIRED_BASE_MCP_SERVERS = [
   'mcp-router',
-  'openrag',
+  'lightrag',
   'camofox',
   'hindsight',
   'codegraph',
@@ -79,7 +79,6 @@ export function validateProductionEnv(env) {
     'OMNIROUTE_WS_BRIDGE_SECRET',
     'SEARXNG_SECRET',
     'SESSION_SECRET',
-    'OPENRAG_ENCRYPTION_KEY',
     'PENTEST_GATEWAY_AUTH_TOKEN',
   ]) {
     if (weakValues.has(String(env[name] || '').trim())) {
@@ -107,6 +106,7 @@ export function validateProductionEnv(env) {
       'OPENCLAUDE_AGENT_WORKER_BIND_ADDRESS',
       'OPENCLAUDE_OPEN_WEBUI_BIND_ADDRESS',
       'OPENCLAUDE_OLLAMA_BIND_ADDRESS',
+      'LIGHTRAG_BIND_ADDRESS',
       'OMNIROUTE_BIND_ADDRESS',
       'TELEGRAM_MCP_WEB_BIND_ADDRESS',
     ]) {
@@ -303,17 +303,12 @@ export function validateRequiredBaseMcpServers(servers) {
   return errors
 }
 
-export function getOpenRagVerificationUrls(env) {
-  const urls = [
-    `http://127.0.0.1:${env.OPENCLAUDE_OPENRAG_FRONTEND_PORT || '3000'}/`,
-    `http://127.0.0.1:${env.OPENCLAUDE_OPENRAG_LANGFLOW_PORT || '7860'}/health`,
+export function getLightRagVerificationUrls(env) {
+  const port = env.LIGHTRAG_HOST_PORT || '9621'
+  return [
+    `http://127.0.0.1:${port}/health`,
+    `http://127.0.0.1:${port}/webui`,
   ]
-  if (env.OPENCLAUDE_OPENRAG_DOCLING_PORT) {
-    urls.push(
-      `http://127.0.0.1:${env.OPENCLAUDE_OPENRAG_DOCLING_PORT}/docs`,
-    )
-  }
-  return urls
 }
 
 export function validateComposeRows(payload, expectedServices = []) {
@@ -393,6 +388,9 @@ export async function verify(options = {}) {
   await requestOk(`http://127.0.0.1:${telegramMcpPort}/`)
   await requestOk(`http://127.0.0.1:${searxngPort}/healthz`)
   await requestOk(`http://127.0.0.1:${ollamaPort}/api/tags`)
+  for (const url of getLightRagVerificationUrls(env)) {
+    await requestOk(url, { key: env.LIGHTRAG_API_KEY })
+  }
 
   if (
     env.HINDSIGHT_URL ||
@@ -403,12 +401,6 @@ export async function verify(options = {}) {
     const hindsightUiPort = env.HINDSIGHT_UI_PORT || '9999'
     await requestOk(`http://127.0.0.1:${hindsightPort}/docs`)
     await requestOk(`http://127.0.0.1:${hindsightUiPort}/`)
-  }
-
-  if (truthy(env.OPENCLAUDE_OPENRAG_ENABLED)) {
-    for (const url of getOpenRagVerificationUrls(env)) {
-      await requestOk(url)
-    }
   }
 
   const composeArgs = options.composeArgs || COMPOSE_ARGS
@@ -559,7 +551,6 @@ export function ensureProductionSecrets() {
     OMNIROUTE_WS_BRIDGE_SECRET: () => randomBytes(32).toString('hex'),
     SEARXNG_SECRET: () => randomBytes(32).toString('hex'),
     SESSION_SECRET: () => randomBytes(32).toString('hex'),
-    OPENRAG_ENCRYPTION_KEY: () => randomBytes(32).toString('base64'),
     PENTEST_GATEWAY_AUTH_TOKEN: () => randomBytes(32).toString('hex'),
   }
   for (const [name, generate] of Object.entries(secretGenerators)) {

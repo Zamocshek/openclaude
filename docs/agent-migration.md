@@ -25,7 +25,7 @@ OpenClaw, or Codex profile.
 - Full history remains in canonical JSONL even when a target has no stable
   public API for importing an internal chat database.
 
-Hindsight and OpenRAG indexes are derived state, not portable memory. Their MCP
+Hindsight and LightRAG indexes are derived state, not portable memory. Their MCP
 definitions move with the bundle, while the target rebuilds indexes from
 `identity/`, `state/memory/`, `conversations/`, and `workspace/`. This preserves
 logical memory without coupling migration to a private vector-store schema or

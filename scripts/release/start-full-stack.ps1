@@ -53,33 +53,6 @@ function Test-HttpOk {
   }
 }
 
-function Ensure-OllamaEmbeddings {
-  $provider = if ($env:OPENCLAUDE_OPENRAG_EMBEDDING_PROVIDER) { $env:OPENCLAUDE_OPENRAG_EMBEDDING_PROVIDER } else { $env:EMBEDDING_PROVIDER }
-  if ($provider -and $provider.ToLowerInvariant() -ne 'ollama') { return }
-
-  $model = if ($env:OPENCLAUDE_OPENRAG_EMBEDDING_MODEL) { $env:OPENCLAUDE_OPENRAG_EMBEDDING_MODEL } elseif ($env:EMBEDDING_MODEL) { $env:EMBEDDING_MODEL } else { 'nomic-embed-text:latest' }
-  Write-StackLog "Ensuring Ollama embedding service and model $model."
-
-  & docker compose -f docker-compose.agent-gateway.yml up -d openclaude-ollama
-  if ($LASTEXITCODE -ne 0) { throw "Ollama startup failed with exit code $LASTEXITCODE." }
-
-  for ($i = 0; $i -lt 40; $i++) {
-    if (Test-HttpOk 'http://localhost:11434/api/tags') { break }
-    Start-Sleep -Seconds 3
-  }
-  if (-not (Test-HttpOk 'http://localhost:11434/api/tags')) {
-    throw 'Ollama did not become ready in time.'
-  }
-
-  $tags = Invoke-RestMethod -Uri 'http://localhost:11434/api/tags' -TimeoutSec 20
-  $hasModel = @($tags.models).Where({ $_.name -eq $model }, 'First').Count -gt 0
-  if (-not $hasModel) {
-    Write-StackLog "Pulling Ollama embedding model $model."
-    & docker compose -f docker-compose.agent-gateway.yml exec -T openclaude-ollama ollama pull $model
-    if ($LASTEXITCODE -ne 0) { throw "Ollama model pull failed with exit code $LASTEXITCODE." }
-  }
-}
-
 function Start-CamofoxIfNeeded {
   $port = if ($env:CAMOFOX_PORT) { $env:CAMOFOX_PORT } else { '9377' }
   if (Test-HttpOk "http://localhost:$port/health") {
@@ -104,17 +77,12 @@ Start-Transcript -Path $transcriptPath -Append | Out-Null
 try {
   Import-DotEnv (Join-Path $repoRoot '.env')
   Wait-Docker
-  Ensure-OllamaEmbeddings
-
-  Write-StackLog 'Starting OpenRAG Docker stack.'
-  & cmd.exe /c "`"$scriptDir\openrag-docker-up.bat`""
-  if ($LASTEXITCODE -ne 0) { throw "OpenRAG startup failed with exit code $LASTEXITCODE." }
 
   Write-StackLog 'Starting Hindsight memory stack.'
   & node scripts\release\hindsight-control.mjs docker-up
   if ($LASTEXITCODE -ne 0) { throw "Hindsight startup failed with exit code $LASTEXITCODE." }
 
-  Write-StackLog 'Starting OpenClaude agent gateway and Open WebUI.'
+  Write-StackLog 'Starting OpenClaude, LightRAG, agent gateway, and Open WebUI.'
   & docker compose -f docker-compose.agent-gateway.yml up -d --build
   if ($LASTEXITCODE -ne 0) { throw "Agent Docker startup failed with exit code $LASTEXITCODE." }
 

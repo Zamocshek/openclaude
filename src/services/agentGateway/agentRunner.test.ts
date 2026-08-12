@@ -221,7 +221,7 @@ describe('agent gateway prompt builder', () => {
     expect(hasCodingTaskIntent(prompt)).toBe(false)
     expect(hasCodingMutationIntent(prompt)).toBe(false)
     expect(hasCodingMutationIntent(
-      'Do not edit PREFLIGHT.md; only verify it with OpenRAG search.',
+      'Do not edit PREFLIGHT.md; only verify it with LightRAG search.',
     )).toBe(false)
   })
 
@@ -520,18 +520,18 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('Privately choose only the skills')
   })
 
-  test('adds OpenRAG usage guidance when RAG integration is configured', () => {
+  test('adds LightRAG usage guidance when RAG integration is configured', () => {
     const config = getDefaultAgentGatewayConfig()
     config.openRAG.enabled = true
-    config.openRAG.apiKey = 'orag_test'
+    config.openRAG.apiKey = 'lightrag_test'
     config.openRAG.mcpEnabled = true
 
     const args = buildAgentArgs(config)
     const systemPrompt = args[args.indexOf('--append-system-prompt') + 1]
 
     expect(systemPrompt).toContain('For this document or knowledge-base request')
-    expect(systemPrompt).toContain('openrag_search')
-    expect(systemPrompt).toContain('openrag_ingest_file')
+    expect(systemPrompt).toContain('lightrag_search')
+    expect(systemPrompt).toContain('lightrag_ingest_file')
   })
 
   test('adds CodeGraph guidance for code exploration and impact analysis', () => {
@@ -2004,7 +2004,7 @@ describe('agent gateway prompt builder', () => {
         'MCPR_TOKEN=file-token',
         'MCPR_HOST=127.0.0.1',
         'MCPR_PORT=3282',
-        'OPENRAG_URL=http://localhost:3000',
+        'LIGHTRAG_URL=http://localhost:9621',
         'CAMOFOX_URL=http://localhost:9377',
         'HINDSIGHT_URL=http://localhost:8888',
       ].join('\n'),
@@ -2017,7 +2017,7 @@ describe('agent gateway prompt builder', () => {
         MCPR_TOKEN: 'runtime-token',
         MCPR_HOST: 'host.docker.internal',
         MCPR_PORT: '3282',
-        OPENRAG_URL: 'http://host.docker.internal:3000',
+        LIGHTRAG_URL: 'http://lightrag:9621',
         CAMOFOX_URL: 'http://host.docker.internal:9377',
         HINDSIGHT_URL: 'http://host.docker.internal:8888',
       },
@@ -2026,7 +2026,7 @@ describe('agent gateway prompt builder', () => {
 
     expect(env.MCPR_TOKEN).toBe('runtime-token')
     expect(env.MCPR_HOST).toBe('host.docker.internal')
-    expect(env.OPENRAG_URL).toBe('http://host.docker.internal:3000')
+    expect(env.LIGHTRAG_URL).toBe('http://lightrag:9621')
     expect(env.CAMOFOX_URL).toBe('http://host.docker.internal:9377')
     expect(env.HINDSIGHT_URL).toBe('http://host.docker.internal:8888')
     expect(env.MCP_TIMEOUT).toBe('5000')

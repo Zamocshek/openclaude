@@ -15,11 +15,13 @@ const ENV_PATH = path.join(ROOT_DIR, '.env')
 const CONFIG_HOME = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.openclaude')
 const CONFIG_PATH = path.join(CONFIG_HOME, 'agent-gateway.json')
 const OPENWEBUI_DATA_DIR = path.join(CONFIG_HOME, 'open-webui-data')
-const OPENRAG_REPO_DIR = path.join(CONFIG_HOME, 'openrag')
-const OPENRAG_WORKSPACE_DIR = path.join(CONFIG_HOME, 'openrag-workspace')
+// Keep the openRAG state key for backwards-compatible saved settings. The
+// active runtime and MCP server behind it are LightRAG.
+const OPENRAG_REPO_DIR = path.join(CONFIG_HOME, 'lightrag')
+const OPENRAG_WORKSPACE_DIR = path.join(CONFIG_HOME, 'lightrag-workspace')
 const OPENRAG_DOCUMENTS_DIR = path.join(CONFIG_HOME, 'openrag-documents')
-const OPENRAG_MCP_BRIDGE = path.join(SCRIPT_DIR, 'openrag-mcp-bridge.cjs')
-const OPENRAG_MCP_BRIDGE_ARG = 'scripts/release/openrag-mcp-bridge.cjs'
+const OPENRAG_MCP_BRIDGE = path.join(SCRIPT_DIR, 'lightrag-mcp-bridge.cjs')
+const OPENRAG_MCP_BRIDGE_ARG = 'scripts/release/lightrag-mcp-bridge.cjs'
 const CAMOFOX_MCP_BRIDGE = path.join(SCRIPT_DIR, 'camofox-mcp-bridge.cjs')
 const CAMOFOX_MCP_BRIDGE_ARG = 'scripts/release/camofox-mcp-bridge.cjs'
 const HINDSIGHT_MCP_BRIDGE = path.join(SCRIPT_DIR, 'hindsight-mcp-bridge.cjs')
@@ -113,27 +115,28 @@ const DEFAULT_CONFIG = {
     dataDir: OPENWEBUI_DATA_DIR,
   },
   openRAG: {
-    enabled: false,
-    url: 'http://localhost:3000',
+    enabled: true,
+    url: 'http://localhost:9621',
     apiKey: '',
     repoDir: OPENRAG_REPO_DIR,
     workspaceDir: OPENRAG_WORKSPACE_DIR,
-    frontendPort: 3000,
-    langflowPort: 7860,
-    doclingPort: 5001,
+    frontendPort: 9621,
+    langflowPort: 9621,
+    doclingPort: 9621,
     openSearchPassword: '',
     langflowSuperuser: 'admin',
     langflowSuperuserPassword: '',
-    llmProvider: 'openai',
-    llmModel: '',
-    embeddingProvider: 'openai',
-    embeddingModel: 'text-embedding-3-small',
-    ollamaEndpoint: 'http://host.docker.internal:11434',
-    mcpEnabled: false,
+    llmProvider: 'ollama',
+    llmModel: 'qwen3-lightrag:1.7b',
+    embeddingProvider: 'ollama',
+    embeddingModel: 'nomic-embed-text',
+    ollamaEndpoint: 'http://lightrag-ollama-adapter:11435',
+    embeddingEndpoint: 'http://lightrag-ollama:11434',
+    mcpEnabled: true,
     mcpCommand: 'node',
     mcpArgs: [OPENRAG_MCP_BRIDGE_ARG],
-    mcpTimeoutSeconds: 60,
-    useAgentProvider: true,
+    mcpTimeoutSeconds: 180,
+    useAgentProvider: false,
   },
   camofox: {
     enabled: true,
@@ -292,10 +295,10 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === '/api/mcp/configure-all' && request.method === 'POST') {
       const state = await readActionState(request)
-      const openrag = await safeAction(() => configureOpenRAGMcp(state))
+      const lightrag = await safeAction(() => configureOpenRAGMcp(state))
       const camofox = await safeAction(() => configureCamofoxMcp(state))
       const hindsight = await safeAction(() => configureHindsightMcp(state))
-      return sendJson(response, { ok: openrag.ok && camofox.ok && hindsight.ok, openrag, camofox, hindsight })
+      return sendJson(response, { ok: lightrag.ok && camofox.ok && hindsight.ok, lightrag, camofox, hindsight })
     }
     if (url.pathname === '/api/docker/start' && request.method === 'POST') {
       const state = await readActionState(request)
@@ -378,9 +381,9 @@ async function loadState() {
   merged.openRAG = normalizeOpenRAG({
     ...DEFAULT_CONFIG.openRAG,
     ...(merged.openRAG || {}),
-    enabled: envBool(env.OPENCLAUDE_OPENRAG_ENABLED, merged.openRAG?.enabled ?? DEFAULT_CONFIG.openRAG.enabled),
-    url: env.OPENRAG_URL || env.OPENCLAUDE_OPENRAG_URL || merged.openRAG?.url || DEFAULT_CONFIG.openRAG.url,
-    apiKey: env.OPENRAG_API_KEY || env.OPENCLAUDE_OPENRAG_API_KEY || merged.openRAG?.apiKey || '',
+    enabled: envBool(env.OPENCLAUDE_LIGHTRAG_ENABLED ?? env.OPENCLAUDE_OPENRAG_ENABLED, merged.openRAG?.enabled ?? DEFAULT_CONFIG.openRAG.enabled),
+    url: env.LIGHTRAG_URL || env.OPENCLAUDE_LIGHTRAG_URL || env.OPENRAG_URL || env.OPENCLAUDE_OPENRAG_URL || merged.openRAG?.url || DEFAULT_CONFIG.openRAG.url,
+    apiKey: env.LIGHTRAG_API_KEY || env.OPENCLAUDE_LIGHTRAG_API_KEY || env.OPENRAG_API_KEY || env.OPENCLAUDE_OPENRAG_API_KEY || merged.openRAG?.apiKey || '',
     repoDir: env.OPENCLAUDE_OPENRAG_REPO_DIR || merged.openRAG?.repoDir || OPENRAG_REPO_DIR,
     workspaceDir: env.OPENCLAUDE_OPENRAG_WORKSPACE_DIR || merged.openRAG?.workspaceDir || OPENRAG_WORKSPACE_DIR,
     frontendPort: toPort(env.OPENCLAUDE_OPENRAG_FRONTEND_PORT, merged.openRAG?.frontendPort || DEFAULT_CONFIG.openRAG.frontendPort),
@@ -389,15 +392,20 @@ async function loadState() {
     openSearchPassword: env.OPENCLAUDE_OPENRAG_OPENSEARCH_PASSWORD || merged.openRAG?.openSearchPassword || '',
     langflowSuperuser: env.OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER || merged.openRAG?.langflowSuperuser || DEFAULT_CONFIG.openRAG.langflowSuperuser,
     langflowSuperuserPassword: env.OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER_PASSWORD || merged.openRAG?.langflowSuperuserPassword || '',
-    llmProvider: env.OPENCLAUDE_OPENRAG_LLM_PROVIDER || env.LLM_PROVIDER || merged.openRAG?.llmProvider || DEFAULT_CONFIG.openRAG.llmProvider,
-    llmModel: env.OPENCLAUDE_OPENRAG_LLM_MODEL || env.LLM_MODEL || merged.openRAG?.llmModel || '',
-    embeddingProvider: env.OPENCLAUDE_OPENRAG_EMBEDDING_PROVIDER || env.EMBEDDING_PROVIDER || merged.openRAG?.embeddingProvider || DEFAULT_CONFIG.openRAG.embeddingProvider,
-    embeddingModel: env.OPENCLAUDE_OPENRAG_EMBEDDING_MODEL || env.EMBEDDING_MODEL || merged.openRAG?.embeddingModel || DEFAULT_CONFIG.openRAG.embeddingModel,
-    ollamaEndpoint: env.OPENCLAUDE_OPENRAG_OLLAMA_ENDPOINT || env.OLLAMA_ENDPOINT || merged.openRAG?.ollamaEndpoint || DEFAULT_CONFIG.openRAG.ollamaEndpoint,
-    mcpEnabled: envBool(env.OPENCLAUDE_OPENRAG_MCP_ENABLED, merged.openRAG?.mcpEnabled ?? DEFAULT_CONFIG.openRAG.mcpEnabled),
-    mcpCommand: env.OPENCLAUDE_OPENRAG_MCP_COMMAND || merged.openRAG?.mcpCommand || DEFAULT_CONFIG.openRAG.mcpCommand,
-    mcpArgs: env.OPENCLAUDE_OPENRAG_MCP_ARGS !== undefined ? splitList(env.OPENCLAUDE_OPENRAG_MCP_ARGS) : merged.openRAG?.mcpArgs || DEFAULT_CONFIG.openRAG.mcpArgs,
-    mcpTimeoutSeconds: Number(env.OPENRAG_MCP_TIMEOUT || env.OPENCLAUDE_OPENRAG_MCP_TIMEOUT_SECONDS || merged.openRAG?.mcpTimeoutSeconds || DEFAULT_CONFIG.openRAG.mcpTimeoutSeconds),
+    llmProvider: env.LIGHTRAG_LLM_BINDING || env.OPENCLAUDE_LIGHTRAG_LLM_BINDING || env.OPENCLAUDE_OPENRAG_LLM_PROVIDER || env.LLM_BINDING || env.LLM_PROVIDER || merged.openRAG?.llmProvider || DEFAULT_CONFIG.openRAG.llmProvider,
+    llmModel: env.LIGHTRAG_LLM_MODEL || env.OPENCLAUDE_LIGHTRAG_LLM_MODEL || env.OPENCLAUDE_OPENRAG_LLM_MODEL || env.LLM_MODEL || merged.openRAG?.llmModel || DEFAULT_CONFIG.openRAG.llmModel,
+    embeddingProvider: env.LIGHTRAG_EMBEDDING_BINDING || env.OPENCLAUDE_LIGHTRAG_EMBEDDING_BINDING || env.OPENCLAUDE_OPENRAG_EMBEDDING_PROVIDER || env.EMBEDDING_BINDING || env.EMBEDDING_PROVIDER || merged.openRAG?.embeddingProvider || DEFAULT_CONFIG.openRAG.embeddingProvider,
+    embeddingModel: env.LIGHTRAG_EMBEDDING_MODEL || env.OPENCLAUDE_LIGHTRAG_EMBEDDING_MODEL || env.OPENCLAUDE_OPENRAG_EMBEDDING_MODEL || env.EMBEDDING_MODEL || merged.openRAG?.embeddingModel || DEFAULT_CONFIG.openRAG.embeddingModel,
+    ollamaEndpoint: env.LIGHTRAG_LLM_BINDING_HOST || env.OPENCLAUDE_LIGHTRAG_OLLAMA_HOST || env.OPENCLAUDE_OPENRAG_OLLAMA_ENDPOINT || env.OLLAMA_HOST || env.OLLAMA_ENDPOINT || merged.openRAG?.ollamaEndpoint || DEFAULT_CONFIG.openRAG.ollamaEndpoint,
+    embeddingEndpoint: env.LIGHTRAG_EMBEDDING_BINDING_HOST || merged.openRAG?.embeddingEndpoint || DEFAULT_CONFIG.openRAG.embeddingEndpoint,
+    mcpEnabled: envBool(env.OPENCLAUDE_LIGHTRAG_MCP_ENABLED ?? env.OPENCLAUDE_OPENRAG_MCP_ENABLED, merged.openRAG?.mcpEnabled ?? DEFAULT_CONFIG.openRAG.mcpEnabled),
+    mcpCommand: env.OPENCLAUDE_LIGHTRAG_MCP_COMMAND || env.OPENCLAUDE_OPENRAG_MCP_COMMAND || merged.openRAG?.mcpCommand || DEFAULT_CONFIG.openRAG.mcpCommand,
+    mcpArgs: env.OPENCLAUDE_LIGHTRAG_MCP_ARGS !== undefined
+      ? splitList(env.OPENCLAUDE_LIGHTRAG_MCP_ARGS)
+      : env.OPENCLAUDE_OPENRAG_MCP_ARGS !== undefined
+        ? splitList(env.OPENCLAUDE_OPENRAG_MCP_ARGS)
+        : merged.openRAG?.mcpArgs || DEFAULT_CONFIG.openRAG.mcpArgs,
+    mcpTimeoutSeconds: Number(env.LIGHTRAG_MCP_TIMEOUT || env.OPENCLAUDE_LIGHTRAG_MCP_TIMEOUT_SECONDS || env.OPENRAG_MCP_TIMEOUT || env.OPENCLAUDE_OPENRAG_MCP_TIMEOUT_SECONDS || merged.openRAG?.mcpTimeoutSeconds || DEFAULT_CONFIG.openRAG.mcpTimeoutSeconds),
   })
   merged.camofox = normalizeCamofox({
     ...DEFAULT_CONFIG.camofox,
@@ -592,30 +600,28 @@ function toEnvUpdates(state) {
     OPENCLAUDE_OPEN_WEBUI_PORT: String(state.openWebUI.port),
     OPENCLAUDE_OPEN_WEBUI_PYTHON: state.openWebUI.pythonCommand,
     OPENCLAUDE_OPEN_WEBUI_DATA_DIR: state.openWebUI.dataDir,
-    OPENCLAUDE_OPENRAG_ENABLED: state.openRAG.enabled ? '1' : '0',
-    OPENRAG_URL: state.openRAG.url,
-    OPENCLAUDE_DOCKER_OPENRAG_URL: dockerOpenRAGUrl(state),
-    OPENCLAUDE_OPENRAG_URL: state.openRAG.url,
-    OPENRAG_API_KEY: state.openRAG.apiKey,
-    OPENCLAUDE_OPENRAG_API_KEY: state.openRAG.apiKey,
-    OPENCLAUDE_OPENRAG_REPO_DIR: state.openRAG.repoDir,
-    OPENCLAUDE_OPENRAG_WORKSPACE_DIR: state.openRAG.workspaceDir,
-    OPENCLAUDE_OPENRAG_FRONTEND_PORT: String(state.openRAG.frontendPort),
-    OPENCLAUDE_OPENRAG_LANGFLOW_PORT: String(state.openRAG.langflowPort),
-    OPENCLAUDE_OPENRAG_DOCLING_PORT: String(state.openRAG.doclingPort),
-    OPENCLAUDE_OPENRAG_OPENSEARCH_PASSWORD: state.openRAG.openSearchPassword,
-    OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER: state.openRAG.langflowSuperuser,
-    OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER_PASSWORD: state.openRAG.langflowSuperuserPassword,
-    OPENCLAUDE_OPENRAG_LLM_PROVIDER: state.openRAG.llmProvider,
-    OPENCLAUDE_OPENRAG_LLM_MODEL: state.openRAG.llmModel,
-    OPENCLAUDE_OPENRAG_EMBEDDING_PROVIDER: state.openRAG.embeddingProvider,
-    OPENCLAUDE_OPENRAG_EMBEDDING_MODEL: state.openRAG.embeddingModel,
-    OPENCLAUDE_OPENRAG_OLLAMA_ENDPOINT: state.openRAG.ollamaEndpoint,
-    OPENCLAUDE_OPENRAG_MCP_ENABLED: state.openRAG.mcpEnabled ? '1' : '0',
-    OPENCLAUDE_OPENRAG_MCP_COMMAND: state.openRAG.mcpCommand,
-    OPENCLAUDE_OPENRAG_MCP_ARGS: state.openRAG.mcpArgs.join(','),
-    OPENRAG_MCP_TIMEOUT: String(state.openRAG.mcpTimeoutSeconds),
-    OPENCLAUDE_OPENRAG_MCP_TIMEOUT_SECONDS: String(state.openRAG.mcpTimeoutSeconds),
+    OPENCLAUDE_LIGHTRAG_ENABLED: state.openRAG.enabled ? '1' : '0',
+    LIGHTRAG_URL: state.openRAG.url,
+    OPENCLAUDE_DOCKER_LIGHTRAG_URL: dockerOpenRAGUrl(state),
+    OPENCLAUDE_LIGHTRAG_URL: state.openRAG.url,
+    LIGHTRAG_API_KEY: state.openRAG.apiKey,
+    OPENCLAUDE_LIGHTRAG_API_KEY: state.openRAG.apiKey,
+    OPENCLAUDE_LIGHTRAG_LLM_BINDING: state.openRAG.llmProvider,
+    OPENCLAUDE_LIGHTRAG_LLM_MODEL: state.openRAG.llmModel,
+    OPENCLAUDE_LIGHTRAG_EMBEDDING_BINDING: state.openRAG.embeddingProvider,
+    OPENCLAUDE_LIGHTRAG_EMBEDDING_MODEL: state.openRAG.embeddingModel,
+    OPENCLAUDE_LIGHTRAG_OLLAMA_HOST: state.openRAG.ollamaEndpoint,
+    LIGHTRAG_LLM_BINDING: state.openRAG.llmProvider,
+    LIGHTRAG_LLM_BINDING_HOST: state.openRAG.ollamaEndpoint,
+    LIGHTRAG_LLM_MODEL: state.openRAG.llmModel,
+    LIGHTRAG_EMBEDDING_BINDING: state.openRAG.embeddingProvider,
+    LIGHTRAG_EMBEDDING_BINDING_HOST: state.openRAG.embeddingEndpoint,
+    LIGHTRAG_EMBEDDING_MODEL: state.openRAG.embeddingModel,
+    OPENCLAUDE_LIGHTRAG_MCP_ENABLED: state.openRAG.mcpEnabled ? '1' : '0',
+    OPENCLAUDE_LIGHTRAG_MCP_COMMAND: state.openRAG.mcpCommand,
+    OPENCLAUDE_LIGHTRAG_MCP_ARGS: state.openRAG.mcpArgs.join(','),
+    LIGHTRAG_MCP_TIMEOUT: String(state.openRAG.mcpTimeoutSeconds),
+    OPENCLAUDE_LIGHTRAG_MCP_TIMEOUT_SECONDS: String(state.openRAG.mcpTimeoutSeconds),
     OPENCLAUDE_CAMOFOX_ENABLED: state.camofox.enabled ? '1' : '0',
     OPENCLAUDE_CAMOFOX_MCP_ENABLED: state.camofox.mcpEnabled ? '1' : '0',
     CAMOFOX_URL: state.camofox.url,
@@ -756,9 +762,16 @@ function normalizeDockerProvider(input) {
 }
 
 function normalizeOpenRAG(input) {
-  const frontendPort = toPort(input.frontendPort, DEFAULT_CONFIG.openRAG.frontendPort)
-  const url = String(input.url || `http://localhost:${frontendPort}`).trim().replace(/\/+$/, '')
-  const mcpArgs = splitList(input.mcpArgs)
+  const configuredPort = toPort(input.frontendPort, DEFAULT_CONFIG.openRAG.frontendPort)
+  const frontendPort = configuredPort === 3000 ? DEFAULT_CONFIG.openRAG.frontendPort : configuredPort
+  const rawUrl = String(input.url || `http://localhost:${frontendPort}`).trim().replace(/\/+$/, '')
+  const url = ['http://localhost:3000', 'http://127.0.0.1:3000'].includes(rawUrl)
+    ? DEFAULT_CONFIG.openRAG.url
+    : rawUrl
+  const configuredArgs = splitList(input.mcpArgs)
+  const mcpArgs = configuredArgs.some(arg => /openrag-mcp-bridge\.cjs$/i.test(arg))
+    ? [OPENRAG_MCP_BRIDGE_ARG]
+    : configuredArgs
   return {
     enabled: Boolean(input.enabled),
     url: url || DEFAULT_CONFIG.openRAG.url,
@@ -776,6 +789,7 @@ function normalizeOpenRAG(input) {
     embeddingProvider: normalizeOpenRAGProvider(input.embeddingProvider, 'embedding'),
     embeddingModel: String(input.embeddingModel || DEFAULT_CONFIG.openRAG.embeddingModel).trim(),
     ollamaEndpoint: String(input.ollamaEndpoint || DEFAULT_CONFIG.openRAG.ollamaEndpoint).trim(),
+    embeddingEndpoint: String(input.embeddingEndpoint || DEFAULT_CONFIG.openRAG.embeddingEndpoint).trim(),
     mcpEnabled: Boolean(input.mcpEnabled),
     mcpCommand: String(input.mcpCommand || DEFAULT_CONFIG.openRAG.mcpCommand).trim(),
     mcpArgs: mcpArgs.length > 0 ? mcpArgs : DEFAULT_CONFIG.openRAG.mcpArgs,
@@ -929,77 +943,56 @@ async function startOpenWebUI(state) {
 
 async function installOpenRAG(state) {
   const steps = []
-  await pushStep(steps, 'uv available', ensureUvAvailable)
-  await pushStep(steps, 'clone/update OpenRAG repo', () => ensureOpenRAGRepo(state))
-  if (steps.every(step => step.ok)) {
-    await pushStep(steps, 'sync OpenRAG dependencies', () => runCheckedCommand('uv', ['sync', '--python', '3.13'], {
-      cwd: state.openRAG.repoDir,
-      env: runtimeEnv(state),
-      timeoutMs: 20 * 60 * 1000,
-    }))
-  }
-  if (steps.every(step => step.ok)) {
-    await pushStep(steps, 'check OpenRAG MCP package', () => runCheckedCommand('uv', ['run', '--with', 'openrag-mcp', 'python', '-c', 'import openrag_mcp; print("OPENRAG_MCP_IMPORT_OK")'], {
-      cwd: ROOT_DIR,
-      env: runtimeEnv(state, openRAGRuntimeEnv(state)),
-      timeoutMs: 5 * 60 * 1000,
-    }))
-  }
-  return { ok: steps.every(step => step.ok), steps, repoDir: state.openRAG.repoDir }
+  await pushStep(steps, 'pull pinned LightRAG image', () => runCheckedCommand('docker', [
+    'compose', '-f', 'docker-compose.agent-gateway.yml', 'pull', 'lightrag',
+  ], {
+    cwd: ROOT_DIR,
+    env: runtimeEnv(state, openRAGRuntimeEnv(state)),
+    timeoutMs: 20 * 60 * 1000,
+  }))
+  await pushStep(steps, 'check LightRAG MCP bridge syntax', () => runCheckedCommand('node', ['--check', OPENRAG_MCP_BRIDGE], {
+    cwd: ROOT_DIR,
+    env: runtimeEnv(state, openRAGRuntimeEnv(state)),
+    timeoutMs: 60000,
+  }))
+  return { ok: steps.every(step => step.ok), steps }
 }
 
 async function startOpenRAGTui(state) {
-  await mkdir(state.openRAG.workspaceDir, { recursive: true })
-  const command = releaseScript('start-openrag.bat')
-  const shellCommand = process.platform === 'win32'
-    ? `"${command}"`
-    : `"${releaseScript('start-openrag.sh')}"`
-  const opened = await openInteractiveTerminal(shellCommand, ROOT_DIR, 'OpenRAG')
+  const url = `${openRAGUrl(state).replace(/\/+$/, '')}/webui`
+  openBrowser(url)
   return {
-    ok: opened.ok,
-    ...opened,
-    message: 'OpenRAG TUI is interactive. Complete setup there, then create an OpenRAG API key in Settings > API Keys and save it here for MCP.',
+    ok: true,
+    url,
+    message: 'LightRAG uses its WebUI; the page was opened in the browser.',
   }
 }
 
 async function startOpenRAGDocker(state) {
   const steps = []
-  await pushStep(steps, 'clone/update OpenRAG repo', () => ensureOpenRAGRepo(state))
-  if (!steps.every(step => step.ok)) return { ok: false, steps }
-  const prepared = await prepareOpenRAGEnv(state)
-  await pushStep(steps, 'sync OpenRAG dependencies', () => runCheckedCommand('uv', ['sync', '--python', '3.13'], {
-    cwd: state.openRAG.repoDir,
-    env: runtimeEnv(state),
-    timeoutMs: 20 * 60 * 1000,
-  }))
-  await pushStep(steps, 'start Docling native service', () => startDoclingNative(state))
-  await pushStep(steps, 'start OpenRAG Docker services', () => runCheckedCommand('docker', ['compose', 'up', '-d'], {
-    cwd: state.openRAG.repoDir,
-    env: runtimeEnv(state, openRAGDockerEnv(state)),
+  await pushStep(steps, 'start LightRAG Docker service', () => runCheckedCommand('docker', [
+    'compose', '-f', 'docker-compose.agent-gateway.yml', 'up', '-d', 'lightrag',
+  ], {
+    cwd: ROOT_DIR,
+    env: runtimeEnv(state, openRAGRuntimeEnv(state)),
     timeoutMs: 25 * 60 * 1000,
   }))
   if (steps.every(step => step.ok)) {
-    await pushStep(steps, 'wait for OpenRAG frontend', () => waitForUrl(openRAGUrl(state), 180000))
+    await pushStep(steps, 'wait for LightRAG health', () => waitForUrl(`${openRAGUrl(state).replace(/\/+$/, '')}/health`, 5 * 60 * 1000))
   }
-  return { ok: steps.every(step => step.ok), steps, url: openRAGUrl(state), envPath: prepared.envPath }
+  return { ok: steps.every(step => step.ok), steps, url: `${openRAGUrl(state).replace(/\/+$/, '')}/webui` }
 }
 
 async function stopOpenRAGDocker(state) {
   const steps = []
-  if (existsSync(path.join(state.openRAG.repoDir, 'docker-compose.yml'))) {
-    await pushStep(steps, 'stop OpenRAG containers', () => runCheckedCommand('docker', ['compose', 'down'], {
-      cwd: state.openRAG.repoDir,
-      env: runtimeEnv(state, openRAGDockerEnv(state)),
-      timeoutMs: 5 * 60 * 1000,
-    }))
-    await pushStep(steps, 'stop Docling native service', () => runCheckedCommand('uv', ['run', '--python', '3.13', 'python', 'scripts/docling_ctl.py', 'stop'], {
-      cwd: state.openRAG.repoDir,
-      env: runtimeEnv(state),
-      timeoutMs: 60000,
-    }))
-  } else {
-    pushSkippedStep(steps, 'OpenRAG repo', `${state.openRAG.repoDir} is not installed`)
-  }
+  await pushStep(steps, 'stop LightRAG runtime', () => runCheckedCommand('docker', [
+    'compose', '-f', 'docker-compose.agent-gateway.yml', 'stop',
+    'lightrag', 'lightrag-ollama-adapter', 'lightrag-ollama',
+  ], {
+    cwd: ROOT_DIR,
+    env: runtimeEnv(state, openRAGRuntimeEnv(state)),
+    timeoutMs: 5 * 60 * 1000,
+  }))
   return { ok: steps.every(step => step.ok), steps }
 }
 
@@ -1008,29 +1001,27 @@ async function configureOpenRAGMcp(state) {
   config.mcpServers = config.mcpServers && typeof config.mcpServers === 'object'
     ? config.mcpServers
     : {}
+  delete config.mcpServers.openrag
   if (state.openRAG.mcpEnabled) {
-    if (!state.openRAG.apiKey) {
-      throw new Error('OPENRAG_API_KEY is required before enabling OpenRAG MCP. Create it in OpenRAG Settings > API Keys.')
-    }
-    config.mcpServers.openrag = {
+    config.mcpServers.lightrag = {
       command: state.openRAG.mcpCommand,
       args: state.openRAG.mcpArgs,
       env: {
-        OPENRAG_URL: state.openRAG.url,
-        OPENRAG_API_KEY: state.openRAG.apiKey,
-        OPENRAG_MCP_TIMEOUT: String(state.openRAG.mcpTimeoutSeconds),
+        LIGHTRAG_URL: state.openRAG.url,
+        LIGHTRAG_API_KEY: state.openRAG.apiKey,
+        LIGHTRAG_MCP_TIMEOUT: String(state.openRAG.mcpTimeoutSeconds),
       },
     }
   } else {
-    delete config.mcpServers.openrag
+    delete config.mcpServers.lightrag
   }
   await writeFile(MCP_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
   return {
     ok: true,
     path: MCP_CONFIG_PATH,
     enabled: state.openRAG.mcpEnabled,
-    server: config.mcpServers.openrag
-      ? { ...config.mcpServers.openrag, env: { ...config.mcpServers.openrag.env, OPENRAG_API_KEY: maskSecret(config.mcpServers.openrag.env.OPENRAG_API_KEY) } }
+    server: config.mcpServers.lightrag
+      ? { ...config.mcpServers.lightrag, env: { ...config.mcpServers.lightrag.env, LIGHTRAG_API_KEY: maskSecret(config.mcpServers.lightrag.env.LIGHTRAG_API_KEY) } }
       : null,
   }
 }
@@ -1190,113 +1181,48 @@ async function startDoclingNative(state) {
 
 async function createOpenRAGApiKey(state) {
   const steps = []
-  await pushStep(steps, 'OpenRAG frontend/backend reachable', () => waitForUrl(openRAGUrl(state), 30000))
-  let keyResult
-  if (steps.every(step => step.ok)) {
-    await pushStep(steps, 'create OpenRAG API key', async () => {
-      keyResult = await createOpenRAGApiKeyViaHttp(state)
-      return {
-        keyPrefix: keyResult.key_prefix || keyResult.keyPrefix || maskSecret(keyResult.api_key),
-      }
-    })
-  }
-  if (steps.every(step => step.ok) && keyResult?.api_key) {
-    state.openRAG.enabled = true
-    state.openRAG.mcpEnabled = true
-    state.openRAG.apiKey = keyResult.api_key
+  state.openRAG.enabled = true
+  state.openRAG.mcpEnabled = true
+  state.openRAG.apiKey = `lrag_${randomBytes(32).toString('base64url')}`
+  await pushStep(steps, 'save optional LightRAG API key', async () => {
     await saveState(state)
-    await pushStep(steps, 'configure OpenRAG MCP', async () => {
-      const result = await configureOpenRAGMcp(state)
-      return {
-        enabled: result.enabled,
-        path: result.path,
-        server: result.server,
-      }
-    })
+    return { key: maskSecret(state.openRAG.apiKey) }
+  })
+  await pushStep(steps, 'recreate LightRAG with API authentication', () => runCheckedCommand('docker', [
+    'compose', '-f', 'docker-compose.agent-gateway.yml', 'up', '-d', '--force-recreate', 'lightrag',
+  ], {
+    cwd: ROOT_DIR,
+    env: runtimeEnv(state, openRAGRuntimeEnv(state)),
+    timeoutMs: 25 * 60 * 1000,
+  }))
+  if (steps.every(step => step.ok)) {
+    await pushStep(steps, 'configure LightRAG MCP', () => configureOpenRAGMcp(state))
   }
   return {
     ok: steps.every(step => step.ok),
     steps,
-    keyPrefix: keyResult?.key_prefix || keyResult?.keyPrefix || undefined,
-    configured: steps.every(step => step.ok) && Boolean(keyResult?.api_key),
+    key: maskSecret(state.openRAG.apiKey),
+    configured: steps.every(step => step.ok),
   }
-}
-
-async function createOpenRAGApiKeyViaHttp(state) {
-  const name = `OpenClaude ${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}`
-  const errors = []
-  for (const url of openRAGApiKeyUrls(state)) {
-    try {
-      const data = await fetchJson(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-        timeoutMs: 60000,
-      })
-      if (data.success === false) {
-        throw new Error(data.error || 'OpenRAG returned success=false')
-      }
-      if (!data.api_key) {
-        throw new Error('OpenRAG response did not include api_key')
-      }
-      return data
-    } catch (error) {
-      errors.push(`${url}: ${String(error?.message || error)}`)
-    }
-  }
-  throw new Error(`Failed to create OpenRAG API key. ${errors.join(' | ')}`)
-}
-
-function openRAGApiKeyUrls(state) {
-  const base = openRAGUrl(state).replace(/\/+$/, '')
-  return [`${base}/api/keys`, `${base}/keys`]
 }
 
 async function testOpenRAG(state) {
   const steps = []
-  await pushStep(steps, 'OpenRAG frontend', () => fetchText(state.openRAG.url))
-  await pushStep(steps, 'Docling docs', () => fetchText(doclingUrl(state)))
-  if (state.openRAG.apiKey) {
-    await pushStep(steps, 'OpenRAG API key auth', () => fetchOpenRAGApiJson(state, '/api/v1/settings', '/v1/settings'))
-  } else {
-    pushSkippedStep(steps, 'OpenRAG API key auth', 'OPENRAG_API_KEY is not configured')
-  }
+  const base = openRAGUrl(state).replace(/\/+$/, '')
+  const headers = state.openRAG.apiKey ? { 'X-API-Key': state.openRAG.apiKey } : {}
+  await pushStep(steps, 'LightRAG health', () => fetchJson(`${base}/health`, { headers, timeoutMs: 30000 }))
+  await pushStep(steps, 'LightRAG WebUI', () => fetchText(`${base}/webui`))
   const usesBridge = state.openRAG.mcpCommand === 'node' && state.openRAG.mcpArgs.some(arg => path.resolve(arg) === OPENRAG_MCP_BRIDGE)
   if (usesBridge) {
-    await pushStep(steps, 'OpenRAG MCP bridge syntax', () => runCheckedCommand('node', ['--check', OPENRAG_MCP_BRIDGE], {
+    await pushStep(steps, 'LightRAG MCP bridge syntax', () => runCheckedCommand('node', ['--check', OPENRAG_MCP_BRIDGE], {
       cwd: ROOT_DIR,
       env: runtimeEnv(state, openRAGRuntimeEnv(state)),
       timeoutMs: 60000,
     }))
   } else {
-    await pushStep(steps, 'OpenRAG MCP package import', () => runCheckedCommand('uv', ['run', '--with', 'openrag-mcp', 'python', '-c', 'import openrag_mcp; print("OPENRAG_MCP_IMPORT_OK")'], {
-      cwd: ROOT_DIR,
-      env: runtimeEnv(state, openRAGRuntimeEnv(state)),
-      timeoutMs: 5 * 60 * 1000,
-    }))
+    pushSkippedStep(steps, 'LightRAG MCP bridge syntax', 'custom MCP command configured')
   }
   return { ok: steps.every(step => step.ok), steps }
-}
-
-async function fetchOpenRAGApiJson(state, frontendPath, backendPath) {
-  const base = openRAGUrl(state).replace(/\/+$/, '')
-  const headers = {
-    'Content-Type': 'application/json',
-    'X-API-Key': state.openRAG.apiKey,
-  }
-  const errors = []
-  for (const pathName of [frontendPath, backendPath]) {
-    try {
-      return await fetchJson(`${base}${pathName}`, {
-        method: 'GET',
-        headers,
-        timeoutMs: 60000,
-      })
-    } catch (error) {
-      errors.push(`${pathName}: ${String(error?.message || error)}`)
-    }
-  }
-  throw new Error(errors.join(' | '))
 }
 
 async function startDocker(state) {
@@ -1310,9 +1236,9 @@ async function startDocker(state) {
     OPENCLAUDE_AGENT_API_PORT: '8642',
     OPENCLAUDE_AGENT_CRON_ENABLED: state.cron.enabled ? '1' : '0',
     OPENCLAUDE_AGENT_RUNNER_CWD: '/workspace',
-    OPENCLAUDE_DOCKER_OPENRAG_URL: dockerOpenRAGUrl(state),
-    OPENRAG_API_KEY: state.openRAG.apiKey,
-    OPENRAG_MCP_TIMEOUT: String(state.openRAG.mcpTimeoutSeconds),
+    OPENCLAUDE_DOCKER_LIGHTRAG_URL: dockerOpenRAGUrl(state),
+    LIGHTRAG_API_KEY: state.openRAG.apiKey,
+    LIGHTRAG_MCP_TIMEOUT: String(state.openRAG.mcpTimeoutSeconds),
     ...dockerProvider,
     ...dockerTelegram,
   })
@@ -1475,9 +1401,15 @@ async function prepareOpenRAGEnv(state) {
 
 function openRAGRuntimeEnv(state) {
   return {
-    OPENRAG_URL: state.openRAG.url,
-    OPENRAG_API_KEY: state.openRAG.apiKey,
-    OPENRAG_MCP_TIMEOUT: String(state.openRAG.mcpTimeoutSeconds),
+    LIGHTRAG_URL: state.openRAG.url,
+    LIGHTRAG_API_KEY: state.openRAG.apiKey,
+    LIGHTRAG_MCP_TIMEOUT: String(state.openRAG.mcpTimeoutSeconds),
+    LIGHTRAG_LLM_BINDING: state.openRAG.llmProvider,
+    LIGHTRAG_LLM_BINDING_HOST: state.openRAG.ollamaEndpoint,
+    LIGHTRAG_LLM_MODEL: state.openRAG.llmModel,
+    LIGHTRAG_EMBEDDING_BINDING: state.openRAG.embeddingProvider,
+    LIGHTRAG_EMBEDDING_BINDING_HOST: state.openRAG.embeddingEndpoint,
+    LIGHTRAG_EMBEDDING_MODEL: state.openRAG.embeddingModel,
   }
 }
 
@@ -1743,7 +1675,7 @@ function modelUrls(baseUrl) {
 async function getRuntimeStatus(state) {
   const localApi = await isHttpOk(`http://${loopbackHost(state.api.host)}:${state.api.port}/health`)
   const localWebUI = await isHttpOk(openWebUIUrl(state))
-  const openRAG = await isHttpOk(openRAGUrl(state))
+  const openRAG = await isHttpOk(`${openRAGUrl(state).replace(/\/+$/, '')}/health`)
   const docling = await isHttpOk(doclingUrl(state))
   const camofox = await isHttpOk(`${state.camofox?.url || DEFAULT_CONFIG.camofox.url}/health`)
   const hindsight = await isHttpOk(state.hindsight?.url || DEFAULT_CONFIG.hindsight.url)
@@ -2049,7 +1981,7 @@ function dockerOpenRAGUrl(state) {
   try {
     const url = new URL(openRAGUrl(state))
     if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(url.hostname)) {
-      url.hostname = 'host.docker.internal'
+      return 'http://lightrag:9621'
     }
     return url.toString().replace(/\/+$/, '')
   } catch {
@@ -2269,47 +2201,41 @@ function html() {
     </section>
 
     <section>
-      <h2>OpenRAG</h2>
+      <h2>LightRAG</h2>
       <div class="grid">
-        <label class="check"><input id="openragEnabled" type="checkbox"> OpenRAG enabled</label>
-        <label>OpenRAG URL<input id="openragUrl" placeholder="http://localhost:3000"></label>
-        <label>OpenRAG API key<input id="openragApiKey" type="password" autocomplete="off"></label>
-        <label class="check"><input id="openragUseAgentProvider" type="checkbox"> Pass current provider key to OpenRAG Docker</label>
+        <label class="check"><input id="openragEnabled" type="checkbox"> LightRAG enabled</label>
+        <label>LightRAG URL<input id="openragUrl" placeholder="http://localhost:9621"></label>
+        <label>Optional API key<input id="openragApiKey" type="password" autocomplete="off"></label>
+        <label>Port<input id="openragFrontendPort" type="number"></label>
+        <label>LLM binding<select id="openragLlmProvider"><option value="ollama">Ollama</option><option value="openai">OpenAI compatible</option><option value="anthropic">Anthropic</option></select></label>
+        <label>LLM model<input id="openragLlmModel" placeholder="qwen3-lightrag:1.7b"></label>
+        <label>Embedding binding<select id="openragEmbeddingProvider"><option value="ollama">Ollama</option><option value="openai">OpenAI compatible</option></select></label>
+        <label>Embedding model<input id="openragEmbeddingModel" placeholder="nomic-embed-text"></label>
+        <label>LLM binding host<input id="openragOllamaEndpoint" placeholder="http://lightrag-ollama-adapter:11435"></label>
+        <label>Embedding binding host<input id="openragEmbeddingEndpoint" placeholder="http://lightrag-ollama:11434"></label>
       </div>
       <div class="grid" style="margin-top:12px">
-        <label>Repo dir<input id="openragRepoDir"></label>
-        <label>Workspace dir<input id="openragWorkspaceDir"></label>
-        <label>Frontend port<input id="openragFrontendPort" type="number"></label>
-        <label>Langflow port<input id="openragLangflowPort" type="number"></label>
-      </div>
-      <div class="grid" style="margin-top:12px">
-        <label>Docling port<input id="openragDoclingPort" type="number"></label>
-        <label>OpenSearch password<input id="openragOpenSearchPassword" type="password" autocomplete="off" placeholder="auto-generated for Docker"></label>
-        <label>Langflow user<input id="openragLangflowUser"></label>
-        <label>Langflow password<input id="openragLangflowPassword" type="password" autocomplete="off" placeholder="auto-generated for Docker"></label>
-        <label>OpenRAG LLM provider<select id="openragLlmProvider"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="watsonx">WatsonX</option><option value="ollama">Ollama</option></select></label>
-        <label>OpenRAG LLM model<input id="openragLlmModel" placeholder="optional"></label>
-        <label>OpenRAG embedding provider<select id="openragEmbeddingProvider"><option value="openai">OpenAI</option><option value="watsonx">WatsonX</option><option value="ollama">Ollama</option></select></label>
-        <label>OpenRAG embedding model<input id="openragEmbeddingModel" placeholder="text-embedding-3-small / nomic-embed-text"></label>
-        <label>OpenRAG Ollama endpoint<input id="openragOllamaEndpoint" placeholder="http://host.docker.internal:11434"></label>
-      </div>
-      <div class="grid" style="margin-top:12px">
-        <label class="check"><input id="openragMcpEnabled" type="checkbox"> Expose OpenRAG as MCP</label>
+        <label class="check"><input id="openragMcpEnabled" type="checkbox"> Expose LightRAG as MCP</label>
         <label>MCP command<input id="openragMcpCommand" placeholder="node"></label>
         <label>MCP args<input id="openragMcpArgs" placeholder="${escapeHtml(OPENRAG_MCP_BRIDGE_ARG)}"></label>
         <label>MCP timeout seconds<input id="openragMcpTimeout" type="number"></label>
       </div>
-      <div class="actions" style="margin-top:12px">
-        <button onclick="installOpenRAG()">Install / update OpenRAG</button>
-        <button onclick="startOpenRAGTui()">Start OpenRAG TUI</button>
-        <button onclick="startOpenRAGDocker()">Start OpenRAG Docker</button>
-        <button class="warn" onclick="stopOpenRAGDocker()">Stop OpenRAG Docker</button>
-        <button class="secondary" onclick="createOpenRAGKey()">Create API key + MCP</button>
-        <button class="secondary" onclick="configureOpenRAGMcp()">Configure MCP</button>
-        <button class="secondary" onclick="testOpenRAG()">Test OpenRAG</button>
-        <button class="secondary" onclick="openUrl('openrag')">Open OpenRAG</button>
+      <div hidden>
+        <input id="openragUseAgentProvider" type="checkbox">
+        <input id="openragRepoDir"><input id="openragWorkspaceDir">
+        <input id="openragLangflowPort" type="number"><input id="openragDoclingPort" type="number">
+        <input id="openragOpenSearchPassword"><input id="openragLangflowUser"><input id="openragLangflowPassword">
       </div>
-      <div class="small">OpenRAG MCP uses the local OpenClaude bridge by default. It supports search, file ingestion, settings, models, and a chat fallback over retrieval. On Windows, OpenRAG officially expects WSL; the scripts use WSL when available.</div>
+      <div class="actions" style="margin-top:12px">
+        <button onclick="installOpenRAG()">Pull LightRAG image</button>
+        <button onclick="startOpenRAGDocker()">Start LightRAG</button>
+        <button class="warn" onclick="stopOpenRAGDocker()">Stop LightRAG</button>
+        <button class="secondary" onclick="startOpenRAGTui()">Open WebUI</button>
+        <button class="secondary" onclick="createOpenRAGKey()">Generate optional API key</button>
+        <button class="secondary" onclick="configureOpenRAGMcp()">Configure MCP</button>
+        <button class="secondary" onclick="testOpenRAG()">Test LightRAG</button>
+      </div>
+      <div class="small">The official LightRAG container stores its graph, vectors and document status in the persistent lightrag-data volume. The MCP bridge supports grounded search, chat, file/text ingestion, status tracking and health checks.</div>
     </section>
 
     <section>
@@ -2411,7 +2337,7 @@ function html() {
   <script>
     let state = null;
     const $ = id => document.getElementById(id);
-    const ids = ['language','provider','providerBaseUrl','providerModel','providerApiKey','apiEnabled','apiHost','apiPort','apiModel','apiKey','apiCors','autoAccept','runnerMaxTurns','runnerTimeoutMs','disableTools','availableTools','disallowedTools','cronEnabled','cronTick','ouroEnabled','consciousnessEnabled','infiniteTasksEnabled','wakeupMin','wakeupMax','maxRounds','evolutionInterval','budgetFraction','telegramEnabled','botToken','homeChatId','allowedUserIds','allowedChatIds','mirrorApi','downloadFiles','transcribeAudio','maxDownloadBytes','maxUploadBytes','transcriptionProvider','transcriptionOpenAIModel','webuiHost','webuiPort','pythonCommand','webuiDataDir','openragEnabled','openragUrl','openragApiKey','openragUseAgentProvider','openragRepoDir','openragWorkspaceDir','openragFrontendPort','openragLangflowPort','openragDoclingPort','openragOpenSearchPassword','openragLangflowUser','openragLangflowPassword','openragLlmProvider','openragLlmModel','openragEmbeddingProvider','openragEmbeddingModel','openragOllamaEndpoint','openragMcpEnabled','openragMcpCommand','openragMcpArgs','openragMcpTimeout','camofoxEnabled','camofoxMcpEnabled','camofoxUrl','camofoxPort','camofoxAccessKey','camofoxApiKey','camofoxUserId','camofoxSessionKey','camofoxMcpTimeout','hindsightEnabled','hindsightMcpEnabled','hindsightUrl','hindsightBankId','hindsightApiKey','hindsightApiPort','hindsightUiPort','hindsightMcpTimeout','hindsightUseAgentProvider','hindsightLlmProvider','hindsightLlmModel','hindsightLlmBaseUrl','hindsightLlmApiKey','dockerProject','dockerApiPort','dockerWebuiPort','dockerUseMainProvider','dockerProvider','dockerProviderBaseUrl','dockerProviderModel','dockerProviderApiKey','dockerTelegramEnabled','dockerTelegramUseMain','dockerBotToken','dockerHomeChatId','dockerAllowedUserIds','dockerAllowedChatIds'];
+    const ids = ['language','provider','providerBaseUrl','providerModel','providerApiKey','apiEnabled','apiHost','apiPort','apiModel','apiKey','apiCors','autoAccept','runnerMaxTurns','runnerTimeoutMs','disableTools','availableTools','disallowedTools','cronEnabled','cronTick','ouroEnabled','consciousnessEnabled','infiniteTasksEnabled','wakeupMin','wakeupMax','maxRounds','evolutionInterval','budgetFraction','telegramEnabled','botToken','homeChatId','allowedUserIds','allowedChatIds','mirrorApi','downloadFiles','transcribeAudio','maxDownloadBytes','maxUploadBytes','transcriptionProvider','transcriptionOpenAIModel','webuiHost','webuiPort','pythonCommand','webuiDataDir','openragEnabled','openragUrl','openragApiKey','openragUseAgentProvider','openragRepoDir','openragWorkspaceDir','openragFrontendPort','openragLangflowPort','openragDoclingPort','openragOpenSearchPassword','openragLangflowUser','openragLangflowPassword','openragLlmProvider','openragLlmModel','openragEmbeddingProvider','openragEmbeddingModel','openragOllamaEndpoint','openragEmbeddingEndpoint','openragMcpEnabled','openragMcpCommand','openragMcpArgs','openragMcpTimeout','camofoxEnabled','camofoxMcpEnabled','camofoxUrl','camofoxPort','camofoxAccessKey','camofoxApiKey','camofoxUserId','camofoxSessionKey','camofoxMcpTimeout','hindsightEnabled','hindsightMcpEnabled','hindsightUrl','hindsightBankId','hindsightApiKey','hindsightApiPort','hindsightUiPort','hindsightMcpTimeout','hindsightUseAgentProvider','hindsightLlmProvider','hindsightLlmModel','hindsightLlmBaseUrl','hindsightLlmApiKey','dockerProject','dockerApiPort','dockerWebuiPort','dockerUseMainProvider','dockerProvider','dockerProviderBaseUrl','dockerProviderModel','dockerProviderApiKey','dockerTelegramEnabled','dockerTelegramUseMain','dockerBotToken','dockerHomeChatId','dockerAllowedUserIds','dockerAllowedChatIds'];
 
     function log(message) {
       const text = typeof message === 'string' ? message : JSON.stringify(message, null, 2);
@@ -2475,26 +2401,27 @@ function html() {
       $('pythonCommand').value = state.openWebUI.pythonCommand;
       $('webuiDataDir').value = state.openWebUI.dataDir || '';
       $('openragEnabled').checked = !!state.openRAG?.enabled;
-      $('openragUrl').value = state.openRAG?.url || 'http://localhost:3000';
+      $('openragUrl').value = state.openRAG?.url || 'http://localhost:9621';
       $('openragApiKey').value = state.openRAG?.apiKey || '';
-      $('openragUseAgentProvider').checked = state.openRAG?.useAgentProvider !== false;
+      $('openragUseAgentProvider').checked = !!state.openRAG?.useAgentProvider;
       $('openragRepoDir').value = state.openRAG?.repoDir || '';
       $('openragWorkspaceDir').value = state.openRAG?.workspaceDir || '';
-      $('openragFrontendPort').value = state.openRAG?.frontendPort || 3000;
-      $('openragLangflowPort').value = state.openRAG?.langflowPort || 7860;
-      $('openragDoclingPort').value = state.openRAG?.doclingPort || 5001;
+      $('openragFrontendPort').value = state.openRAG?.frontendPort || 9621;
+      $('openragLangflowPort').value = state.openRAG?.langflowPort || 9621;
+      $('openragDoclingPort').value = state.openRAG?.doclingPort || 9621;
       $('openragOpenSearchPassword').value = state.openRAG?.openSearchPassword || '';
       $('openragLangflowUser').value = state.openRAG?.langflowSuperuser || 'admin';
       $('openragLangflowPassword').value = state.openRAG?.langflowSuperuserPassword || '';
-      $('openragLlmProvider').value = state.openRAG?.llmProvider || 'openai';
-      $('openragLlmModel').value = state.openRAG?.llmModel || '';
-      $('openragEmbeddingProvider').value = state.openRAG?.embeddingProvider || 'openai';
-      $('openragEmbeddingModel').value = state.openRAG?.embeddingModel || 'text-embedding-3-small';
-      $('openragOllamaEndpoint').value = state.openRAG?.ollamaEndpoint || 'http://host.docker.internal:11434';
+      $('openragLlmProvider').value = state.openRAG?.llmProvider || 'ollama';
+      $('openragLlmModel').value = state.openRAG?.llmModel || 'qwen3-lightrag:1.7b';
+      $('openragEmbeddingProvider').value = state.openRAG?.embeddingProvider || 'ollama';
+      $('openragEmbeddingModel').value = state.openRAG?.embeddingModel || 'nomic-embed-text';
+      $('openragOllamaEndpoint').value = state.openRAG?.ollamaEndpoint || 'http://lightrag-ollama-adapter:11435';
+      $('openragEmbeddingEndpoint').value = state.openRAG?.embeddingEndpoint || 'http://lightrag-ollama:11434';
       $('openragMcpEnabled').checked = !!state.openRAG?.mcpEnabled;
       $('openragMcpCommand').value = state.openRAG?.mcpCommand || 'node';
       $('openragMcpArgs').value = (state.openRAG?.mcpArgs || [${JSON.stringify(OPENRAG_MCP_BRIDGE_ARG)}]).join(',');
-      $('openragMcpTimeout').value = state.openRAG?.mcpTimeoutSeconds || 60;
+      $('openragMcpTimeout').value = state.openRAG?.mcpTimeoutSeconds || 180;
       $('camofoxEnabled').checked = state.camofox?.enabled !== false;
       $('camofoxMcpEnabled').checked = state.camofox?.mcpEnabled !== false;
       $('camofoxUrl').value = state.camofox?.url || 'http://localhost:9377';
@@ -2543,7 +2470,7 @@ function html() {
         telegram: { enabled: $('telegramEnabled').checked, botToken: $('botToken').value, homeChatId: $('homeChatId').value, allowedUserIds: $('allowedUserIds').value, allowedChatIds: $('allowedChatIds').value, mirrorAgentApiResponses: $('mirrorApi').checked, downloadFiles: $('downloadFiles').checked, maxDownloadBytes: Number($('maxDownloadBytes').value), maxUploadBytes: Number($('maxUploadBytes').value), transcribeAudio: $('transcribeAudio').checked, transcriptionProvider: $('transcriptionProvider').value, transcriptionOpenAIModel: $('transcriptionOpenAIModel').value, transcriptionWhisperModel: state?.telegram?.transcriptionWhisperModel || 'base', replyWithTranscript: true },
         ouroboros: { enabled: $('ouroEnabled').checked, consciousnessEnabled: $('consciousnessEnabled').checked, infiniteTasksEnabled: $('infiniteTasksEnabled').checked, wakeupMinSeconds: Number($('wakeupMin').value), wakeupMaxSeconds: Number($('wakeupMax').value), maxRounds: Number($('maxRounds').value), evolutionIntervalSeconds: Number($('evolutionInterval').value), budgetFraction: Number($('budgetFraction').value) },
         openWebUI: { host: $('webuiHost').value, port: Number($('webuiPort').value), pythonCommand: $('pythonCommand').value, dataDir: $('webuiDataDir').value },
-        openRAG: { enabled: $('openragEnabled').checked, url: $('openragUrl').value, apiKey: $('openragApiKey').value, useAgentProvider: $('openragUseAgentProvider').checked, repoDir: $('openragRepoDir').value, workspaceDir: $('openragWorkspaceDir').value, frontendPort: Number($('openragFrontendPort').value), langflowPort: Number($('openragLangflowPort').value), doclingPort: Number($('openragDoclingPort').value), openSearchPassword: $('openragOpenSearchPassword').value, langflowSuperuser: $('openragLangflowUser').value, langflowSuperuserPassword: $('openragLangflowPassword').value, llmProvider: $('openragLlmProvider').value, llmModel: $('openragLlmModel').value, embeddingProvider: $('openragEmbeddingProvider').value, embeddingModel: $('openragEmbeddingModel').value, ollamaEndpoint: $('openragOllamaEndpoint').value, mcpEnabled: $('openragMcpEnabled').checked, mcpCommand: $('openragMcpCommand').value, mcpArgs: $('openragMcpArgs').value, mcpTimeoutSeconds: Number($('openragMcpTimeout').value) },
+        openRAG: { enabled: $('openragEnabled').checked, url: $('openragUrl').value, apiKey: $('openragApiKey').value, useAgentProvider: $('openragUseAgentProvider').checked, repoDir: $('openragRepoDir').value, workspaceDir: $('openragWorkspaceDir').value, frontendPort: Number($('openragFrontendPort').value), langflowPort: Number($('openragLangflowPort').value), doclingPort: Number($('openragDoclingPort').value), openSearchPassword: $('openragOpenSearchPassword').value, langflowSuperuser: $('openragLangflowUser').value, langflowSuperuserPassword: $('openragLangflowPassword').value, llmProvider: $('openragLlmProvider').value, llmModel: $('openragLlmModel').value, embeddingProvider: $('openragEmbeddingProvider').value, embeddingModel: $('openragEmbeddingModel').value, ollamaEndpoint: $('openragOllamaEndpoint').value, embeddingEndpoint: $('openragEmbeddingEndpoint').value, mcpEnabled: $('openragMcpEnabled').checked, mcpCommand: $('openragMcpCommand').value, mcpArgs: $('openragMcpArgs').value, mcpTimeoutSeconds: Number($('openragMcpTimeout').value) },
         camofox: { enabled: $('camofoxEnabled').checked, mcpEnabled: $('camofoxMcpEnabled').checked, url: $('camofoxUrl').value, port: Number($('camofoxPort').value), accessKey: $('camofoxAccessKey').value, apiKey: $('camofoxApiKey').value, userId: $('camofoxUserId').value, sessionKey: $('camofoxSessionKey').value, mcpTimeoutSeconds: Number($('camofoxMcpTimeout').value) },
         hindsight: { enabled: $('hindsightEnabled').checked, mcpEnabled: $('hindsightMcpEnabled').checked, url: $('hindsightUrl').value, apiKey: $('hindsightApiKey').value, bankId: $('hindsightBankId').value, apiPort: Number($('hindsightApiPort').value), uiPort: Number($('hindsightUiPort').value), mcpTimeoutSeconds: Number($('hindsightMcpTimeout').value), useAgentProvider: $('hindsightUseAgentProvider').checked, llmProvider: $('hindsightLlmProvider').value, llmModel: $('hindsightLlmModel').value, llmBaseUrl: $('hindsightLlmBaseUrl').value, llmApiKey: $('hindsightLlmApiKey').value },
         runner: { cwd: state.rootDir, maxTurns: Number($('runnerMaxTurns').value), timeoutMs: Number($('runnerTimeoutMs').value), permissionMode: $('autoAccept').checked ? 'bypassPermissions' : 'default', disableTools: $('disableTools').checked, availableTools: $('availableTools').value, disallowedTools: $('disallowedTools').value },
@@ -2559,8 +2486,7 @@ function html() {
       const items = [
         ['Local API', status.localApi],
         ['Local Open WebUI', status.localWebUI],
-        ['OpenRAG', status.openRAG],
-        ['Docling', status.docling],
+        ['LightRAG', status.openRAG],
         ['Camofox', status.camofox],
         ['Hindsight API', status.hindsight],
         ['Hindsight UI', status.hindsightUI],
@@ -2598,7 +2524,7 @@ function html() {
     async function testDocker() { log(await api('/api/test/docker', collect())); await refresh(); }
     async function testAll() { log(await api('/api/test/all', collect())); await refresh(); }
     function openUrl(kind) {
-      const url = kind === 'dockerWebui' ? 'http://127.0.0.1:'+$('dockerWebuiPort').value : kind === 'openrag' ? $('openragUrl').value : kind === 'hindsight' ? 'http://localhost:'+$('hindsightUiPort').value : 'http://'+$('webuiHost').value+':'+$('webuiPort').value;
+      const url = kind === 'dockerWebui' ? 'http://127.0.0.1:'+$('dockerWebuiPort').value : kind === 'openrag' ? $('openragUrl').value.replace(/\/$/, '')+'/webui' : kind === 'hindsight' ? 'http://localhost:'+$('hindsightUiPort').value : 'http://'+$('webuiHost').value+':'+$('webuiPort').value;
       window.open(url, '_blank');
     }
     ids.forEach(id => window.addEventListener('input', e => { if (e.target && e.target.id === id) updateComputed(); }));

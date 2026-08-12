@@ -92,7 +92,8 @@ COPY .mcp.json .mcp.json
 COPY scripts/docker-entrypoint.sh scripts/docker-entrypoint.sh
 COPY scripts/codegraph-mcp.cjs scripts/codegraph-mcp.cjs
 COPY scripts/mcp-router-launcher.cjs scripts/mcp-router-launcher.cjs
-COPY scripts/release/openrag-mcp-bridge.cjs scripts/release/openrag-mcp-bridge.cjs
+COPY scripts/release/lightrag-mcp-bridge.cjs scripts/release/lightrag-mcp-bridge.cjs
+COPY scripts/release/test-lightrag-mcp-bridge.cjs scripts/release/test-lightrag-mcp-bridge.cjs
 COPY scripts/release/camofox-mcp-bridge.cjs scripts/release/camofox-mcp-bridge.cjs
 COPY scripts/release/browser-model-profiles.cjs scripts/release/browser-model-profiles.cjs
 COPY scripts/release/camofox-control.mjs scripts/release/camofox-control.mjs

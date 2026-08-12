@@ -11,7 +11,7 @@ The portable stack ships with:
   consciousness, evolution, OpenAI-compatible API, and model-driven subagents
 - Tool Router, File Manager, Skill Store, and the bundled coding skills
 - bundled Telegram MCP, Telegram operations, Maton, VPromotions, and TwiBoost skills
-- CodeGraph, SearXNG, Context7, authorized Pentest mode, OpenRAG, Hindsight,
+- CodeGraph, SearXNG, Context7, authorized Pentest mode, LightRAG, Hindsight,
   and custom MCP JSON import
 - OpenWebUI, OmniRoute, two agent workers, and local Ollama
 
@@ -23,9 +23,8 @@ memory are runtime data. They are intentionally not committed.
 - Git
 - Docker Engine or Docker Desktop with Compose v2
 - Node.js 22 or newer
-- `uv` is installed automatically when the full OpenRAG profile is requested
 
-All host ports bind to `127.0.0.1` by default. Hindsight, OpenRAG, Ollama,
+All host ports bind to `127.0.0.1` by default. Hindsight, LightRAG, Ollama,
 workers, and the main agent communicate over the private
 `openclaude_default` Docker network, including on native Linux servers.
 
@@ -75,7 +74,8 @@ New portable deployments keep all mutable data under the ignored
 | `codex/` | optional Codex OAuth and model cache |
 | `telegram-mcp/` | Telegram sessions, SQLite memory, Maton settings |
 | `hindsight/` | Hindsight durable-memory database |
-| `openrag/` | pinned OpenRAG checkout and data |
+| Docker volume `lightrag-data` | LightRAG graph, vectors, document status, and input files |
+| `migrations/` | immutable OpenRAG exports and LightRAG migration reports |
 | `pentest/` | authorized engagement scope, evidence state, and reports |
 
 The generated `.env` is also ignored. Existing deployments with explicit
@@ -139,7 +139,7 @@ Primary interfaces:
 - OmniRoute: `http://127.0.0.1:20128`
 - Telegram MCP: `http://127.0.0.1:19765`
 - Hindsight: `http://127.0.0.1:9999`
-- OpenRAG: `http://127.0.0.1:3000`
+- LightRAG: `http://127.0.0.1:9621/webui`
 
 ## Public server deployment
 

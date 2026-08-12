@@ -45,18 +45,13 @@ docker compose -f docker-compose.agent-gateway.yml -f docker-compose.production.
 ```
 
 Verification checks gateway readiness, the inference-only OpenAI API,
-the protected File Manager API, OmniRoute, OpenWebUI, Telegram MCP, SearXNG, Ollama, Hindsight, OpenRAG,
-Langflow, Docling, service state, and loopback-only published ports.
+the protected File Manager API, OmniRoute, OpenWebUI, Telegram MCP, SearXNG,
+Ollama, Hindsight, LightRAG, service state, and loopback-only published ports.
 
-OpenRAG launchers pin the complete official `0.5.1` image family by default,
-check out the matching upstream tag, route LLM and embedding traffic through
-the configured local Ollama endpoint, and set `DO_NOT_TRACK=1`. Tracked local
-changes in the OpenRAG checkout stop deployment instead of being overwritten.
-The launcher atomically synchronizes the selected OpenRAG providers and models
-into its persisted `config.yaml`, disables unused cloud providers in OpenRAG,
-and restarts only the backend. This configuration is isolated from the
-gateway's own provider credentials. Override the pin only through
-`OPENCLAUDE_OPENRAG_VERSION` after testing all four OpenRAG images together.
+LightRAG runs from a digest-pinned official image. Its graph, vectors, document
+status, and uploaded inputs persist in `lightrag-data`. LLM and embedding
+traffic use the stack's Ollama service by default. Changing the embedding model
+or vector dimension after indexing requires a complete re-index.
 
 The primary endpoints are:
 
@@ -67,7 +62,7 @@ The primary endpoints are:
 - OmniRoute: `http://127.0.0.1:20128`
 - Telegram MCP: `http://127.0.0.1:19765`
 - Hindsight UI: `http://127.0.0.1:9999`
-- OpenRAG: `http://127.0.0.1:3000`
+- LightRAG: `http://127.0.0.1:9621/webui`
 
 ## Backup
 

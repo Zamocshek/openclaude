@@ -68,6 +68,7 @@ export type AgentGatewayConfig = {
     pythonCommand: string
     dataDir?: string
   }
+  /** Legacy serialized key retained so existing installations migrate in place; it now configures LightRAG. */
   openRAG: {
     enabled: boolean
     url: string
@@ -173,15 +174,15 @@ export function getDefaultAgentGatewayConfig(): AgentGatewayConfig {
       pythonCommand: process.platform === 'win32' ? 'py -3.11' : 'python3.11',
     },
     openRAG: {
-      enabled: false,
-      url: 'http://localhost:3000',
-      frontendPort: 3000,
-      langflowPort: 7860,
-      doclingPort: 5001,
-      mcpEnabled: false,
-      mcpCommand: 'uvx',
-      mcpArgs: ['openrag-mcp'],
-      mcpTimeoutSeconds: 60,
+      enabled: true,
+      url: 'http://localhost:9621',
+      frontendPort: 9621,
+      langflowPort: 9621,
+      doclingPort: 9621,
+      mcpEnabled: true,
+      mcpCommand: 'node',
+      mcpArgs: ['scripts/release/lightrag-mcp-bridge.cjs'],
+      mcpTimeoutSeconds: 180,
     },
     ui: {
       language: 'en',
@@ -297,7 +298,11 @@ export function normalizeAgentGatewayConfig(
   const openWebUI =
     input.openWebUI && typeof input.openWebUI === 'object' ? input.openWebUI : {}
   const openRAG =
-    input.openRAG && typeof input.openRAG === 'object' ? input.openRAG : {}
+    input.lightRAG && typeof input.lightRAG === 'object'
+      ? input.lightRAG
+      : input.openRAG && typeof input.openRAG === 'object'
+        ? input.openRAG
+        : {}
   const ui = input.ui && typeof input.ui === 'object' ? input.ui : {}
   const runner =
     input.runner && typeof input.runner === 'object' ? input.runner : {}
@@ -680,10 +685,18 @@ export function applyAgentGatewayEnvOverrides(
     openRAG: {
       ...config.openRAG,
       enabled:
+        parseEnvBoolean(env.OPENCLAUDE_LIGHTRAG_ENABLED) ??
         parseEnvBoolean(env.OPENCLAUDE_OPENRAG_ENABLED) ??
         config.openRAG.enabled,
-      url: env.OPENRAG_URL ?? env.OPENCLAUDE_OPENRAG_URL ?? config.openRAG.url,
+      url:
+        env.LIGHTRAG_URL ??
+        env.OPENCLAUDE_LIGHTRAG_URL ??
+        env.OPENRAG_URL ??
+        env.OPENCLAUDE_OPENRAG_URL ??
+        config.openRAG.url,
       apiKey:
+        env.LIGHTRAG_API_KEY ??
+        env.OPENCLAUDE_LIGHTRAG_API_KEY ??
         env.OPENRAG_API_KEY ??
         env.OPENCLAUDE_OPENRAG_API_KEY ??
         config.openRAG.apiKey,
@@ -706,15 +719,22 @@ export function applyAgentGatewayEnvOverrides(
         env.OPENCLAUDE_OPENRAG_LANGFLOW_SUPERUSER_PASSWORD ??
         config.openRAG.langflowSuperuserPassword,
       mcpEnabled:
+        parseEnvBoolean(env.OPENCLAUDE_LIGHTRAG_MCP_ENABLED) ??
         parseEnvBoolean(env.OPENCLAUDE_OPENRAG_MCP_ENABLED) ??
         config.openRAG.mcpEnabled,
       mcpCommand:
-        env.OPENCLAUDE_OPENRAG_MCP_COMMAND ?? config.openRAG.mcpCommand,
+        env.OPENCLAUDE_LIGHTRAG_MCP_COMMAND ??
+        env.OPENCLAUDE_OPENRAG_MCP_COMMAND ??
+        config.openRAG.mcpCommand,
       mcpArgs:
-        env.OPENCLAUDE_OPENRAG_MCP_ARGS !== undefined
+        env.OPENCLAUDE_LIGHTRAG_MCP_ARGS !== undefined
+          ? splitEnvList(env.OPENCLAUDE_LIGHTRAG_MCP_ARGS)
+          : env.OPENCLAUDE_OPENRAG_MCP_ARGS !== undefined
           ? splitEnvList(env.OPENCLAUDE_OPENRAG_MCP_ARGS)
           : config.openRAG.mcpArgs,
       mcpTimeoutSeconds:
+        env.LIGHTRAG_MCP_TIMEOUT ??
+        env.OPENCLAUDE_LIGHTRAG_MCP_TIMEOUT_SECONDS ??
         env.OPENRAG_MCP_TIMEOUT ??
         env.OPENCLAUDE_OPENRAG_MCP_TIMEOUT_SECONDS ??
         config.openRAG.mcpTimeoutSeconds,

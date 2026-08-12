@@ -13,7 +13,7 @@ for complete schemas and safety contracts.
 | Current research | built-in web tools | `searxng` |
 | Browser work, screenshots, browser models | `qwen-collab` when requested | `camofox` |
 | Durable memory | Telegram `[MEMORY]` protocol when applicable | `hindsight` |
-| Document-grounded answers | normal file tools | `openrag` |
+| Document-grounded answers | normal file tools | `lightrag` |
 | Telegram, Maton, VPromotions, TwiBoost | `telegram-mcp-operations`, `maton-api-gateway`, `vpromotions`, `twiboost` | `telegram-mcp` |
 | MCP, provider, skill, or runtime control | gateway control tools | `mcp-router`, `gateway-control` |
 | Android devices | `android-device` | pinned `android-<alias>` MCP server |

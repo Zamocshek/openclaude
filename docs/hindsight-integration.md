@@ -12,7 +12,7 @@ HTTP and exposes memory tools to child agent runs.
 - `hindsight_reflect`: synthesize deeper observations from retained memories.
 - `hindsight_consolidate`: queue Hindsight consolidation for the active bank.
 
-Use Hindsight for long-term memory. Use OpenRAG for document-grounded retrieval.
+Use Hindsight for long-term memory. Use LightRAG for document-grounded retrieval.
 Use Camofox for live browser automation.
 
 ## Quick Start

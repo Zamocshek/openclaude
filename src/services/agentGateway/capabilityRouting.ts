@@ -62,10 +62,10 @@ export const CAPABILITY_CATALOG: readonly CapabilityCatalogEntry[] = [
   },
   {
     id: 'rag',
-    servers: ['openrag'],
+    servers: ['lightrag'],
     routes: ['rag'],
     summary:
-      'OpenRAG -> openrag_search for grounded answers and openrag_ingest_file only when ingestion is requested; cite successful results, never invent retrieval.',
+      'LightRAG -> lightrag_search for grounded answers; use lightrag_ingest_text/file only when ingestion is requested, track indexing to completion, cite successful results, and never invent retrieval.',
   },
   {
     id: 'telegram',
@@ -119,7 +119,7 @@ const SERVER_ALIASES: Readonly<Record<string, readonly string[]>> = {
   'capability-router': ['capability router', 'capability fabric', 'portable router', 'роутер возможностей'],
   'mcp-router': ['mcp router', 'tool router', 'tools router', 'тул роутер', 'роутер инструментов'],
   'gateway-control': ['gateway control', 'agent control', 'управление агентом', 'панель агента'],
-  openrag: ['openrag', 'rag', 'knowledge base', 'база знаний'],
+  lightrag: ['lightrag', 'light rag', 'openrag', 'rag', 'knowledge base', 'база знаний'],
   hindsight: ['hindsight', 'durable memory', 'долговременная память'],
   camofox: ['camofox', 'camoufox', 'browser automation', 'браузерная автоматизация'],
   codegraph: ['codegraph', 'code graph', 'граф кода'],
@@ -160,7 +160,7 @@ const MULTIMODAL_RE =
 const MEMORY_RE =
   /(?:\b(?:remember|memory|recall|forget|prior decision|our decisions|earlier context|preference|hindsight)\b|(?:запомни|памят|вспомни|забудь|предыдущ(?:ее|ий)|предпочтени|наш(?:и|их)\s+решени|что\s+мы\s+решили|раньше))/iu
 const RAG_RE =
-  /(?:\b(?:openrag|rag|knowledge base|ingest(?:ion)?|retrieval|document corpus)\b|(?:опенраг|база знаний|индексац|загрузи документ|по документам|корпус документ))/iu
+  /(?:\b(?:lightrag|light rag|openrag|rag|knowledge base|ingest(?:ion)?|retrieval|document corpus)\b|(?:лайтраг|лайт раг|опенраг|база знаний|индексац|загрузи документ|по документам|корпус документ))/iu
 const TELEGRAM_ACCOUNT_RE =
   /(?:\b(?:telegram mcp|telegram account|telegram session|send (?:a )?telegram|read telegram)\b|(?:телеграм(?:м)?\s+(?:mcp|мсп|аккаунт|сесси)|отправь.+телеграм|прочитай.+телеграм))/iu
 const CONTROL_RE =
@@ -229,7 +229,7 @@ export function selectMcpServersForPrompt(
   if (MULTIMODAL_RE.test(request)) add('multimodal', 'qwen-mm-core', 'qwen-mm-local')
   if (BROWSER_MODEL_RE.test(request)) add('browser-model', 'camofox')
   if (MEMORY_RE.test(request)) add('explicit-memory', 'hindsight')
-  if (RAG_RE.test(request)) add('rag', 'openrag')
+  if (RAG_RE.test(request)) add('rag', 'lightrag')
   if (TELEGRAM_ACCOUNT_RE.test(request)) add('telegram-account', 'telegram-mcp')
   if (CONTROL_RE.test(request)) add('agent-control', 'gateway-control')
   if (DOCS_RE.test(request)) add('library-docs', 'context7')
