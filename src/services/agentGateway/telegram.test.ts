@@ -33,6 +33,7 @@ import {
   formatTelegramAndroidMenu,
   formatTelegramMcpMenu,
   formatTelegramQwenMmMenu,
+  getTelegramMessageText,
   formatTelegramSkillDetails,
   formatTelegramSkillStoreMenu,
   formatTelegramConversationTranscript,
@@ -440,9 +441,64 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(prompt).toContain('Что на скрине?')
     expect(prompt).toContain('local_path: C:\\tmp\\screen.png')
     expect(prompt).not.toContain('prompt_reference: @C:\\tmp\\screen.png')
-    expect(prompt).toContain('Inspect the actual local image through gateway-vision')
+    expect(prompt).toContain('gateway will inspect each local image with Qwen-MM')
     expect(prompt).toContain('[TELEGRAM_SEND_FILE path="C:\\path\\to\\file.png"')
     expect(prompt).toContain('[[image:C:\\path\\to\\image.png]]')
+  })
+
+  test('keeps a Telegram photo caption paired with local Qwen-MM image evidence', () => {
+    const message = {
+      message_id: 17,
+      caption: 'Прочитай текст на картинке и объясни, что важно.',
+      photo: [{ file_id: 'photo-large', width: 1920, height: 1080 }],
+    }
+    const caption = getTelegramMessageText(message)
+    const candidate = getAttachmentCandidates(message)[0]!
+    const prompt = buildTelegramAgentPrompt({
+      chatId: '42',
+      messageId: message.message_id,
+      text: caption,
+      attachments: [{
+        type: candidate.type,
+        fileId: candidate.file.file_id,
+        fileName: candidate.file.file_name,
+        localPath: '/workspace/telegram-files/42/17/photo-large.jpg',
+        width: candidate.width,
+        height: candidate.height,
+      }],
+    })
+
+    expect(caption).toBe('Прочитай текст на картинке и объясни, что важно.')
+    expect(prompt).toContain('User message:\nПрочитай текст на картинке и объясни, что важно.')
+    expect(prompt).toContain('local_path: /workspace/telegram-files/42/17/photo-large.jpg')
+    expect(prompt).toContain('gateway will inspect each local image with Qwen-MM')
+  })
+
+  test('describes a video and a regular file as actionable local attachments', () => {
+    const prompt = buildTelegramAgentPrompt({
+      chatId: '42',
+      messageId: 18,
+      text: 'Проверь вложения.',
+      attachments: [
+        {
+          type: 'video',
+          fileId: 'clip',
+          fileName: 'clip.webm',
+          mimeType: 'video/webm',
+          localPath: '/workspace/telegram-files/42/18/clip.webm',
+        },
+        {
+          type: 'document',
+          fileId: 'report',
+          fileName: 'report.pdf',
+          mimeType: 'application/pdf',
+          localPath: '/workspace/telegram-files/42/18/report.pdf',
+        },
+      ],
+    })
+
+    expect(prompt).toContain('Qwen-MM core read_video/frame tools')
+    expect(prompt).toContain('Other attached files are available at their local_path values.')
   })
 
   test('injects Telegram conversation transcript before the current message', () => {

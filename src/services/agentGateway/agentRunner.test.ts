@@ -340,6 +340,9 @@ describe('agent gateway prompt builder', () => {
     expect(extractVisualLocalPaths(prompt)).toEqual([
       '/workspace/vision-inputs/example.png',
     ])
+    expect(extractVisualLocalPaths(
+      'local_path: /workspace/vision-inputs/image-from-document.bmp',
+    )).toEqual(['/workspace/vision-inputs/image-from-document.bmp'])
     const injected = injectGatewayVisionEvidence(
       prompt,
       'Heading: MCP Servers. Sidebar: MCP Servers, Skills, Tools & Runtime, Request Log.',

@@ -313,7 +313,7 @@ const MAX_AGENT_TEXT_BUFFER_CHARS = 4 * 1024 * 1024
 const MAX_AGENT_STDERR_BUFFER_CHARS = 1024 * 1024
 const MAX_TRACKED_TOOL_USES = 512
 const MAX_AGENT_ACTIVITY_EVENTS = 240
-const VISUAL_IMAGE_EXTENSION = '(?:png|jpe?g|webp|gif)'
+const VISUAL_IMAGE_EXTENSION = '(?:png|jpe?g|webp|gif|bmp)'
 const PENTEST_ALLOWED_TOOLS = [
   'Skill',
   'TodoWrite',

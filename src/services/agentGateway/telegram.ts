@@ -8039,11 +8039,7 @@ export function buildTelegramAgentPrompt(input: {
       '',
       'Use the local_path values above when you need to inspect attached files.',
     )
-    if (input.attachments.some(isVisualTelegramAttachment)) {
-      lines.push(
-        'At least one attachment is visual. Inspect the actual local image through gateway-vision when that route is available; do not infer its contents from the filename or caption.',
-      )
-    }
+    lines.push(...buildTelegramAttachmentInspectionGuidance(input.attachments))
   }
 
   return lines.join('\n')
@@ -8753,7 +8749,7 @@ export async function listTelegramStoredFiles(
     .slice(0, limit)
 }
 
-function getTelegramMessageText(message: TelegramMessage | undefined): string {
+export function getTelegramMessageText(message: TelegramMessage | undefined): string {
   return repairLikelyMojibakeText(message?.text || message?.caption || '').trim()
 }
 
@@ -8947,6 +8943,17 @@ function isTelegramPhotoFile(filePath: string): boolean {
   )
 }
 
+/**
+ * Telegram accepts fewer formats in sendPhoto than the agent can inspect on
+ * input. Keep this separate from isTelegramPhotoFile so incoming GIF/BMP files
+ * remain available to vision without routing outgoing files to sendPhoto.
+ */
+function isTelegramVisualInputFile(filePath: string): boolean {
+  return ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'].includes(
+    extname(filePath).toLowerCase(),
+  )
+}
+
 function isTelegramAudioFile(filePath: string): boolean {
   return ['.mp3', '.m4a'].includes(extname(filePath).toLowerCase())
 }
@@ -8954,7 +8961,45 @@ function isTelegramAudioFile(filePath: string): boolean {
 function isVisualTelegramAttachment(attachment: TelegramAttachment): boolean {
   return attachment.type === 'photo'
     || Boolean(attachment.mimeType?.toLowerCase().startsWith('image/'))
-    || Boolean(attachment.localPath && isTelegramPhotoFile(attachment.localPath))
+    || Boolean(attachment.localPath && isTelegramVisualInputFile(attachment.localPath))
+}
+
+function isTelegramVideoAttachment(attachment: TelegramAttachment): boolean {
+  return ['video', 'video_note', 'animation'].includes(attachment.type)
+    || Boolean(attachment.mimeType?.toLowerCase().startsWith('video/'))
+    || Boolean(attachment.localPath && ['.mp4', '.mov', '.mkv', '.webm'].includes(
+      extname(attachment.localPath).toLowerCase(),
+    ))
+}
+
+function buildTelegramAttachmentInspectionGuidance(
+  attachments: TelegramAttachment[],
+): string[] {
+  const guidance: string[] = []
+  const hasVisual = attachments.some(isVisualTelegramAttachment)
+  const hasVideo = attachments.some(isTelegramVideoAttachment)
+  const hasOtherFiles = attachments.some(attachment =>
+    Boolean(attachment.localPath)
+    && !isVisualTelegramAttachment(attachment)
+    && !isTelegramVideoAttachment(attachment),
+  )
+
+  if (hasVisual) {
+    guidance.push(
+      'At least one attachment is an image. The gateway will inspect each local image with Qwen-MM when enabled and supply textual visual evidence to the coordinating model. Do not infer image contents from its filename or caption.',
+    )
+  }
+  if (hasVideo) {
+    guidance.push(
+      'At least one attachment is video or animation. Inspect its local_path with Qwen-MM core read_video/frame tools when they are enabled, then use the resulting frame evidence. Do not claim to have watched it without reading the file.',
+    )
+  }
+  if (hasOtherFiles) {
+    guidance.push(
+      'Other attached files are available at their local_path values. Select the appropriate file, document, audio, archive, or terminal tool for the actual format; do not infer file contents from its name or caption.',
+    )
+  }
+  return guidance
 }
 
 function isAudioMime(mimeType: string | undefined): boolean {
@@ -8976,6 +9021,8 @@ function extensionFromMime(mimeType: string | undefined): string {
       return '.webp'
     case 'image/gif':
       return '.gif'
+    case 'image/bmp':
+      return '.bmp'
     case 'audio/ogg':
     case 'audio/opus':
       return '.ogg'
@@ -8986,6 +9033,12 @@ function extensionFromMime(mimeType: string | undefined): string {
       return '.m4a'
     case 'video/mp4':
       return '.mp4'
+    case 'video/webm':
+      return '.webm'
+    case 'video/quicktime':
+      return '.mov'
+    case 'video/x-matroska':
+      return '.mkv'
     case 'application/pdf':
       return '.pdf'
     case 'text/plain':
