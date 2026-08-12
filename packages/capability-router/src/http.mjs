@@ -14,7 +14,10 @@ const host = process.env.CAPABILITY_ROUTER_HOST || '127.0.0.1'
 const port = Number(process.env.CAPABILITY_ROUTER_PORT || 8768)
 const apiKey = process.env.CAPABILITY_ROUTER_API_KEY || ''
 const maxBodyBytes = Number(process.env.CAPABILITY_ROUTER_MAX_BODY_BYTES || 268_435_456)
-const autoSession = /^(?:1|true|yes|on)$/iu.test(process.env.CAPABILITY_ROUTER_AUTO_SESSION || '')
+const configuredAutoSession = process.env.CAPABILITY_ROUTER_AUTO_SESSION
+const autoSession = configuredAutoSession === undefined
+  ? ['127.0.0.1', 'localhost', '::1'].includes(host)
+  : /^(?:1|true|yes|on)$/iu.test(configuredAutoSession)
 const configuredSessionTtlMs = Number(process.env.CAPABILITY_ROUTER_SESSION_TTL_MS || 43_200_000)
 const sessionTtlMs = Number.isFinite(configuredSessionTtlMs) && configuredSessionTtlMs >= 60_000
   ? configuredSessionTtlMs
@@ -95,12 +98,15 @@ function hasConsoleSession(request) {
   return true
 }
 
-function authorized(request, { allowConsoleSession = false } = {}) {
-  if (!apiKey) return true
+function authorized(request, { allowConsoleSession = false, requireExplicit = false } = {}) {
   const authorization = request.headers.authorization || ''
-  return authorization === `Bearer ${apiKey}`
+  const keyAccepted = Boolean(apiKey) && (
+    authorization === `Bearer ${apiKey}`
     || request.headers['x-capability-router-key'] === apiKey
-    || (allowConsoleSession && hasConsoleSession(request))
+  )
+  const sessionAccepted = allowConsoleSession && hasConsoleSession(request)
+  if (apiKey) return keyAccepted || sessionAccepted
+  return requireExplicit ? sessionAccepted : true
 }
 
 async function bodyBuffer(request, limit = maxBodyBytes) {
@@ -170,7 +176,11 @@ const server = createServer(async (request, response) => {
       return
     }
     const apiRequest = url.pathname.startsWith('/api/')
-    if ((apiRequest || url.pathname === '/mcp') && !authorized(request, { allowConsoleSession: apiRequest })) {
+    const mutatingApiRequest = apiRequest && !['GET', 'HEAD'].includes(request.method || 'GET')
+    if ((apiRequest || url.pathname === '/mcp') && !authorized(request, {
+      allowConsoleSession: apiRequest,
+      requireExplicit: mutatingApiRequest,
+    })) {
       sendJson(response, 401, { error: 'Unauthorized' })
       return
     }
@@ -181,6 +191,22 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === '/api/state' && request.method === 'GET') {
       sendJson(response, 200, router.snapshot())
+      return
+    }
+    if (url.pathname === '/api/catalog' && request.method === 'GET') {
+      sendJson(response, 200, await router.catalog())
+      return
+    }
+    if (url.pathname === '/api/probe' && request.method === 'POST') {
+      const input = await jsonBody(request)
+      sendJson(response, 200, await router.catalog({
+        probe: true,
+        concurrency: Number(input.concurrency || 4),
+      }))
+      return
+    }
+    if (url.pathname === '/api/export' && request.method === 'GET') {
+      sendJson(response, 200, router.exportRegistry())
       return
     }
     if (url.pathname === '/api/reload' && request.method === 'POST') {
@@ -194,7 +220,7 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === '/api/toggle' && request.method === 'POST') {
       const input = await jsonBody(request)
-      sendJson(response, 200, router.setEnabled(input.kind, input.name, input.enabled === true))
+      sendJson(response, 200, router.setEnabled(input.kind, input.name, input.enabled === true, input.server))
       return
     }
     if (url.pathname === '/api/mcp/import' && request.method === 'POST') {

@@ -37,13 +37,15 @@ const tools = [
   },
   {
     name: 'capability_registry',
-    description: 'Inspect, import, export, enable, or disable portable MCP capabilities. Import accepts standard mcpServers JSON and stores credentials only as environment references.',
+    description: 'Inspect, probe, import, export, enable, or disable portable MCP capabilities and individual downstream tools. Import accepts standard mcpServers JSON and stores credentials only as environment references.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'export', 'import', 'enable', 'disable', 'reload'] },
-        kind: { type: 'string', enum: ['server', 'skill'] },
+        action: { type: 'string', enum: ['list', 'catalog', 'export', 'import', 'enable', 'disable', 'reload'] },
+        kind: { type: 'string', enum: ['server', 'tool', 'skill'] },
+        server: { type: 'string', description: 'Parent MCP server id when kind is tool.' },
         name: { type: 'string' },
+        refresh: { type: 'boolean', description: 'Probe every enabled downstream server and refresh its tool inventory.' },
         config: { type: 'object', additionalProperties: true },
       },
       required: ['action'],
@@ -124,11 +126,12 @@ export function createCapabilityMcpServer(router) {
           router.ensureSkillsLoaded()
           return resultText(router.snapshot())
         }
+        if (input.action === 'catalog') return resultText(await router.catalog({ probe: input.refresh === true }))
         if (input.action === 'export') return resultText(router.exportRegistry())
         if (input.action === 'import') return resultText(router.importMcp(input.config))
         if (input.action === 'reload') return resultText(router.reload())
         if (input.action === 'enable' || input.action === 'disable') {
-          return resultText(router.setEnabled(input.kind || 'server', input.name, input.action === 'enable'))
+          return resultText(router.setEnabled(input.kind || 'server', input.name, input.action === 'enable', input.server))
         }
       }
       if (name === 'skill_store') {

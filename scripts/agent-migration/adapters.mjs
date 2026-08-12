@@ -110,9 +110,13 @@ function prepareCapabilityRuntime(bundleRoot, output, runtimeRoot, servers, expo
   writeJson(join(routerDirectory, 'mcp.container.json'), standardMcpConfig(servers, '/workspace'))
   if (!copyIfExists(bundlePath(bundleRoot, 'state/capability-router/state.json'), join(routerDirectory, 'state.json'))) {
     writeJson(join(routerDirectory, 'state.json'), {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      revision: 0,
       disabledServers: [],
       disabledSkills: [],
+      disabledTools: {},
+      toolInventory: {},
+      toolInventoryMeta: {},
       customServers: {},
     })
   }

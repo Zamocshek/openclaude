@@ -810,8 +810,8 @@ services:
       CAPABILITY_ROUTER_WORKSPACE_ROOT: "/workspace"
       CAPABILITY_ROUTER_MCP_CONFIG: "/workspace/.mcp.json"
       CAPABILITY_ROUTER_REGISTRY: "/workspace/capability-registry.json"
-      CAPABILITY_ROUTER_STATE: "/data/state.json"
-      CAPABILITY_ROUTER_SKILL_STORE: "/data/skills"
+      CAPABILITY_ROUTER_STATE: "/home/node/.openclaude/capability-router/state.json"
+      CAPABILITY_ROUTER_SKILL_STORE: "/home/node/.openclaude/capability-router/skills"
       CAPABILITY_ROUTER_MAX_SERVERS: "${CAPABILITY_ROUTER_MAX_SERVERS:-4}"
       CAPABILITY_ROUTER_MAX_TOOLS: "${CAPABILITY_ROUTER_MAX_TOOLS:-20}"
       CAPABILITY_ROUTER_LLM_BASE_URL: "${CAPABILITY_ROUTER_LLM_BASE_URL:-http://omniroute:20128/v1}"
@@ -841,6 +841,9 @@ services:
       - "${CAPABILITY_ROUTER_BIND_ADDRESS:-127.0.0.1}:${CAPABILITY_ROUTER_HOST_PORT:-19868}:8768"
     volumes:
       - ./:/workspace
+      - type: bind
+        source: "${OPENCLAUDE_HOST_CONFIG_DIR:-${OPENCLAUDE_HOST_HOME:-${HOME:-${USERPROFILE}}}/.openclaude}"
+        target: /home/node/.openclaude
       - capability-router-data:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"

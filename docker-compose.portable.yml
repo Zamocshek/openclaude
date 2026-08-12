@@ -21,6 +21,16 @@ services:
     environment:
       OPENCLAUDE_TELEGRAM_CRON_TIMEZONE: "${OPENCLAUDE_TELEGRAM_CRON_TIMEZONE:-UTC}"
 
+  capability-router:
+    volumes: !override
+      - type: bind
+        source: .
+        target: /workspace
+      - type: bind
+        source: "${OPENCLAUDE_HOST_CONFIG_DIR:-./.openclaude-data/config}"
+        target: /home/node/.openclaude
+      - capability-router-data:/data
+
   openclaude-worker-1:
     depends_on:
       openclaude-ollama-bootstrap:

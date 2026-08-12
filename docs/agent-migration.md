@@ -22,6 +22,9 @@ OpenClaw, or Codex profile.
   automation and file-first voice handling move without the NOVA runtime.
 - Target agents receive one lazy `capability-router` MCP by default, so a task
   sees five facade tools instead of every downstream schema.
+- The Router state, complete discovered tool inventory, and per-server,
+  per-skill, and per-tool switches are exported from the same shared state used
+  by the Docker control center and agent processes.
 - Full history remains in canonical JSONL even when a target has no stable
   public API for importing an internal chat database.
 
@@ -120,7 +123,10 @@ identity/                         SOUL, USER, MEMORY, scratchpad
 state/                            Gateway memory, config, cron, router state
 conversations/messages.jsonl      canonical complete message stream
 conversations/raw/                sanitized source-native JSONL
+contexts/                         reflections, Telegram files, cron output, voice/vision inputs
 capabilities/mcp.json             normalized MCP registry
+capabilities/tools.json           tool schemas, origin metadata, and switch policy
+capabilities/native-tools.json    source-harness tool policy and fidelity note
 capabilities/registry.json        routing metadata, components, and tool filters
 capabilities/components/          self-contained router/tool applications
 capabilities/components.json      portable component index
@@ -160,7 +166,8 @@ OpenClaude. It exposes the same five MCP tools over stdio and Streamable HTTP:
 
 - `capability_route` selects a bounded server/tool/skill set for a complete task.
 - `capability_call` invokes one selected downstream MCP tool.
-- `capability_registry` imports standard MCP JSON and controls enabled state.
+- `capability_registry` inventories, probes, imports, exports, and controls MCP
+  servers, skills, and individual downstream tools.
 - `skill_store` installs and reads self-contained Agent Skills.
 - `workspace_files` provides the portable file-manager surface.
 
@@ -171,7 +178,8 @@ not the primary policy. Per-server `allowedTools` and `blockedTools`, plus
 `CAPABILITY_ROUTER_MAX_SERVERS` and `CAPABILITY_ROUTER_MAX_TOOLS`, cap context
 cost without disabling capabilities globally.
 
-The same package serves a dark control center on port `8768`, including MCP
+The same package serves a dark control center on port `8768`, including the
+complete downstream tool catalog, live readiness/error state, server/tool
 switches/import, Skill Store, task routing, and a workspace-scoped file manager.
 OmniRoute remains a separate, migratable provider-router component because it
 already has a stable container boundary and persistent `/app/data` volume.

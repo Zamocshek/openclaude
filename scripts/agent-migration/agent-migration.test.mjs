@@ -27,6 +27,7 @@ function fixture() {
   const workspace = join(root, 'workspace')
   mkdirSync(join(home, 'agent-gateway', 'memory', 'knowledge'), { recursive: true })
   mkdirSync(join(home, 'agent-gateway', 'logs'), { recursive: true })
+  mkdirSync(join(home, 'capability-router'), { recursive: true })
   mkdirSync(join(home, 'projects', '-workspace'), { recursive: true })
   mkdirSync(join(workspace, 'skills', 'sample'), { recursive: true })
   mkdirSync(join(workspace, 'packages', 'capability-router', 'src'), { recursive: true })
@@ -52,6 +53,39 @@ function fixture() {
   writeFileSync(join(home, 'agent-gateway', 'memory', 'scratchpad.md'), '# Scratchpad\nCurrent work.\n')
   writeJson(join(home, 'agent-gateway', 'memory', 'curated_memory.json'), { version: 1, entries: [] })
   writeJson(join(home, 'agent-gateway', 'cron-jobs.json'), { jobs: [], updatedAt: '2026-08-07T00:00:00.000Z' })
+  writeJson(join(home, 'capability-router', 'state.json'), {
+    schemaVersion: 2,
+    disabledServers: [],
+    disabledSkills: [],
+    disabledTools: { local: ['dangerous_fixture'] },
+    toolInventory: {
+      local: [{
+        name: 'inspect_fixture',
+        description: 'Inspect fixture source with opaque-tool-secret-value-1234567890',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            apiToken: {
+              type: 'string',
+              description: 'Provider credential',
+              default: 'opaque-tool-secret-value-1234567890',
+            },
+          },
+        },
+      }],
+    },
+    toolInventoryMeta: {
+      local: { source: 'live', discoveredAt: '2026-08-07T00:00:00.000Z' },
+    },
+    customServers: {
+      legacy: {
+        type: 'http',
+        url: 'https://legacy.example.test/mcp',
+        headers: { Authorization: 'Bearer literal-router-secret-1234567890' },
+        env: { LEGACY_API_KEY: 'literal-router-key-1234567890' },
+      },
+    },
+  })
 
   const gatewayHistory = [
     { ts: '2026-08-07T00:00:00.000Z', direction: 'inbound', text: 'Remember the migration.', chatId: '42', messageId: 1 },
@@ -61,6 +95,9 @@ function fixture() {
     join(home, 'agent-gateway', 'logs', 'chat.jsonl'),
     `${gatewayHistory.map(value => JSON.stringify(value)).join('\n')}\n`,
   )
+  writeFileSync(join(home, 'agent-gateway', 'logs', 'task_reflections.jsonl'), '{"lesson":"verify migrations"}\n')
+  mkdirSync(join(home, 'agent-gateway', 'telegram-files', '42', '1'), { recursive: true })
+  writeFileSync(join(home, 'agent-gateway', 'telegram-files', '42', '1', 'note.txt'), 'portable attachment')
 
   const projectHistory = [
     {
@@ -162,6 +199,22 @@ describe('agent migration bundle', () => {
     expect(secretTemplate).toContain('LOCAL_API_KEY=')
     const mcp = readJson(join(output, 'capabilities', 'mcp.json'))
     expect(mcp.servers.find(server => server.name === 'local').env.LOCAL_API_KEY).toBe('${LOCAL_API_KEY}')
+    const tools = readJson(join(output, 'capabilities', 'tools.json'))
+    expect(tools.inventories.local[0].name).toBe('inspect_fixture')
+    expect(tools.inventoryMetadata.local.source).toBe('live')
+    expect(tools.disabledTools.local).toEqual(['dangerous_fixture'])
+    const routerState = readJson(join(output, 'state', 'capability-router', 'state.json'))
+    expect(routerState.schemaVersion).toBe(2)
+    expect(routerState.customServers.legacy.headers.Authorization).toStartWith('${')
+    expect(routerState.customServers.legacy.env.LEGACY_API_KEY).toBe('${LEGACY_API_KEY}')
+    expect(readFileSync(join(output, 'state', 'capability-router', 'state.json'), 'utf8')).not.toContain('literal-router')
+    expect(readFileSync(join(output, 'state', 'capability-router', 'state.json'), 'utf8')).not.toContain('opaque-tool-secret')
+    expect(readFileSync(join(output, 'capabilities', 'tools.json'), 'utf8')).not.toContain('opaque-tool-secret')
+    expect(routerState.toolInventory.local[0].inputSchema.properties.apiToken.description).toBe('Provider credential')
+    expect(secretTemplate).toContain('LEGACY_API_KEY=')
+    expect(readJson(join(output, 'capabilities', 'native-tools.json')).runner.disableTools).toBe(false)
+    expect(existsSync(join(output, 'contexts', 'logs', 'task_reflections.jsonl'))).toBe(true)
+    expect(readFileSync(join(output, 'contexts', 'telegram-files', '42', '1', 'note.txt'), 'utf8')).toBe('portable attachment')
     expect(existsSync(join(output, 'workspace', 'profile', 'README.md'))).toBe(true)
   })
 
@@ -206,6 +259,8 @@ describe('agent migration bundle', () => {
       expect(existsSync(join(output, 'install-capabilities.mjs'))).toBe(true)
       expect(existsSync(join(output, 'portable-services.compose.yml'))).toBe(true)
       expect(existsSync(join(output, 'capability-router', 'mcp.json'))).toBe(true)
+      expect(readFileSync(join(output, 'capability-router', 'state.json'), 'utf8')).not.toContain('opaque-tool-secret')
+      expect(readFileSync(join(output, 'imports', 'nova-agent-bundle', 'state', 'capability-router', 'state.json'), 'utf8')).not.toContain('opaque-tool-secret')
       expect(existsSync(join(output, 'imports', 'nova-agent-bundle', 'capabilities', 'components', 'capability-router', 'src', 'mcp.mjs'))).toBe(true)
     }
 

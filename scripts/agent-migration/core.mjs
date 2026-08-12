@@ -125,6 +125,7 @@ function createRedactionState() {
     total: 0,
     byType: {},
     requiredSecrets: new Set(),
+    literalSecrets: new Map(),
   }
 }
 
@@ -135,6 +136,13 @@ function recordRedaction(state, type, count = 1) {
 
 export function redactText(input, state = createRedactionState()) {
   let text = String(input ?? '')
+  for (const [secret, replacement] of [...(state.literalSecrets || new Map())]
+    .sort(([left], [right]) => right.length - left.length)) {
+    if (!secret || !text.includes(secret)) continue
+    const count = text.split(secret).length - 1
+    text = text.split(secret).join(replacement)
+    recordRedaction(state, 'known-structured-secret', count)
+  }
   for (const pattern of SECRET_PATTERNS) {
     text = text.replace(pattern.regex, match => {
       recordRedaction(state, pattern.name)
@@ -153,9 +161,37 @@ function isSecretProperty(name) {
   return /(?:api[_-]?key|token|secret|password|credential|authorization|cookie|private[_-]?key)/iu.test(name)
 }
 
-export function sanitizeStructured(value, state, path = []) {
+function secretValuePath(path) {
+  const leaf = String(path.at(-1) || '')
+  if (isSecretProperty(leaf)) return true
+  return /^(?:default|value)$/iu.test(leaf)
+    && path.slice(0, -1).some(part => isSecretProperty(String(part)))
+}
+
+function collectStructuredSecrets(value, state, path = []) {
   if (Array.isArray(value)) {
-    return value.map((item, index) => sanitizeStructured(item, state, [...path, String(index)]))
+    value.forEach((item, index) => collectStructuredSecrets(item, state, [...path, String(index)]))
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  for (const [key, item] of Object.entries(value)) {
+    const itemPath = [...path, key]
+    if (typeof item === 'string' && item.trim() && secretValuePath(itemPath)) {
+      const envMatch = item.match(/^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$/u)
+      const insideEnvMap = /^(?:env|environment)$/iu.test(path.at(-1) || '')
+      const envName = envMatch?.[1] || (insideEnvMap && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)
+        ? key
+        : envNameForPath(itemPath))
+      state.requiredSecrets.add(envName)
+      if (!envMatch) state.literalSecrets.set(item, `\${${envName}}`)
+    }
+    collectStructuredSecrets(item, state, itemPath)
+  }
+}
+
+function sanitizeStructuredValue(value, state, path = []) {
+  if (Array.isArray(value)) {
+    return value.map((item, index) => sanitizeStructuredValue(item, state, [...path, String(index)]))
   }
   if (value && typeof value === 'object') {
     const output = {}
@@ -163,7 +199,7 @@ export function sanitizeStructured(value, state, path = []) {
       if (/(?:apiKeyEnv|tokenEnv|passwordEnv|secretEnv)$/u.test(key) && typeof item === 'string' && item.trim()) {
         state.requiredSecrets.add(item.trim())
         output[key] = item
-      } else if (isSecretProperty(key) && typeof item === 'string' && item.trim()) {
+      } else if (secretValuePath([...path, key]) && typeof item === 'string' && item.trim()) {
         const envMatch = item.match(/^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$/u)
         const insideEnvMap = /^(?:env|environment)$/iu.test(path.at(-1) || '')
         const envName = envMatch?.[1] || (insideEnvMap && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)
@@ -173,12 +209,17 @@ export function sanitizeStructured(value, state, path = []) {
         output[key] = `\${${envName}}`
         if (!envMatch) recordRedaction(state, 'structured-secret')
       } else {
-        output[key] = sanitizeStructured(item, state, [...path, key])
+        output[key] = sanitizeStructuredValue(item, state, [...path, key])
       }
     }
     return output
   }
   return typeof value === 'string' ? redactText(value, state) : value
+}
+
+export function sanitizeStructured(value, state, path = []) {
+  collectStructuredSecrets(value, state, path)
+  return sanitizeStructuredValue(value, state, path)
 }
 
 function looksText(path) {
@@ -551,11 +592,79 @@ export async function exportOpenClaudeBundle(options = {}) {
     ]) {
       copySanitizedJson(join(stateDir, name), join(partial, 'state', name), redaction, ['state', name])
     }
-    copyPortableTree(
+    const routerStateCandidates = [
+      options.capabilityRouterState,
+      process.env.CAPABILITY_ROUTER_STATE,
+      join(sourceHome, 'capability-router'),
       join(stateDir, 'capability-router'),
-      join(partial, 'state', 'capability-router'),
-      redaction,
-    )
+    ].filter(Boolean).map(path => resolve(path))
+    const routerStateSource = routerStateCandidates.find(path => existsSync(path))
+    let routerStateRoot
+    let routerState
+    if (routerStateSource) {
+      if (lstatSync(routerStateSource).isDirectory()) {
+        routerStateRoot = routerStateSource
+        const stateFile = join(routerStateSource, 'state.json')
+        copyPortableTree(
+          routerStateSource,
+          join(partial, 'state', 'capability-router'),
+          redaction,
+          { exclude: ['state.json'] },
+        )
+        if (existsSync(stateFile)) {
+          routerState = readJson(stateFile)
+          copySanitizedJson(
+            stateFile,
+            join(partial, 'state', 'capability-router', 'state.json'),
+            redaction,
+            ['state', 'capability-router'],
+          )
+        }
+      } else {
+        routerStateRoot = dirname(routerStateSource)
+        copySanitizedJson(
+          routerStateSource,
+          join(partial, 'state', 'capability-router', 'state.json'),
+          redaction,
+          ['state', 'capability-router'],
+        )
+        routerState = readJson(routerStateSource)
+        copyPortableTree(
+          join(routerStateRoot, 'skills'),
+          join(partial, 'state', 'capability-router', 'skills'),
+          redaction,
+        )
+      }
+    }
+    for (const name of ['goals', 'semantic-router']) {
+      copyPortableTree(
+        join(stateDir, name),
+        join(partial, 'state', 'runtime', name),
+        redaction,
+      )
+    }
+    for (const name of ['subagent-routing.settings.json', 'telegram-research-modes.json']) {
+      copySanitizedJson(
+        join(stateDir, name),
+        join(partial, 'state', 'runtime', name),
+        redaction,
+        ['state', 'runtime', name],
+      )
+    }
+    if (history !== 'none') {
+      for (const name of ['cron-output', 'telegram-files', 'transcriptions', 'vision-inputs', 'api-responses']) {
+        copyPortableTree(
+          join(stateDir, name),
+          join(partial, 'contexts', name),
+          redaction,
+          { maxFileBytes: Number(descriptor.workspace.maxFileBytes || 512 * 1024 * 1024) },
+        )
+      }
+      for (const name of ['task_reflections.jsonl', 'telegram-errors.jsonl', 'events.jsonl']) {
+        const source = join(stateDir, 'logs', name)
+        if (existsSync(source)) copyPortableFile(source, join(partial, 'contexts', 'logs', name), redaction)
+      }
+    }
 
     const mcpServers = new Map()
     const configuredRegistry = descriptor.capabilities.registry
@@ -598,10 +707,20 @@ export async function exportOpenClaudeBundle(options = {}) {
       schemaVersion: 1,
       servers: [...mcpServers.values()].sort((a, b) => a.name.localeCompare(b.name)),
     })
+    writeJson(join(partial, 'capabilities', 'tools.json'), sanitizeStructured({
+      schemaVersion: 1,
+      source: routerState ? 'capability-router-state' : 'mcp-config',
+      inventories: routerState?.toolInventory || {},
+      inventoryMetadata: routerState?.toolInventoryMeta || {},
+      disabledTools: routerState?.disabledTools || {},
+      note: 'Downstream schemas are cached for inspection; MCP definitions remain the executable source of truth.',
+    }, redaction, ['capabilities', 'tools']))
 
     const skillRoots = new Set([
       join(sourceHome, 'skills'),
+      join(sourceHome, 'capability-router', 'skills'),
       join(stateDir, 'capability-router', 'skills'),
+      ...(routerStateRoot ? [join(routerStateRoot, 'skills')] : []),
       ...(descriptor.capabilities.skillRoots || []).map(path => ensureInside(workspace, join(workspace, path))),
     ])
     const skillDirectories = new Set()
@@ -652,6 +771,20 @@ export async function exportOpenClaudeBundle(options = {}) {
     })
 
     const gatewayConfig = readJson(join(sourceHome, 'agent-gateway.json'), {})
+    writeJson(join(partial, 'capabilities', 'native-tools.json'), sanitizeStructured({
+      schemaVersion: 1,
+      sourceRuntime: 'openclaude',
+      runner: {
+        disableTools: Boolean(gatewayConfig?.runner?.disableTools),
+        availableTools: Array.isArray(gatewayConfig?.runner?.availableTools)
+          ? gatewayConfig.runner.availableTools.map(String)
+          : [],
+        disallowedTools: Array.isArray(gatewayConfig?.runner?.disallowedTools)
+          ? gatewayConfig.runner.disallowedTools.map(String)
+          : [],
+      },
+      note: 'Harness-native tools are policy metadata. Target runtimes map equivalent file, shell, browser, and subagent capabilities instead of copying executable internals.',
+    }, redaction, ['capabilities', 'native-tools']))
     writeJson(join(partial, 'capabilities', 'providers.json'), sanitizeStructured({
       schemaVersion: 1,
       apiModelName: gatewayConfig?.api?.modelName,

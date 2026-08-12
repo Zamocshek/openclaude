@@ -542,9 +542,13 @@ the semantic endpoint is offline.
 
 The Docker UI is available at `http://localhost:19868`; its MCP endpoint is
 `http://localhost:19868/mcp`. It uses `OPENCLAUDE_AGENT_API_KEY` by default, or
-the separate `CAPABILITY_ROUTER_API_KEY` override. The package has no dependency
-on NOVA or Agent Gateway and can be installed in Hermes, OpenCode, OpenClaw,
-Codex, or another MCP client. Export a ready target bundle with:
+the separate `CAPABILITY_ROUTER_API_KEY` override. The UI distinguishes MCP
+servers from their complete tool inventory, labels live/cached/declared schemas,
+probes live readiness, and transactionally persists server, tool, and skill
+switches in the same state consumed by NOVA. The package
+has no dependency on NOVA or Agent Gateway and can be installed in Hermes,
+OpenCode, OpenClaw, Codex, or another MCP client. Export a ready target bundle
+with:
 
 ```bash
 bun run agent:migrate export --output ./nova-portable

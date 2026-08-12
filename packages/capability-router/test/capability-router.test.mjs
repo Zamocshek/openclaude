@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -84,6 +84,107 @@ test('routes lazily and exposes only the bounded relevant tool set', async t => 
   assert.match(result.content[0].text, /called:inspect_code/u)
 })
 
+test('catalogs every downstream tool and persists individual tool switches', async t => {
+  const root = fixture()
+  const options = {
+    workspaceRoot: root,
+    registryPath: join(root, 'capability-registry.json'),
+    mcpConfigPath: join(root, '.mcp.json'),
+    statePath: join(root, 'state', 'state.json'),
+  }
+  let router = new CapabilityRouter(options)
+  t.after(async () => {
+    await router.shutdown()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const probed = await router.catalog({ probe: true, concurrency: 999 })
+  assert.equal(probed.summary.configuredServers, 1)
+  assert.equal(probed.summary.readyServers, 1)
+  assert.equal(probed.summary.totalTools, 2)
+  assert.equal(probed.summary.liveTools, 2)
+  assert.equal(probed.summary.cachedTools, 0)
+  assert.equal(probed.servers[0].inventorySource, 'live')
+  assert.equal(probed.probeConcurrency, 1)
+  assert.deepEqual(probed.tools.map(tool => tool.name), ['inspect_code', 'send_weather'])
+
+  router.setEnabled('tool', 'send_weather', false, 'codegraph')
+  assert.deepEqual((await router.listServerTools('codegraph')).map(tool => tool.name), ['inspect_code'])
+  assert.equal((await router.catalog()).tools.find(tool => tool.name === 'send_weather').enabled, false)
+
+  await router.shutdown()
+  router = new CapabilityRouter(options)
+  const restored = await router.catalog()
+  assert.equal(restored.summary.totalTools, 2)
+  assert.equal(restored.summary.liveTools, 0)
+  assert.equal(restored.summary.cachedTools, 2)
+  assert.equal(restored.servers[0].inventorySource, 'cached')
+  assert.equal(restored.tools.find(tool => tool.name === 'send_weather').enabled, false)
+})
+
+test('merges switches from independent router processes and refreshes stale readers', async t => {
+  const root = fixture()
+  const options = {
+    workspaceRoot: root,
+    registryPath: join(root, 'capability-registry.json'),
+    mcpConfigPath: join(root, '.mcp.json'),
+    statePath: join(root, 'state', 'state.json'),
+  }
+  const first = new CapabilityRouter(options)
+  const second = new CapabilityRouter(options)
+  const verifier = new CapabilityRouter(options)
+  t.after(async () => {
+    await Promise.all([first.shutdown(), second.shutdown(), verifier.shutdown()])
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  await first.catalog({ probe: true })
+  first.setEnabled('tool', 'inspect_code', false, 'codegraph')
+  second.setEnabled('tool', 'send_weather', false, 'codegraph')
+  first.setEnabled('skill', 'code-review', false)
+
+  assert.deepEqual(await second.listServerTools('codegraph'), [])
+  const restored = await verifier.catalog()
+  assert.deepEqual(restored.tools.filter(tool => !tool.enabled).map(tool => tool.name), [
+    'inspect_code',
+    'send_weather',
+  ])
+  assert.equal(restored.skills.find(skill => skill.name === 'code-review').enabled, false)
+})
+
+test('serializes simultaneous state writes from separate operating-system processes', async t => {
+  const root = fixture()
+  const statePath = join(root, 'state', 'state.json')
+  const worker = join(root, 'toggle-worker.mjs')
+  writeFileSync(worker, [
+    `import { CapabilityRouter } from ${JSON.stringify(pathToFileURL(resolve(dirname(fakeServer), '..', '..', 'src', 'core.mjs')).href)}`,
+    "import { join } from 'node:path'",
+    "const [root, statePath, tool, startAt] = process.argv.slice(2)",
+    "const router = new CapabilityRouter({ workspaceRoot: root, registryPath: join(root, 'capability-registry.json'), mcpConfigPath: join(root, '.mcp.json'), statePath })",
+    "await new Promise(resolveWait => setTimeout(resolveWait, Math.max(0, Number(startAt) - Date.now())))",
+    "router.setEnabled('tool', tool, false, 'codegraph')",
+    "await router.shutdown()",
+  ].join('\n'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+
+  const startAt = Date.now() + 500
+  const run = tool => new Promise((resolveExit, rejectExit) => {
+    const child = spawn(process.execPath, [worker, root, statePath, tool, String(startAt)], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    })
+    let stderr = ''
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.once('error', rejectExit)
+    child.once('exit', code => code === 0 ? resolveExit() : rejectExit(new Error(stderr || `worker exited ${code}`)))
+  })
+  await Promise.all([run('inspect_code'), run('send_weather')])
+
+  const stored = JSON.parse(readFileSync(statePath, 'utf8'))
+  assert.deepEqual(stored.disabledTools.codegraph, ['inspect_code', 'send_weather'])
+  assert.ok(stored.revision >= 2)
+})
+
 test('deferred skill discovery keeps MCP startup cheap and loads skills on demand', async t => {
   const root = fixture()
   const router = new CapabilityRouter({
@@ -121,6 +222,25 @@ test('shares concurrent MCP connection attempts', async t => {
     router.connect('codegraph')))
   assert.equal(new Set(connections).size, 1)
   assert.equal(router.snapshot().servers[0].connected, true)
+})
+
+test('shares concurrent live inventory probes for each MCP server', async t => {
+  const root = fixture()
+  const router = new CapabilityRouter({
+    workspaceRoot: root,
+    registryPath: join(root, 'capability-registry.json'),
+    mcpConfigPath: join(root, '.mcp.json'),
+    statePath: join(root, 'state', 'state.json'),
+  })
+  t.after(async () => {
+    await router.shutdown()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const inventories = await Promise.all(Array.from({ length: 12 }, () =>
+    router.discoverServerTools('codegraph', true)))
+  assert.equal(new Set(inventories).size, 1)
+  assert.equal(inventories[0].length, 2)
 })
 
 test('distinguishes required and explicitly optional environment references', async t => {
@@ -317,6 +437,25 @@ test('web control center exposes health, state, and authenticated Streamable HTT
   const stateResponse = await fetch(`${base}/api/state`, { headers: { authorization: `Bearer ${apiKey}` } })
   assert.equal(stateResponse.status, 200)
   assert.equal((await stateResponse.json()).servers.length, 1)
+  const passiveCatalogResponse = await fetch(`${base}/api/catalog?probe=1`, { headers: { authorization: `Bearer ${apiKey}` } })
+  assert.equal(passiveCatalogResponse.status, 200)
+  const passiveCatalog = await passiveCatalogResponse.json()
+  assert.equal(passiveCatalog.probed, false)
+  assert.equal(passiveCatalog.summary.liveTools, 0)
+  const catalogResponse = await fetch(`${base}/api/probe`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(catalogResponse.status, 200)
+  assert.equal((await catalogResponse.json()).summary.totalTools, 2)
+  const toggleResponse = await fetch(`${base}/api/toggle`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ kind: 'tool', server: 'codegraph', name: 'send_weather', enabled: false }),
+  })
+  assert.equal(toggleResponse.status, 200)
+  assert.equal((await toggleResponse.json()).enabled, false)
 
   const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
     requestInit: { headers: { authorization: `Bearer ${apiKey}` } },
@@ -324,4 +463,58 @@ test('web control center exposes health, state, and authenticated Streamable HTT
   client = new Client({ name: 'router-http-test', version: '1.0.0' }, { capabilities: {} })
   await client.connect(transport)
   assert.equal((await client.listTools()).tools.length, 5)
+})
+
+test('loopback console requires its same-site session for state-changing API calls', async t => {
+  const root = fixture()
+  const port = 33_000 + Math.floor(Math.random() * 2_000)
+  const child = spawn(process.execPath, [resolve(dirname(fakeServer), '..', '..', 'src', 'http.mjs')], {
+    cwd: root,
+    env: {
+      ...process.env,
+      CAPABILITY_ROUTER_HOST: '127.0.0.1',
+      CAPABILITY_ROUTER_PORT: String(port),
+      CAPABILITY_ROUTER_API_KEY: '',
+      CAPABILITY_ROUTER_AUTO_SESSION: '1',
+      CAPABILITY_ROUTER_WORKSPACE_ROOT: root,
+      CAPABILITY_ROUTER_MCP_CONFIG: join(root, '.mcp.json'),
+      CAPABILITY_ROUTER_REGISTRY: join(root, 'capability-registry.json'),
+      CAPABILITY_ROUTER_STATE: join(root, 'state', 'state.json'),
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+  })
+  t.after(async () => {
+    if (child.exitCode === null) {
+      child.kill('SIGTERM')
+      await new Promise(resolveExit => child.once('exit', resolveExit))
+    }
+    rmSync(root, { recursive: true, force: true })
+  })
+  const base = `http://127.0.0.1:${port}`
+  let consoleResponse
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      consoleResponse = await fetch(base)
+      if (consoleResponse.ok) break
+    } catch {
+      // Startup is bounded by the loop.
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+  }
+  assert.equal(consoleResponse?.status, 200)
+  const consoleCookie = (consoleResponse.headers.get('set-cookie') || '').split(';')[0]
+  assert.match(consoleCookie, /^capability_router_session=/u)
+
+  const passive = await fetch(`${base}/api/catalog?probe=1`)
+  assert.equal(passive.status, 200)
+  assert.equal((await passive.json()).probed, false)
+  assert.equal((await fetch(`${base}/api/probe`, { method: 'POST', body: '{}' })).status, 401)
+  const probed = await fetch(`${base}/api/probe`, {
+    method: 'POST',
+    headers: { cookie: consoleCookie, 'content-type': 'application/json' },
+    body: '{}',
+  })
+  assert.equal(probed.status, 200)
+  assert.equal((await probed.json()).summary.liveTools, 2)
 })

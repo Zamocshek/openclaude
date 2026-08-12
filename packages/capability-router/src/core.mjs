@@ -1,7 +1,9 @@
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -18,13 +20,18 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
 const DEFAULT_STATE = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  revision: 0,
   disabledServers: [],
   disabledSkills: [],
+  disabledTools: {},
+  toolInventory: {},
+  toolInventoryMeta: {},
   customServers: {},
 }
 
 const SECRET_KEY_RE = /(?:api[_-]?key|token|secret|password|authorization|cookie|private[_-]?key)/iu
+const MAX_PROBE_CONCURRENCY = 8
 const ENV_REFERENCE_RE = /^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)(:-)?\}$/u
 const ENV_REFERENCE_GLOBAL_RE = /\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)(:-)?\}/gu
 const ROUTING_STOP_WORDS = new Set([
@@ -61,6 +68,60 @@ function writeJsonAtomic(path, value) {
   replaceFileAtomic(temporary, path)
 }
 
+const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4))
+
+function normalizeState(raw = {}) {
+  return {
+    ...DEFAULT_STATE,
+    ...objectValue(raw),
+    schemaVersion: DEFAULT_STATE.schemaVersion,
+    revision: Number.isFinite(Number(raw?.revision)) ? Number(raw.revision) : 0,
+    disabledServers: stringArray(raw?.disabledServers),
+    disabledSkills: stringArray(raw?.disabledSkills),
+    disabledTools: objectValue(raw?.disabledTools),
+    toolInventory: objectValue(raw?.toolInventory),
+    toolInventoryMeta: objectValue(raw?.toolInventoryMeta),
+    customServers: objectValue(raw?.customServers),
+  }
+}
+
+function stateFingerprint(state) {
+  return JSON.stringify(state)
+}
+
+function withStateLock(path, operation, options = {}) {
+  mkdirSync(dirname(path), { recursive: true })
+  const lockPath = `${path}.lock`
+  const timeoutMs = Number(options.timeoutMs || 5_000)
+  const staleMs = Number(options.staleMs || 30_000)
+  const deadline = Date.now() + timeoutMs
+  let descriptor
+  while (descriptor === undefined) {
+    try {
+      descriptor = openSync(lockPath, 'wx')
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > staleMs) {
+          rmSync(lockPath, { force: true })
+          continue
+        }
+      } catch {
+        continue
+      }
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for state lock: ${lockPath}`)
+      Atomics.wait(lockWaitBuffer, 0, 0, 15)
+    }
+  }
+  try {
+    writeFileSync(descriptor, `${process.pid}\n`, 'utf8')
+    return operation()
+  } finally {
+    closeSync(descriptor)
+    rmSync(lockPath, { force: true })
+  }
+}
+
 function normalizeName(value, label = 'name') {
   const name = String(value || '').trim().toLowerCase()
   if (!/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(name)) {
@@ -71,6 +132,44 @@ function normalizeName(value, label = 'name') {
 
 function stringArray(value) {
   return Array.isArray(value) ? value.map(item => String(item).trim()).filter(Boolean) : []
+}
+
+function toolName(value) {
+  const name = String(value || '').trim()
+  if (!name || name.length > 256 || /[\u0000-\u001f\u007f]/u.test(name)) {
+    throw new Error('tool name must be a non-empty printable string up to 256 characters')
+  }
+  return name
+}
+
+function objectValue(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+function portableTool(tool) {
+  return {
+    name: toolName(tool?.name),
+    ...(tool?.title ? { title: String(tool.title) } : {}),
+    description: String(tool?.description || tool?.name || ''),
+    inputSchema: objectValue(tool?.inputSchema),
+    ...(tool?.outputSchema ? { outputSchema: objectValue(tool.outputSchema) } : {}),
+    ...(tool?.annotations ? { annotations: objectValue(tool.annotations) } : {}),
+  }
+}
+
+async function mapConcurrent(values, limit, mapper) {
+  const items = [...values]
+  const results = new Array(items.length)
+  let cursor = 0
+  const requested = Number.isFinite(Number(limit)) ? Number(limit) : 4
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, requested), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await mapper(items[index], index)
+    }
+  }))
+  return results
 }
 
 function tokenize(value) {
@@ -289,8 +388,12 @@ export class CapabilityRouter {
     this.fetch = options.fetch || globalThis.fetch
     this.clients = new Map()
     this.connectionAttempts = new Map()
+    this.discoveryAttempts = new Map()
+    this.connectionOperations = new Map()
+    this.retiredConnections = new Set()
     this.serverSignatures = new Map()
     this.toolCache = new Map()
+    this.runtime = new Map()
     this.skills = []
     this.skillRoots = []
     this.skillsLoaded = false
@@ -300,7 +403,9 @@ export class CapabilityRouter {
   reload(options = {}) {
     const registry = readJson(this.registryPath, { schemaVersion: 1, servers: {}, skillRoots: [] })
     const config = readJson(this.mcpConfigPath, { mcpServers: {} })
-    this.state = { ...DEFAULT_STATE, ...readJson(this.statePath, DEFAULT_STATE) }
+    const storedState = readJson(this.statePath, DEFAULT_STATE)
+    this.state = normalizeState(storedState)
+    this.stateFingerprint = stateFingerprint(this.state)
     const metadata = metadataByName(registry)
     const disabled = new Set(stringArray(this.state.disabledServers))
     const merged = new Map()
@@ -319,8 +424,29 @@ export class CapabilityRouter {
       || this.serverSignatures.get(name) !== signatures.get(name))
     this.servers = merged
     this.serverSignatures = signatures
+    for (const name of [...this.runtime.keys()]) if (!merged.has(name)) this.runtime.delete(name)
+    for (const server of merged.values()) {
+      const missingEnvironment = [...envReferences(server)]
+        .filter(name => !this.environment[name])
+        .sort()
+      const current = this.runtime.get(server.name) || {}
+      const reusableStatus = ['ready', 'failed', 'connecting'].includes(current.status)
+        ? current.status
+        : 'unprobed'
+      this.runtime.set(server.name, {
+        ...current,
+        status: !server.enabled ? 'disabled' : missingEnvironment.length ? 'blocked' : reusableStatus,
+        missingEnvironment,
+      })
+    }
     for (const name of staleConnections) void this.disconnect(name)
     this.components = Array.isArray(registry.components) ? registry.components : []
+    const configuredNames = new Set(merged.keys())
+    const metadataNames = new Set(metadata.keys())
+    this.registryWarnings = [
+      ...[...metadataNames].filter(name => !configuredNames.has(name)).map(name => `Registry-only server: ${name}`),
+      ...[...configuredNames].filter(name => !metadataNames.has(name) && !this.state.customServers[name]).map(name => `Config-only server: ${name}`),
+    ]
     this.skillRoots = [...new Set([
       this.skillStoreRoot,
       ...stringArray(registry.skillRoots).map(path => resolve(this.workspaceRoot, path)),
@@ -335,7 +461,7 @@ export class CapabilityRouter {
       const disabledSkills = new Set(stringArray(this.state.disabledSkills))
       for (const skill of this.skills) skill.enabled = !disabledSkills.has(skill.name)
     }
-    return this.snapshot()
+    return this.snapshot({ sync: false })
   }
 
   reloadSkills() {
@@ -353,9 +479,33 @@ export class CapabilityRouter {
     return this.skills
   }
 
-  snapshot() {
+  syncStateFromDisk() {
+    const latest = normalizeState(readJson(this.statePath, DEFAULT_STATE))
+    if (stateFingerprint(latest) === this.stateFingerprint) return false
+    this.reload({ skills: false })
+    return true
+  }
+
+  updateState(mutator) {
+    return withStateLock(this.statePath, () => {
+      const latest = normalizeState(readJson(this.statePath, DEFAULT_STATE))
+      const result = mutator(latest)
+      latest.revision += 1
+      latest.updatedAt = new Date().toISOString()
+      writeJsonAtomic(this.statePath, latest)
+      this.state = latest
+      this.stateFingerprint = stateFingerprint(latest)
+      return result
+    })
+  }
+
+  snapshot(options = {}) {
+    if (options.sync !== false) this.syncStateFromDisk()
+    const inventory = objectValue(this.state.toolInventory)
+    const toolCount = Object.values(inventory)
+      .reduce((sum, tools) => sum + (Array.isArray(tools) ? tools.length : 0), 0)
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       workspaceRoot: this.workspaceRoot,
       policy: { maxServers: this.maxServers, maxTools: this.maxTools, lazyConnections: true },
       servers: [...this.servers.values()].map(server => ({
@@ -367,26 +517,48 @@ export class CapabilityRouter {
         intents: server.intents,
         requiredEnvironment: [...envReferences(server)].sort(),
         connected: this.clients.has(server.name),
+        runtime: this.runtime.get(server.name) || { status: server.enabled ? 'unprobed' : 'disabled' },
+        toolCount: Array.isArray(inventory[server.name]) ? inventory[server.name].length : 0,
       })),
       skills: this.skills.map(({ path, ...skill }) => skill),
       skillsLoaded: this.skillsLoaded,
       components: this.components,
+      registryWarnings: this.registryWarnings,
+      summary: {
+        configuredServers: this.servers.size,
+        enabledServers: [...this.servers.values()].filter(server => server.enabled).length,
+        discoveredTools: toolCount,
+        enabledSkills: this.skills.filter(skill => skill.enabled).length,
+      },
     }
   }
 
-  persistState() {
-    writeJsonAtomic(this.statePath, this.state)
-  }
-
-  setEnabled(kind, nameValue, enabled) {
+  setEnabled(kind, nameValue, enabled, serverValue) {
+    this.syncStateFromDisk()
+    if (kind === 'tool') {
+      const server = normalizeName(serverValue, 'server')
+      if (!this.servers.has(server)) throw new Error(`Unknown MCP server: ${server}`)
+      const name = toolName(nameValue)
+      this.updateState(state => {
+        const disabledTools = { ...objectValue(state.disabledTools) }
+        const disabled = new Set(stringArray(disabledTools[server]))
+        if (enabled) disabled.delete(name)
+        else disabled.add(name)
+        disabledTools[server] = [...disabled].sort((a, b) => a.localeCompare(b))
+        state.disabledTools = disabledTools
+      })
+      return { kind, server, name, enabled }
+    }
     const name = normalizeName(nameValue)
-    if (kind !== 'server' && kind !== 'skill') throw new Error('kind must be server or skill')
+    if (kind !== 'server' && kind !== 'skill') throw new Error('kind must be server, tool, or skill')
     const key = kind === 'server' ? 'disabledServers' : 'disabledSkills'
-    const disabled = new Set(stringArray(this.state[key]))
-    if (enabled) disabled.delete(name)
-    else disabled.add(name)
-    this.state[key] = [...disabled].sort()
-    this.persistState()
+    let disabled
+    this.updateState(state => {
+      disabled = new Set(stringArray(state[key]))
+      if (enabled) disabled.delete(name)
+      else disabled.add(name)
+      state[key] = [...disabled].sort()
+    })
     if (kind === 'server' && !enabled) void this.disconnect(name)
     if (kind === 'server') {
       this.reload({ skills: false })
@@ -397,6 +569,7 @@ export class CapabilityRouter {
   }
 
   importMcp(raw) {
+    this.syncStateFromDisk()
     const entries = serverEntries(raw)
     if (!entries.length) throw new Error('Expected an object containing mcpServers, mcp.servers, or servers')
     const validated = []
@@ -405,22 +578,21 @@ export class CapabilityRouter {
       assertPortableSecrets(server)
       validated.push([server.name, value])
     }
-    this.state = {
-      ...this.state,
-      customServers: {
-        ...this.state.customServers,
+    this.updateState(state => {
+      state.customServers = {
+        ...objectValue(state.customServers),
         ...Object.fromEntries(validated),
-      },
-    }
-    this.persistState()
+      }
+    })
     this.reload({ skills: false })
     return { imported: validated.map(([name]) => name).sort() }
   }
 
   exportRegistry() {
+    this.syncStateFromDisk()
     this.ensureSkillsLoaded()
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       mcpServers: Object.fromEntries([...this.servers.values()].map(server => [server.name, {
         ...(server.transport === 'stdio'
           ? { command: server.command, args: server.args || [], ...(server.cwd ? { cwd: server.cwd } : {}) }
@@ -433,6 +605,114 @@ export class CapabilityRouter {
       }])),
       skills: this.skills.map(skill => ({ name: skill.name, description: skill.description, enabled: skill.enabled })),
       components: this.components,
+      toolInventory: this.state.toolInventory,
+      toolInventoryMeta: this.state.toolInventoryMeta,
+      toolPolicies: { disabledTools: this.state.disabledTools },
+    }
+  }
+
+  rememberToolInventory(server, tools) {
+    const inventory = tools.map(portableTool).sort((a, b) => a.name.localeCompare(b.name))
+    const discoveredAt = new Date().toISOString()
+    this.updateState(state => {
+      const previous = objectValue(state.toolInventory)[server]
+      state.toolInventoryMeta = {
+        ...objectValue(state.toolInventoryMeta),
+        [server]: { source: 'live', discoveredAt },
+      }
+      if (JSON.stringify(previous) !== JSON.stringify(inventory)) {
+        state.toolInventory = { ...objectValue(state.toolInventory), [server]: inventory }
+      }
+    })
+    return inventory
+  }
+
+  toolPolicy(server, tool) {
+    const allowed = server.allowedTools?.length ? new Set(server.allowedTools) : undefined
+    const policyAvailable = (!allowed || allowed.has(tool.name)) && !(server.blockedTools || []).includes(tool.name)
+    const enabled = !stringArray(objectValue(this.state.disabledTools)[server.name]).includes(tool.name)
+    return { policyAvailable, enabled, effectiveEnabled: server.enabled && policyAvailable && enabled }
+  }
+
+  async catalog(options = {}) {
+    this.syncStateFromDisk()
+    this.ensureSkillsLoaded()
+    const probe = options.probe === true || options.refresh === true
+    const requestedConcurrency = Number(options.concurrency || 4)
+    const probeConcurrency = Math.min(
+      MAX_PROBE_CONCURRENCY,
+      Math.max(1, this.servers.size),
+      Math.max(1, Number.isFinite(requestedConcurrency) ? Math.floor(requestedConcurrency) : 4),
+    )
+    const errors = {}
+    if (probe) {
+      await mapConcurrent([...this.servers.values()], probeConcurrency, async server => {
+        if (!server.enabled) return
+        const runtime = this.runtime.get(server.name)
+        if (runtime?.missingEnvironment?.length) return
+        try {
+          await this.discoverServerTools(server.name, true)
+        } catch (error) {
+          errors[server.name] = error instanceof Error ? error.message : String(error)
+        }
+      })
+    }
+
+    const snapshotServers = new Map(this.snapshot({ sync: false }).servers.map(server => [server.name, server]))
+    const inventoryMeta = objectValue(this.state.toolInventoryMeta)
+    const servers = [...this.servers.values()].map(server => {
+      const cached = this.toolCache.get(server.name)?.tools
+      const persisted = objectValue(this.state.toolInventory)[server.name]
+      const fallback = (server.allowedTools || []).map(name => ({ name, description: '', inputSchema: {} }))
+      const inventorySource = cached ? 'live' : Array.isArray(persisted) ? 'cached' : 'declared'
+      const inventoryAt = cached
+        ? new Date(this.toolCache.get(server.name).at).toISOString()
+        : inventoryMeta[server.name]?.discoveredAt
+      const tools = (cached || (Array.isArray(persisted) ? persisted : fallback))
+        .map(tool => ({ ...portableTool(tool), ...this.toolPolicy(server, tool) }))
+      const runtime = this.runtime.get(server.name) || { status: server.enabled ? 'unprobed' : 'disabled' }
+      return {
+        ...snapshotServers.get(server.name),
+        runtime,
+        inventorySource,
+        ...(inventoryAt ? { inventoryAt } : {}),
+        tools,
+        counts: {
+          total: tools.length,
+          enabled: tools.filter(tool => tool.effectiveEnabled).length,
+          disabled: tools.filter(tool => !tool.effectiveEnabled).length,
+          live: inventorySource === 'live' ? tools.length : 0,
+          cached: inventorySource === 'cached' ? tools.length : 0,
+          declared: inventorySource === 'declared' ? tools.length : 0,
+        },
+        ...(errors[server.name] ? { probeError: errors[server.name] } : {}),
+      }
+    })
+    const tools = servers.flatMap(server => server.tools.map(tool => ({ server: server.name, ...tool })))
+    return {
+      schemaVersion: 2,
+      generatedAt: new Date().toISOString(),
+      probed: probe,
+      ...(probe ? { probeConcurrency } : {}),
+      summary: {
+        configuredServers: servers.length,
+        enabledServers: servers.filter(server => server.enabled).length,
+        readyServers: servers.filter(server => server.runtime?.status === 'ready').length,
+        blockedServers: servers.filter(server => server.runtime?.status === 'blocked').length,
+        failedServers: servers.filter(server => server.runtime?.status === 'failed').length,
+        totalTools: tools.length,
+        enabledTools: tools.filter(tool => tool.effectiveEnabled).length,
+        liveTools: servers.reduce((sum, server) => sum + server.counts.live, 0),
+        cachedTools: servers.reduce((sum, server) => sum + server.counts.cached, 0),
+        declaredTools: servers.reduce((sum, server) => sum + server.counts.declared, 0),
+        skills: this.skills.length,
+        enabledSkills: this.skills.filter(skill => skill.enabled).length,
+      },
+      servers,
+      tools,
+      skills: this.skills.map(({ path, ...skill }) => skill),
+      components: this.components,
+      registryWarnings: this.registryWarnings,
     }
   }
 
@@ -483,6 +763,7 @@ export class CapabilityRouter {
   }
 
   async connect(nameValue) {
+    this.syncStateFromDisk()
     const name = normalizeName(nameValue)
     if (this.clients.has(name)) return this.clients.get(name)
     const existingAttempt = this.connectionAttempts.get(name)
@@ -504,7 +785,12 @@ export class CapabilityRouter {
     if (!server || !server.enabled) throw new Error(`MCP server is unavailable or disabled: ${name}`)
     const missing = new Set()
     const resolvedServer = expandEnvironment(server, this.environment, missing)
-    if (missing.size) throw new Error(`MCP server ${name} requires environment: ${[...missing].sort().join(', ')}`)
+    if (missing.size) {
+      const missingEnvironment = [...missing].sort()
+      this.runtime.set(name, { status: 'blocked', missingEnvironment, checkedAt: new Date().toISOString() })
+      throw new Error(`MCP server ${name} requires environment: ${missingEnvironment.join(', ')}`)
+    }
+    this.runtime.set(name, { status: 'connecting', missingEnvironment: [] })
     let transport
     if (resolvedServer.transport === 'stdio') {
       const inherited = Object.fromEntries(Object.entries(this.environment).filter(([, value]) => typeof value === 'string'))
@@ -526,10 +812,66 @@ export class CapabilityRouter {
       await withTimeout(client.connect(transport), this.timeoutMs, `Connect ${name}`)
       const connection = { client, transport }
       this.clients.set(name, connection)
+      this.runtime.set(name, {
+        status: 'ready',
+        missingEnvironment: [],
+        checkedAt: new Date().toISOString(),
+      })
       return connection
     } catch (error) {
       await transport.close().catch(() => {})
+      this.runtime.set(name, {
+        status: 'failed',
+        missingEnvironment: [],
+        checkedAt: new Date().toISOString(),
+        lastError: error instanceof Error ? error.message : String(error),
+      })
       throw error
+    }
+  }
+
+  async releaseConnection(connection) {
+    const remaining = Math.max(0, Number(this.connectionOperations.get(connection) || 0) - 1)
+    if (remaining) {
+      this.connectionOperations.set(connection, remaining)
+      return
+    }
+    this.connectionOperations.delete(connection)
+    if (this.retiredConnections.delete(connection)) {
+      await connection.transport.close().catch(() => {})
+    }
+  }
+
+  async retireConnection(name, connection) {
+    if (!connection) return
+    if (this.clients.get(name) === connection) this.clients.delete(name)
+    this.toolCache.delete(name)
+    this.retiredConnections.add(connection)
+    if (!this.connectionOperations.get(connection)) {
+      this.retiredConnections.delete(connection)
+      await connection.transport.close().catch(() => {})
+    }
+  }
+
+  async withConnection(name, operation) {
+    const connection = await this.connect(name)
+    this.connectionOperations.set(connection, Number(this.connectionOperations.get(connection) || 0) + 1)
+    try {
+      const result = await operation(connection)
+      if (this.clients.get(name) === connection) {
+        this.runtime.set(name, {
+          ...(this.runtime.get(name) || {}),
+          status: 'ready',
+          missingEnvironment: [],
+          checkedAt: new Date().toISOString(),
+        })
+      }
+      return result
+    } catch (error) {
+      await this.retireConnection(name, connection)
+      throw error
+    } finally {
+      await this.releaseConnection(connection)
     }
   }
 
@@ -540,26 +882,64 @@ export class CapabilityRouter {
     const connection = this.clients.get(name)
     this.clients.delete(name)
     this.toolCache.delete(name)
-    if (connection) await connection.transport.close().catch(() => {})
+    if (connection) await this.retireConnection(name, connection)
   }
 
-  async listServerTools(nameValue, refresh = false) {
+  async discoverServerTools(nameValue, refresh = false) {
     const name = normalizeName(nameValue)
     const cached = this.toolCache.get(name)
     if (!refresh && cached && Date.now() - cached.at < this.toolCacheTtlMs) return cached.tools
+    const existingAttempt = this.discoveryAttempts.get(name)
+    if (existingAttempt) return existingAttempt
+    const attempt = this.discoverServerToolsOnce(name)
+    this.discoveryAttempts.set(name, attempt)
     try {
-      const { client } = await this.connect(name)
-      const response = await withTimeout(client.listTools(), this.timeoutMs, `List tools from ${name}`)
-      const server = this.servers.get(name)
-      const allowed = server.allowedTools?.length ? new Set(server.allowedTools) : undefined
-      const blocked = new Set(server.blockedTools || [])
-      const tools = (response.tools || []).filter(tool => (!allowed || allowed.has(tool.name)) && !blocked.has(tool.name))
+      return await attempt
+    } finally {
+      if (this.discoveryAttempts.get(name) === attempt) this.discoveryAttempts.delete(name)
+    }
+  }
+
+  async discoverServerToolsOnce(name) {
+    let discoveryConnection
+    try {
+      const response = await this.withConnection(name, connection => {
+        discoveryConnection = connection
+        return withTimeout(connection.client.listTools(), this.timeoutMs, `List tools from ${name}`)
+      })
+      const tools = (response.tools || []).map(portableTool)
       this.toolCache.set(name, { at: Date.now(), tools })
+      this.rememberToolInventory(name, tools)
+      this.runtime.set(name, {
+        status: 'ready',
+        missingEnvironment: [],
+        checkedAt: new Date().toISOString(),
+        inventoryAt: new Date().toISOString(),
+        toolCount: tools.length,
+      })
       return tools
     } catch (error) {
-      await this.disconnect(name)
+      const current = this.runtime.get(name) || {}
+      const replacement = this.clients.get(name)
+      if (current.status !== 'blocked' && (!replacement || replacement === discoveryConnection)) {
+        this.runtime.set(name, {
+          ...current,
+          status: 'failed',
+          checkedAt: new Date().toISOString(),
+          lastError: error instanceof Error ? error.message : String(error),
+        })
+      }
       throw error
     }
+  }
+
+  async listServerTools(nameValue, refresh = false) {
+    this.syncStateFromDisk()
+    const name = normalizeName(nameValue)
+    const server = this.servers.get(name)
+    if (!server?.enabled) throw new Error(`MCP server is unavailable or disabled: ${name}`)
+    const tools = await this.discoverServerTools(name, refresh)
+    return tools.filter(tool => this.toolPolicy(server, tool).effectiveEnabled)
   }
 
   async call(serverName, toolName, args = {}) {
@@ -568,16 +948,12 @@ export class CapabilityRouter {
     if (!tool) throw new Error('tool is required')
     const tools = await this.listServerTools(server)
     if (!tools.some(candidate => candidate.name === tool)) throw new Error(`Tool ${tool} is not exposed by ${server}`)
-    try {
-      const { client } = await this.connect(server)
-      return await withTimeout(client.callTool({ name: tool, arguments: args || {} }), this.timeoutMs, `${server}.${tool}`)
-    } catch (error) {
-      await this.disconnect(server)
-      throw error
-    }
+    return this.withConnection(server, ({ client }) =>
+      withTimeout(client.callTool({ name: tool, arguments: args || {} }), this.timeoutMs, `${server}.${tool}`))
   }
 
   async route(taskValue, options = {}) {
+    this.syncStateFromDisk()
     const task = String(taskValue || '').trim()
     if (!task) throw new Error('task is required')
     this.ensureSkillsLoaded()
@@ -675,11 +1051,13 @@ export class CapabilityRouter {
   }
 
   listSkills() {
+    this.syncStateFromDisk()
     this.ensureSkillsLoaded()
     return this.skills.map(({ path, ...skill }) => skill)
   }
 
   readSkill(nameValue) {
+    this.syncStateFromDisk()
     this.ensureSkillsLoaded()
     const name = normalizeName(nameValue, 'skill').replaceAll('.', '-')
     const skill = this.skills.find(item => item.name === name)
@@ -767,11 +1145,14 @@ export class CapabilityRouter {
   }
 
   async shutdown() {
+    await Promise.all([...this.discoveryAttempts.values()].map(attempt => attempt.catch(() => {})))
     const names = new Set([
       ...this.clients.keys(),
       ...this.connectionAttempts.keys(),
     ])
     await Promise.all([...names].map(name => this.disconnect(name)))
+    await Promise.all([...this.retiredConnections].map(connection => connection.transport.close().catch(() => {})))
+    this.retiredConnections.clear()
   }
 }
 
