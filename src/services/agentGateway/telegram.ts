@@ -6978,7 +6978,7 @@ const TELEGRAM_PROVIDER_PRESETS: ProviderInfo[] = [
   { value: 'groq', flag: 'openai', baseUrl: 'https://api.groq.com/openai/v1' },
   { value: 'ollama', flag: 'openai', baseUrl: 'http://localhost:11434/v1', apiKey: 'ollama' },
   { value: 'lmstudio', flag: 'openai', baseUrl: 'http://localhost:1234/v1', apiKey: 'lm-studio' },
-  { value: 'lmstudio-lan', flag: 'openai', baseUrl: 'http://192.168.187.1:1234/v1', apiKey: 'lm-studio' },
+  { value: 'lmstudio-lan', flag: 'openai', baseUrl: 'http://host.docker.internal:1234/v1', apiKey: 'lm-studio' },
   { value: 'anthropic', flag: 'anthropic' },
   { value: 'gemini', flag: 'gemini' },
   { value: 'mistral', flag: 'mistral' },
@@ -7421,7 +7421,7 @@ function providerSpecificApiKey(provider: string, env: Record<string, string | u
   return ''
 }
 
-function providerProfileEnv(profile: AgentProviderProfile): Record<string, string> {
+export function providerProfileEnv(profile: AgentProviderProfile): Record<string, string> {
   const info = getTelegramProviderInfo(profile.provider)
   const updates: Record<string, string> = {
     OPENCLAUDE_RESPECT_PROVIDER_ENV: '1',
@@ -7429,7 +7429,9 @@ function providerProfileEnv(profile: AgentProviderProfile): Record<string, strin
     OPENCLAUDE_BASE_URL: profile.baseUrl,
     OPENCLAUDE_MODEL: profile.model,
     OPENCLAUDE_API_KEY: profile.apiKey,
-    OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS: profile.provider === 'lmstudio-lan' ? '1' : '0',
+    OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS: '0',
+    OPENCLAUDE_OPENAI_TEXT_TOOL_MODE:
+      ['lmstudio', 'lmstudio-lan', 'ollama'].includes(profile.provider) ? 'auto' : '',
     CLAUDE_CODE_USE_OPENAI: '',
     CLAUDE_CODE_USE_GEMINI: '',
     CLAUDE_CODE_USE_MISTRAL: '',

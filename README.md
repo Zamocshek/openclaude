@@ -129,9 +129,11 @@ Telegram:
   effort, while `ultra` adds automatic Agent-tool delegation for substantial
   independent subtasks.
 - `/provider set lmstudio-lan gemma-4-12b-obliterated` - switch Telegram
-  inference to the LAN LM Studio server at `http://192.168.187.1:1234/v1`
-  and enable no-tools runner mode for models whose LM Studio template rejects
-  OpenAI tool schemas.
+  inference to the host LM Studio server at `http://host.docker.internal:1234/v1`
+  in full agent mode. Native OpenAI/Hugging Face function calling is used when
+  the loaded model supports it; incompatible local GGUF templates automatically
+  fall back to the text-tool adapter while keeping Bash, file, and MCP execution
+  in the standard agent runtime.
 - `/zenflash` - switch to OpenCode Zen at `https://opencode.ai/zen/v1` using
   the free `deepseek-v4-flash-free` model. Its credential is retained in the
   ignored `OPENCODE_ZEN_API_KEY` environment variable.

@@ -18,6 +18,7 @@ import {
   buildTelegramModelKeyboard,
   buildTelegramProviderKeyboard,
   buildTelegramProviderProfileUpdate,
+  providerProfileEnv,
   buildTelegramReasoningKeyboard,
   buildTelegramRuntimeKeyboard,
   buildTelegramSkillDetailsKeyboard,
@@ -1974,8 +1975,12 @@ describe('agent gateway Telegram bridge helpers', () => {
 
     expect(profile.provider).toBe('lmstudio-lan')
     expect(profile.model).toBe('gemma-4-12b-obliterated')
-    expect(profile.baseUrl).toBe('http://192.168.187.1:1234/v1')
+    expect(profile.baseUrl).toBe('http://host.docker.internal:1234/v1')
     expect(profile.apiKey).toBe('lm-studio')
+    expect(providerProfileEnv(profile)).toMatchObject({
+      OPENCLAUDE_AGENT_RUNNER_DISABLE_TOOLS: '0',
+      OPENCLAUDE_OPENAI_TEXT_TOOL_MODE: 'auto',
+    })
   })
 
   test('switches Telegram provider profile to OpenCode Zen defaults', () => {

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { createOpenAIShimClient } from './openaiShim.ts'
+import { createOpenAIShimClient, extractTextToolCall } from './openaiShim.ts'
 
 type FetchType = typeof globalThis.fetch
 
@@ -21,6 +21,8 @@ const originalEnv = {
   GEMINI_MODEL: process.env.GEMINI_MODEL,
   GOOGLE_CLOUD_PROJECT: process.env.GOOGLE_CLOUD_PROJECT,
   ANTHROPIC_CUSTOM_HEADERS: process.env.ANTHROPIC_CUSTOM_HEADERS,
+  OPENCLAUDE_OPENAI_TEXT_TOOL_MODE: process.env.OPENCLAUDE_OPENAI_TEXT_TOOL_MODE,
+  OPENCLAUDE_PROVIDER: process.env.OPENCLAUDE_PROVIDER,
 }
 
 const originalFetch = globalThis.fetch
@@ -89,6 +91,8 @@ beforeEach(() => {
   delete process.env.GEMINI_MODEL
   delete process.env.GOOGLE_CLOUD_PROJECT
   delete process.env.ANTHROPIC_CUSTOM_HEADERS
+  delete process.env.OPENCLAUDE_OPENAI_TEXT_TOOL_MODE
+  delete process.env.OPENCLAUDE_PROVIDER
 })
 
 afterEach(() => {
@@ -108,6 +112,11 @@ afterEach(() => {
   restoreEnv('GEMINI_MODEL', originalEnv.GEMINI_MODEL)
   restoreEnv('GOOGLE_CLOUD_PROJECT', originalEnv.GOOGLE_CLOUD_PROJECT)
   restoreEnv('ANTHROPIC_CUSTOM_HEADERS', originalEnv.ANTHROPIC_CUSTOM_HEADERS)
+  restoreEnv(
+    'OPENCLAUDE_OPENAI_TEXT_TOOL_MODE',
+    originalEnv.OPENCLAUDE_OPENAI_TEXT_TOOL_MODE,
+  )
+  restoreEnv('OPENCLAUDE_PROVIDER', originalEnv.OPENCLAUDE_PROVIDER)
   globalThis.fetch = originalFetch
 })
 
@@ -3198,4 +3207,189 @@ test('streaming: strips leaked reasoning preamble when split across multiple con
   }
 
   expect(textDeltas).toEqual(['Hey! How can I help you today?'])
+})
+
+test('parses fenced local GGUF text tool calls and rejects unknown tools', () => {
+  expect(
+    extractTextToolCall(
+      '```json\n{"tool":"Bash","arguments":{"command":"echo PONG"}}\n```',
+      ['Bash', 'Read'],
+    ),
+  ).toEqual({ name: 'Bash', arguments: { command: 'echo PONG' } })
+
+  expect(
+    extractTextToolCall(
+      '<|channel>thought\n<channel|><|tool_call>call:Bash:{"command":"echo PONG"}<tool_call|>',
+      ['Bash', 'Read'],
+    ),
+  ).toEqual({ name: 'Bash', arguments: { command: 'echo PONG' } })
+
+  expect(
+    extractTextToolCall(
+      '<|channel>thought\n<channel|>```json\n{"tool":"Read","arguments":{"file_path":"one.txt"}}\n```\n```json\n{"tool":"Bash","arguments":{"command":"echo later"}}\n```',
+      ['Bash', 'Read'],
+    ),
+  ).toEqual({ name: 'Read', arguments: { file_path: 'one.txt' } })
+
+  expect(
+    extractTextToolCall(
+      '{"tool":"UnknownTool","arguments":{}}',
+      ['Bash', 'Read'],
+    ),
+  ).toBeUndefined()
+})
+
+test('local GGUF auto mode retries incompatible native tools through text tools', async () => {
+  process.env.OPENAI_BASE_URL = 'http://localhost:1234/v1'
+  process.env.OPENCLAUDE_PROVIDER = 'lmstudio'
+  process.env.OPENCLAUDE_OPENAI_TEXT_TOOL_MODE = 'auto'
+  const bodies: Array<Record<string, unknown>> = []
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    bodies.push(body)
+    if (bodies.length === 1) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message:
+              'Error rendering prompt with jinja template: Cannot call something that is not a function',
+          },
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
+
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-gguf-text-tool',
+        object: 'chat.completion',
+        model: 'local-gemma-fallback-test',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: '{"tool":"Bash","arguments":{"command":"echo PONG"}}',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  const result = await client.beta.messages
+    .create({
+      model: 'local-gemma-fallback-test',
+      system: 'Use tools when needed.',
+      messages: [{ role: 'user', content: 'Run echo PONG.' }],
+      tools: [
+        {
+          name: 'Bash',
+          description: 'Run a shell command',
+          input_schema: {
+            type: 'object',
+            properties: { command: { type: 'string' } },
+            required: ['command'],
+          },
+        },
+      ],
+      max_tokens: 64,
+      stream: true,
+    })
+    .withResponse()
+
+  const events: Array<Record<string, unknown>> = []
+  for await (const event of result.data) events.push(event)
+
+  expect(bodies).toHaveLength(2)
+  expect(bodies[0]?.stream).toBe(true)
+  expect(bodies[0]?.tools).toBeArray()
+  expect(bodies[1]?.stream).toBe(false)
+  expect(bodies[1]?.tools).toBeUndefined()
+  expect(JSON.stringify(bodies[1]?.messages)).toContain('Local GGUF text-tool protocol')
+  expect(JSON.stringify(events)).toContain('"type":"tool_use"')
+  expect(JSON.stringify(events)).toContain('"name":"Bash"')
+  expect(JSON.stringify(events)).toContain('echo PONG')
+})
+
+test('local GGUF auto mode keeps standard native tools when the endpoint supports them', async () => {
+  process.env.OPENAI_BASE_URL = 'http://localhost:1234/v1'
+  process.env.OPENCLAUDE_PROVIDER = 'lmstudio'
+  process.env.OPENCLAUDE_OPENAI_TEXT_TOOL_MODE = 'auto'
+  let requestCount = 0
+  let requestBody: Record<string, unknown> | undefined
+
+  globalThis.fetch = (async (_input, init) => {
+    requestCount += 1
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return makeSseResponse(
+      makeStreamChunks([
+        {
+          id: 'chatcmpl-native-gguf',
+          object: 'chat.completion.chunk',
+          model: 'native-hf-gguf-test',
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: 'assistant',
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'call_native_gguf',
+                    type: 'function',
+                    function: { name: 'Bash', arguments: '{"command":"pwd"}' },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        },
+        {
+          id: 'chatcmpl-native-gguf',
+          object: 'chat.completion.chunk',
+          model: 'native-hf-gguf-test',
+          choices: [
+            { index: 0, delta: {}, finish_reason: 'tool_calls' },
+          ],
+        },
+      ]),
+    )
+  }) as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  const result = await client.beta.messages
+    .create({
+      model: 'native-hf-gguf-test',
+      messages: [{ role: 'user', content: 'Run pwd.' }],
+      tools: [
+        {
+          name: 'Bash',
+          description: 'Run a shell command',
+          input_schema: {
+            type: 'object',
+            properties: { command: { type: 'string' } },
+            required: ['command'],
+          },
+        },
+      ],
+      max_tokens: 64,
+      stream: true,
+    })
+    .withResponse()
+
+  const events: Array<Record<string, unknown>> = []
+  for await (const event of result.data) events.push(event)
+
+  expect(requestCount).toBe(1)
+  expect(requestBody?.stream).toBe(true)
+  expect(requestBody?.tools).toBeArray()
+  expect(JSON.stringify(events)).toContain('call_native_gguf')
+  expect(JSON.stringify(events)).toContain('"name":"Bash"')
 })

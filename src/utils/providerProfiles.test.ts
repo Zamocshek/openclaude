@@ -21,6 +21,7 @@ const RESTORED_KEYS = [
   'OPENAI_API_BASE',
   'OPENAI_MODEL',
   'OPENAI_API_KEY',
+  'OPENCLAUDE_OPENAI_TEXT_TOOL_MODE',
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_API_KEY',
@@ -172,6 +173,20 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(process.env.CLAUDE_CODE_USE_GITHUB).toBeUndefined()
     expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
     expect(getFreshAPIProvider()).toBe('firstParty')
+  })
+
+  test('local OpenAI-compatible profiles enable automatic GGUF tool compatibility', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    applyProviderProfileToProcessEnv(
+      buildProfile({
+        baseUrl: 'http://127.0.0.1:1234/v1',
+        model: 'gemma-4-12b-obliterated',
+      }),
+    )
+
+    expect(process.env.OPENCLAUDE_OPENAI_TEXT_TOOL_MODE).toBe('auto')
   })
 })
 
@@ -486,7 +501,7 @@ describe('getProviderPresetDefaults', () => {
     const defaults = getProviderPresetDefaults('lmstudio-lan')
 
     expect(defaults.provider).toBe('openai')
-    expect(defaults.baseUrl).toBe('http://192.168.187.1:1234/v1')
+    expect(defaults.baseUrl).toBe('http://host.docker.internal:1234/v1')
     expect(defaults.model).toBe('gemma-4-12b-obliterated')
     expect(defaults.apiKey).toBe('lm-studio')
     expect(defaults.requiresApiKey).toBe(false)

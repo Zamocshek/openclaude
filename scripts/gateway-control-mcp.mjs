@@ -22,7 +22,7 @@ const providerDefaults = {
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', apiKeyEnv: 'OPENROUTER_API_KEY' },
   'opencode-zen': { baseUrl: 'https://opencode.ai/zen/v1', apiKeyEnv: 'OPENCODE_ZEN_API_KEY' },
   openai: { baseUrl: 'https://api.openai.com/v1', apiKeyEnv: 'OPENAI_API_KEY' },
-  'lmstudio-lan': { baseUrl: 'http://192.168.187.1:1234/v1' },
+  'lmstudio-lan': { baseUrl: 'http://host.docker.internal:1234/v1' },
   lmstudio: { baseUrl: 'http://localhost:1234/v1' },
   ollama: { baseUrl: 'http://localhost:11434/v1' },
 }

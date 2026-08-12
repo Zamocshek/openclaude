@@ -59,7 +59,7 @@ const PROVIDERS = [
   { value: 'groq', label: 'Groq', flag: 'openai', baseUrl: 'https://api.groq.com/openai/v1' },
   { value: 'ollama', label: 'Ollama', flag: 'openai', baseUrl: 'http://localhost:11434/v1', apiKey: 'ollama' },
   { value: 'lmstudio', label: 'LM Studio', flag: 'openai', baseUrl: 'http://localhost:1234/v1', apiKey: 'lm-studio' },
-  { value: 'lmstudio-lan', label: 'LM Studio LAN', flag: 'openai', baseUrl: 'http://192.168.187.1:1234/v1', apiKey: 'lm-studio', models: ['gemma-4-12b-obliterated'] },
+  { value: 'lmstudio-lan', label: 'LM Studio LAN', flag: 'openai', baseUrl: 'http://host.docker.internal:1234/v1', apiKey: 'lm-studio', models: ['gemma-4-12b-obliterated'] },
   { value: 'anthropic', label: 'Anthropic', flag: 'anthropic' },
   { value: 'gemini', label: 'Google Gemini', flag: 'gemini' },
   { value: 'mistral', label: 'Mistral', flag: 'mistral' },

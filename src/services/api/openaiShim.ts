@@ -187,6 +187,456 @@ interface OpenAITool {
   }
 }
 
+export type TextToolCall = {
+  name: string
+  arguments: Record<string, unknown>
+}
+
+const TEXT_TOOL_MODE_ENV = 'OPENCLAUDE_OPENAI_TEXT_TOOL_MODE'
+const TEXT_TOOL_CATALOG_MAX_CHARS = 30_000
+const textToolCompatibilityCache = new Set<string>()
+
+function getTextToolCompatibilityKey(baseUrl: string, model = ''): string {
+  return `${baseUrl.replace(/\/+$/u, '').toLowerCase()}|${model.toLowerCase()}`
+}
+
+export function shouldUseTextToolCompatibility(
+  baseUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+  model = '',
+): boolean {
+  const mode = String(env[TEXT_TOOL_MODE_ENV] || 'auto').trim().toLowerCase()
+  if (['0', 'false', 'off', 'native', 'disabled'].includes(mode)) return false
+  if (['1', 'true', 'on', 'text', 'compat', 'enabled'].includes(mode)) return true
+  return textToolCompatibilityCache.has(getTextToolCompatibilityKey(baseUrl, model))
+}
+
+function allowsAutomaticTextToolFallback(
+  baseUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const mode = String(env[TEXT_TOOL_MODE_ENV] || 'auto').trim().toLowerCase()
+  if (['0', 'false', 'off', 'native', 'disabled'].includes(mode)) return false
+  if (mode !== 'auto' && mode !== '') return false
+  const provider = String(env.OPENCLAUDE_PROVIDER || '').trim().toLowerCase()
+  if (provider === 'lmstudio' || provider === 'lm-studio' || provider === 'lmstudio-lan') {
+    return true
+  }
+  return isLocalProviderUrl(baseUrl)
+}
+
+function isNativeToolTemplateFailure(status: number, errorBody: string): boolean {
+  if (status !== 400 && status !== 422 && status !== 500) return false
+  return /(?:error rendering prompt with jinja template|cannot call something that is not a function|(?:tool|function).{0,80}(?:not supported|unsupported|not available)|template.{0,100}(?:tool|function).{0,80}(?:error|undefined))/isu.test(
+    errorBody,
+  )
+}
+
+function compactTextToolSchema(schema: Record<string, unknown>): string {
+  const compact = (value: unknown, depth: number): unknown => {
+    if (depth > 3) return undefined
+    if (Array.isArray(value)) {
+      return value.slice(0, 20).map(item => compact(item, depth + 1))
+    }
+    if (!value || typeof value !== 'object') return value
+
+    const result: Record<string, unknown> = {}
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (['title', '$schema', 'examples', 'default', 'additionalProperties'].includes(key)) continue
+      const next = compact(child, depth + 1)
+      if (next !== undefined) result[key] = next
+    }
+    return result
+  }
+
+  return JSON.stringify(compact(schema, 0) || { type: 'object', properties: {} })
+    .slice(0, 1_600)
+}
+
+function buildTextToolProtocol(
+  tools: OpenAITool[],
+  toolChoice: unknown,
+): string {
+  const requestedName = (
+    toolChoice
+    && typeof toolChoice === 'object'
+    && (toolChoice as { type?: string }).type === 'tool'
+  )
+    ? String((toolChoice as { name?: string }).name || '')
+    : ''
+  const requireTool = requestedName
+    || (
+      toolChoice
+      && typeof toolChoice === 'object'
+      && (toolChoice as { type?: string }).type === 'any'
+    )
+
+  const lines = [
+    '[Local GGUF text-tool protocol]',
+    'You can use the tools listed below. To call a tool, reply with exactly one JSON object and no markdown or explanation:',
+    '{"tool":"ExactToolName","arguments":{"argument":"value"}}',
+    'Call one tool per response. After receiving its result, either call the next tool or answer normally when the task is complete.',
+    'Never invent tool names or arguments. Keep JSON valid and use the exact schema field names.',
+  ]
+  if (requestedName) {
+    lines.push(`This turn must call the tool named ${requestedName}.`)
+  } else if (requireTool) {
+    lines.push('This turn must call one of the available tools.')
+  }
+  lines.push('', 'Available tools:')
+
+  let catalogChars = 0
+  for (const tool of tools) {
+    const entry = [
+      `- ${tool.function.name}: ${tool.function.description.slice(0, 240)}`,
+      `  arguments: ${compactTextToolSchema(tool.function.parameters)}`,
+    ].join('\n')
+    if (catalogChars + entry.length > TEXT_TOOL_CATALOG_MAX_CHARS) {
+      lines.push('- Additional tools were omitted from this turn because the routed catalog exceeded the local context budget.')
+      break
+    }
+    lines.push(entry)
+    catalogChars += entry.length
+  }
+  return lines.join('\n')
+}
+
+function stringifyTextToolMessageContent(content: OpenAIMessage['content']): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map(part => part.type === 'text' ? part.text || '' : '[non-text attachment]')
+    .filter(Boolean)
+    .join('\n')
+}
+
+function convertMessagesForTextTools(
+  messages: OpenAIMessage[],
+  tools: OpenAITool[],
+  toolChoice: unknown,
+): OpenAIMessage[] {
+  const toolNamesById = new Map<string, string>()
+  const converted = messages.map(message => {
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      const calls = message.tool_calls.map(call => {
+        toolNamesById.set(call.id, call.function.name)
+        let args: unknown = call.function.arguments
+        try { args = JSON.parse(call.function.arguments) } catch {}
+        return JSON.stringify({ tool: call.function.name, arguments: args })
+      })
+      const visible = stringifyTextToolMessageContent(message.content).trim()
+      return {
+        role: 'assistant' as const,
+        content: [visible, ...calls].filter(Boolean).join('\n'),
+      }
+    }
+    if (message.role === 'tool') {
+      const name = toolNamesById.get(message.tool_call_id || '')
+        || message.name
+        || message.tool_call_id
+        || 'unknown'
+      return {
+        role: 'user' as const,
+        content: `[Tool result: ${name}]\n${stringifyTextToolMessageContent(message.content)}`,
+      }
+    }
+    return {
+      role: message.role,
+      content: message.content,
+      ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
+    }
+  })
+
+  const protocol = buildTextToolProtocol(tools, toolChoice)
+  const system = converted.find(message => message.role === 'system')
+  if (system) {
+    const current = stringifyTextToolMessageContent(system.content)
+    system.content = [current, protocol].filter(Boolean).join('\n\n')
+  } else {
+    converted.unshift({ role: 'system', content: protocol })
+  }
+
+  const coalesced: OpenAIMessage[] = []
+  for (const message of converted) {
+    const previous = coalesced.at(-1)
+    if (
+      previous
+      && previous.role === message.role
+      && message.role !== 'system'
+    ) {
+      previous.content = [
+        stringifyTextToolMessageContent(previous.content),
+        stringifyTextToolMessageContent(message.content),
+      ].filter(Boolean).join('\n')
+    } else {
+      coalesced.push(message)
+    }
+  }
+  return coalesced
+}
+
+function parseTextToolArguments(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  if (typeof value !== 'string') return undefined
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function extractBalancedJsonObjects(content: string): string[] {
+  const candidates: string[] = []
+  for (let start = 0; start < content.length; start += 1) {
+    if (content[start] !== '{') continue
+    let depth = 0
+    let inString = false
+    let escaped = false
+    for (let index = start; index < content.length; index += 1) {
+      const char = content[index]
+      if (inString) {
+        if (escaped) {
+          escaped = false
+        } else if (char === '\\') {
+          escaped = true
+        } else if (char === '"') {
+          inString = false
+        }
+        continue
+      }
+      if (char === '"') {
+        inString = true
+      } else if (char === '{') {
+        depth += 1
+      } else if (char === '}') {
+        depth -= 1
+        if (depth === 0) {
+          candidates.push(content.slice(start, index + 1))
+          start = index
+          break
+        }
+      }
+    }
+  }
+  return candidates
+}
+
+export function extractTextToolCall(
+  content: string,
+  availableToolNames: Iterable<string>,
+): TextToolCall | undefined {
+  const names = new Map(
+    [...availableToolNames].map(name => [name.toLowerCase(), name]),
+  )
+  if (names.size === 0) return undefined
+
+  // Several GGUF chat templates wrap an otherwise valid call in model-specific
+  // control tokens instead of returning the JSON protocol verbatim.
+  const taggedCallPatterns = [
+    /<\|tool_call>\s*call:([^:\s<>]+):([\s\S]*?)<tool_call\|>/giu,
+    /<\|tool_call>\s*call:([^:\s<>]+):([\s\S]*?)<\|\/tool_call>/giu,
+    /<tool_call>\s*call:([^:\s<>]+):([\s\S]*?)<\/tool_call>/giu,
+  ]
+  for (const pattern of taggedCallPatterns) {
+    for (const match of content.matchAll(pattern)) {
+      const requestedName = String(match[1] || '')
+      const name = names.get(requestedName.toLowerCase())
+      const args = parseTextToolArguments(String(match[2] || '').trim())
+      if (name && args) return { name, arguments: args }
+    }
+  }
+
+  const normalized = content
+    .trim()
+    .replace(/^```(?:json)?\s*/iu, '')
+    .replace(/\s*```$/u, '')
+    .replace(/^<tool_call>\s*/iu, '')
+    .replace(/\s*<\/tool_call>$/iu, '')
+    .trim()
+  const candidates = [normalized, ...extractBalancedJsonObjects(content)]
+  const firstBrace = normalized.indexOf('{')
+  const lastBrace = normalized.lastIndexOf('}')
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(normalized.slice(firstBrace, lastBrace + 1))
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as {
+        tool?: unknown
+        name?: unknown
+        arguments?: unknown
+        input?: unknown
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+      const requestedName = typeof parsed.tool === 'string'
+        ? parsed.tool
+        : typeof parsed.name === 'string'
+          ? parsed.name
+          : ''
+      const name = names.get(requestedName.toLowerCase())
+      const args = parseTextToolArguments(parsed.arguments ?? parsed.input)
+      if (name && args) return { name, arguments: args }
+    } catch {}
+  }
+  return undefined
+}
+
+type OpenAITextToolCompletion = {
+  id?: string
+  object?: string
+  created?: number
+  model?: string
+  choices?: Array<{
+    index?: number
+    message?: {
+      role?: string
+      content?: string | null
+      reasoning_content?: string | null
+      tool_calls?: Array<{
+        id: string
+        type: 'function'
+        function: { name: string; arguments: string }
+      }>
+    }
+    finish_reason?: string | null
+  }>
+  usage?: OpenAIStreamChunk['usage']
+}
+
+function convertTextToolCompletion(
+  data: OpenAITextToolCompletion,
+  availableToolNames: Iterable<string>,
+): OpenAITextToolCompletion {
+  const choice = data.choices?.[0]
+  const message = choice?.message
+  if (!message || typeof message.content !== 'string') return data
+  const call = extractTextToolCall(message.content, availableToolNames)
+  if (!call) return data
+
+  return {
+    ...data,
+    choices: [
+      {
+        ...choice,
+        message: {
+          ...message,
+          content: null,
+          tool_calls: [
+            {
+              id: `call_${crypto.randomUUID().replace(/-/g, '')}`,
+              type: 'function',
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.arguments),
+              },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+      ...(data.choices?.slice(1) || []),
+    ],
+  }
+}
+
+async function adaptTextToolResponse(
+  response: Response,
+  model: string,
+  stream: boolean,
+  availableToolNames: Iterable<string>,
+): Promise<Response> {
+  const data = convertTextToolCompletion(
+    await response.json() as OpenAITextToolCompletion,
+    availableToolNames,
+  )
+  if (!stream) {
+    return new Response(JSON.stringify(data), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  const choice = data.choices?.[0]
+  const message = choice?.message || {}
+  const id = data.id || makeMessageId()
+  const responseModel = data.model || model
+  const chunks: OpenAIStreamChunk[] = [
+    {
+      id,
+      object: 'chat.completion.chunk',
+      model: responseModel,
+      choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+    },
+  ]
+  if (message.reasoning_content) {
+    chunks.push({
+      id,
+      object: 'chat.completion.chunk',
+      model: responseModel,
+      choices: [{
+        index: 0,
+        delta: { reasoning_content: message.reasoning_content },
+        finish_reason: null,
+      }],
+    })
+  }
+  if (message.tool_calls?.length) {
+    chunks.push({
+      id,
+      object: 'chat.completion.chunk',
+      model: responseModel,
+      choices: [{
+        index: 0,
+        delta: {
+          tool_calls: message.tool_calls.map((call, index) => ({
+            index,
+            id: call.id,
+            type: call.type,
+            function: call.function,
+          })),
+        },
+        finish_reason: null,
+      }],
+    })
+  } else if (typeof message.content === 'string' && message.content) {
+    chunks.push({
+      id,
+      object: 'chat.completion.chunk',
+      model: responseModel,
+      choices: [{
+        index: 0,
+        delta: { content: message.content },
+        finish_reason: null,
+      }],
+    })
+  }
+  chunks.push({
+    id,
+    object: 'chat.completion.chunk',
+    model: responseModel,
+    choices: [{
+      index: 0,
+      delta: {},
+      finish_reason: message.tool_calls?.length ? 'tool_calls' : choice?.finish_reason || 'stop',
+    }],
+    usage: data.usage,
+  })
+  const body = [
+    ...chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`),
+    'data: [DONE]\n\n',
+  ].join('')
+  return new Response(body, {
+    status: response.status,
+    headers: { 'Content-Type': 'text/event-stream' },
+  })
+}
+
 const TEXT_ONLY_IMAGE_MARKER =
   '[Image omitted because this provider rejected image input. Use gateway-vision or a text snapshot for visual evidence.]'
 
@@ -1363,7 +1813,7 @@ class OpenAIShimMessages {
     params: ShimCreateParams,
     options?: { signal?: AbortSignal; headers?: Record<string, string> },
   ): Promise<Response> {
-    const openaiMessages = convertMessages(
+    const nativeOpenaiMessages = convertMessages(
       params.messages as Array<{
         role: string
         message?: { role?: string; content?: unknown }
@@ -1371,6 +1821,29 @@ class OpenAIShimMessages {
       }>,
       params.system,
     )
+    const convertedTools = params.tools && params.tools.length > 0
+      ? convertTools(
+        params.tools as Array<{
+          name: string
+          description?: string
+          input_schema?: Record<string, unknown>
+        }>,
+      )
+      : []
+    const toolChoiceDisablesTools = (
+      params.tool_choice
+      && typeof params.tool_choice === 'object'
+      && (params.tool_choice as { type?: string }).type === 'none'
+    )
+    const textToolEligible = convertedTools.length > 0 && !toolChoiceDisablesTools
+    let textToolMode = textToolEligible && shouldUseTextToolCompatibility(
+      request.baseUrl,
+      process.env,
+      request.resolvedModel,
+    )
+    let openaiMessages = textToolMode
+      ? convertMessagesForTextTools(nativeOpenaiMessages, convertedTools, params.tool_choice)
+      : nativeOpenaiMessages
     if (requiresToolCallReasoningReplay(request.baseUrl)) {
       for (const message of openaiMessages) {
         if (
@@ -1386,7 +1859,7 @@ class OpenAIShimMessages {
     const body: Record<string, unknown> = {
       model: request.resolvedModel,
       messages: openaiMessages,
-      stream: params.stream ?? false,
+      stream: textToolMode ? false : params.stream ?? false,
       store: false,
     }
     // Convert max_tokens to max_completion_tokens for OpenAI API compatibility.
@@ -1405,7 +1878,7 @@ class OpenAIShimMessages {
       body.max_completion_tokens = maxCompletionTokensValue
     }
 
-    if (params.stream && !isLocalProviderUrl(request.baseUrl)) {
+    if (body.stream && !isLocalProviderUrl(request.baseUrl)) {
       body.stream_options = { include_usage: true }
     }
 
@@ -1431,35 +1904,26 @@ class OpenAIShimMessages {
     if (params.temperature !== undefined) body.temperature = params.temperature
     if (params.top_p !== undefined) body.top_p = params.top_p
 
-    if (params.tools && params.tools.length > 0) {
-      const converted = convertTools(
-        params.tools as Array<{
-          name: string
-          description?: string
-          input_schema?: Record<string, unknown>
-        }>,
-      )
-      if (converted.length > 0) {
-        body.tools = converted
-        if (params.tool_choice) {
-          const tc = params.tool_choice as { type?: string; name?: string }
-          if (tc.type === 'auto') {
-            body.tool_choice = 'auto'
-          } else if (tc.type === 'tool' && tc.name) {
-            body.tool_choice = {
-              type: 'function',
-              function: { name: tc.name },
-            }
-          } else if (tc.type === 'any') {
-            body.tool_choice = 'required'
-          } else if (tc.type === 'none') {
-            body.tool_choice = 'none'
-          }
-        } else if (hasOnlySqApiHost(request.baseUrl)) {
-          // OnlySQ defaults tool_choice to "none" even when tools are present.
-          // Send the OpenAI-compatible auto value so agent tool calls can fire.
+    if (!textToolMode && convertedTools.length > 0) {
+      body.tools = convertedTools
+      if (params.tool_choice) {
+        const tc = params.tool_choice as { type?: string; name?: string }
+        if (tc.type === 'auto') {
           body.tool_choice = 'auto'
+        } else if (tc.type === 'tool' && tc.name) {
+          body.tool_choice = {
+            type: 'function',
+            function: { name: tc.name },
+          }
+        } else if (tc.type === 'any') {
+          body.tool_choice = 'required'
+        } else if (tc.type === 'none') {
+          body.tool_choice = 'none'
         }
+      } else if (hasOnlySqApiHost(request.baseUrl)) {
+        // OnlySQ defaults tool_choice to "none" even when tools are present.
+        // Send the OpenAI-compatible auto value so agent tool calls can fire.
+        body.tool_choice = 'auto'
       }
     }
 
@@ -1530,19 +1994,42 @@ class OpenAIShimMessages {
       chatCompletionsUrl = `${request.baseUrl}/chat/completions`
     }
 
-    const fetchInit = {
+    const buildFetchInit = () => ({
       method: 'POST' as const,
       headers,
       body: JSON.stringify(body),
       signal: options?.signal,
+    })
+    const finalizeSuccessfulResponse = (successfulResponse: Response) => (
+      textToolMode
+        ? adaptTextToolResponse(
+          successfulResponse,
+          request.resolvedModel,
+          Boolean(params.stream),
+          convertedTools.map(tool => tool.function.name),
+        )
+        : Promise.resolve(successfulResponse)
+    )
+    const enableTextToolMode = () => {
+      textToolMode = true
+      openaiMessages = convertMessagesForTextTools(
+        nativeOpenaiMessages,
+        convertedTools,
+        params.tool_choice,
+      )
+      body.messages = openaiMessages
+      body.stream = false
+      delete body.stream_options
+      delete body.tools
+      delete body.tool_choice
     }
 
     const maxAttempts = isGithub ? GITHUB_429_MAX_RETRIES : 1
     let response: Response | undefined
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      response = await fetch(chatCompletionsUrl, fetchInit)
+      response = await fetch(chatCompletionsUrl, buildFetchInit())
       if (response.ok) {
-        return response
+        return finalizeSuccessfulResponse(response)
       }
       if (
         isGithub &&
@@ -1562,6 +2049,25 @@ class OpenAIShimMessages {
       let errorBody = await response.text().catch(() => 'unknown error')
 
       if (
+        !textToolMode
+        && textToolEligible
+        && allowsAutomaticTextToolFallback(request.baseUrl)
+        && isNativeToolTemplateFailure(response.status, errorBody)
+      ) {
+        logForDebugging(
+          `[openai-shim] ${request.resolvedModel} rejected native tool rendering; retrying with the local GGUF text-tool protocol`,
+          { level: 'warn' },
+        )
+        textToolCompatibilityCache.add(
+          getTextToolCompatibilityKey(request.baseUrl, request.resolvedModel),
+        )
+        enableTextToolMode()
+        response = await fetch(chatCompletionsUrl, buildFetchInit())
+        if (response.ok) return finalizeSuccessfulResponse(response)
+        errorBody = await response.text().catch(() => 'unknown error')
+      }
+
+      if (
         hasOpenAIImageContent(openaiMessages)
         && isUnsupportedImageRequest(response.status, errorBody)
       ) {
@@ -1570,13 +2076,13 @@ class OpenAIShimMessages {
           { level: 'warn' },
         )
         response = await fetch(chatCompletionsUrl, {
-          ...fetchInit,
+          ...buildFetchInit(),
           body: JSON.stringify({
             ...body,
             messages: messagesWithoutOpenAIImages(openaiMessages),
           }),
         })
-        if (response.ok) return response
+        if (response.ok) return finalizeSuccessfulResponse(response)
         errorBody = await response.text().catch(() => 'unknown error')
       }
 

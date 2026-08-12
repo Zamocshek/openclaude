@@ -13,7 +13,7 @@ import {
   type ProfileEnv,
   type ProviderProfile as PersistedProviderProfile,
 } from './providerProfile.js'
-import { isCodexBaseUrl } from '../services/api/providerConfig.js'
+import { isCodexBaseUrl, isLocalProviderUrl } from '../services/api/providerConfig.js'
 import type { ModelOption } from './model/modelOptions.js'
 
 export type ProviderPreset =
@@ -311,7 +311,7 @@ export function getProviderPresetDefaults(
       return {
         provider: 'openai',
         name: 'LM Studio LAN',
-        baseUrl: 'http://192.168.187.1:1234/v1',
+        baseUrl: 'http://host.docker.internal:1234/v1',
         model: 'gemma-4-12b-obliterated',
         apiKey: 'lm-studio',
         requiresApiKey: false,
@@ -476,6 +476,7 @@ export function clearProviderProfileEnvFromProcessEnv(
   delete processEnv.OPENAI_API_BASE
   delete processEnv.OPENAI_MODEL
   delete processEnv.OPENAI_API_KEY
+  delete processEnv.OPENCLAUDE_OPENAI_TEXT_TOOL_MODE
 
   delete processEnv.ANTHROPIC_BASE_URL
   delete processEnv.ANTHROPIC_MODEL
@@ -514,6 +515,9 @@ export function applyProviderProfileToProcessEnv(profile: ProviderProfile): void
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = profile.baseUrl
   process.env.OPENAI_MODEL = profile.model
+  if (isLocalProviderUrl(profile.baseUrl)) {
+    process.env.OPENCLAUDE_OPENAI_TEXT_TOOL_MODE = 'auto'
+  }
 
   if (profile.apiKey) {
     process.env.OPENAI_API_KEY = profile.apiKey
