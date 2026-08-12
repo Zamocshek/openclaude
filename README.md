@@ -45,6 +45,11 @@ secrets, downloads the local Ollama models, and starts the Agent Gateway,
 OpenWebUI, Tool Router, File Manager, OmniRoute, SearXNG, Telegram MCP, skills,
 MCP servers, and workers.
 
+OpenWebUI image uploads and voice/video screen-share turns pass through the
+same agent pipeline. Local faster-whisper transcribes speech and the bundled
+Qwen-MM/Ollama layer supplies visual evidence even when the selected provider
+is text-only. See [`docs/openwebui-multimodal.md`](docs/openwebui-multimodal.md).
+
 Windows:
 
 ```powershell

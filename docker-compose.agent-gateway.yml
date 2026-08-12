@@ -874,6 +874,17 @@ services:
       OPENAI_API_BASE_URLS: "http://openclaude-agent:8642/v1"
       OPENAI_API_KEYS: "${OPENCLAUDE_AGENT_INFERENCE_API_KEY:-${OPENCLAUDE_AGENT_API_KEY:-change-me}}"
       WEBUI_AUTH: "${OPEN_WEBUI_AUTH:-False}"
+      # Keep voice input local by default. An empty STT engine selects the
+      # bundled faster-whisper backend; an empty TTS engine uses the browser.
+      AUDIO_STT_ENGINE: "${OPENCLAUDE_OPEN_WEBUI_STT_ENGINE:-${AUDIO_STT_ENGINE:-}}"
+      AUDIO_TTS_ENGINE: "${OPENCLAUDE_OPEN_WEBUI_TTS_ENGINE:-${AUDIO_TTS_ENGINE:-}}"
+      WHISPER_MODEL: "${OPENCLAUDE_OPEN_WEBUI_WHISPER_MODEL:-${WHISPER_MODEL:-base}}"
+      WHISPER_COMPUTE_TYPE: "${OPENCLAUDE_OPEN_WEBUI_WHISPER_COMPUTE_TYPE:-${WHISPER_COMPUTE_TYPE:-int8}}"
+      WHISPER_VAD_FILTER: "${OPENCLAUDE_OPEN_WEBUI_WHISPER_VAD_FILTER:-${WHISPER_VAD_FILTER:-True}}"
+      # Voice/video screen share attaches one frame per completed utterance.
+      # Bound frame size before it reaches the CPU-hosted Qwen-VL adapter.
+      FILE_IMAGE_COMPRESSION_WIDTH: "${OPENCLAUDE_OPEN_WEBUI_IMAGE_MAX_WIDTH:-${FILE_IMAGE_COMPRESSION_WIDTH:-1280}}"
+      FILE_IMAGE_COMPRESSION_HEIGHT: "${OPENCLAUDE_OPEN_WEBUI_IMAGE_MAX_HEIGHT:-${FILE_IMAGE_COMPRESSION_HEIGHT:-1280}}"
     ports:
       - "${OPENCLAUDE_OPEN_WEBUI_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_OPEN_WEBUI_HOST_PORT:-8080}:8080"
     volumes:

@@ -34,6 +34,34 @@ function getOpenWebUIRuntimeEnv(): Record<string, string> {
     LANG: process.env.LANG || 'C.UTF-8',
     PYTHONUTF8: process.env.PYTHONUTF8 || '1',
     PYTHONIOENCODING: process.env.PYTHONIOENCODING || 'utf-8',
+    AUDIO_STT_ENGINE:
+      process.env.OPENCLAUDE_OPEN_WEBUI_STT_ENGINE
+      ?? process.env.AUDIO_STT_ENGINE
+      ?? '',
+    AUDIO_TTS_ENGINE:
+      process.env.OPENCLAUDE_OPEN_WEBUI_TTS_ENGINE
+      ?? process.env.AUDIO_TTS_ENGINE
+      ?? '',
+    WHISPER_MODEL:
+      process.env.OPENCLAUDE_OPEN_WEBUI_WHISPER_MODEL
+      || process.env.WHISPER_MODEL
+      || 'base',
+    WHISPER_COMPUTE_TYPE:
+      process.env.OPENCLAUDE_OPEN_WEBUI_WHISPER_COMPUTE_TYPE
+      || process.env.WHISPER_COMPUTE_TYPE
+      || 'int8',
+    WHISPER_VAD_FILTER:
+      process.env.OPENCLAUDE_OPEN_WEBUI_WHISPER_VAD_FILTER
+      || process.env.WHISPER_VAD_FILTER
+      || 'True',
+    FILE_IMAGE_COMPRESSION_WIDTH:
+      process.env.OPENCLAUDE_OPEN_WEBUI_IMAGE_MAX_WIDTH
+      || process.env.FILE_IMAGE_COMPRESSION_WIDTH
+      || '1280',
+    FILE_IMAGE_COMPRESSION_HEIGHT:
+      process.env.OPENCLAUDE_OPEN_WEBUI_IMAGE_MAX_HEIGHT
+      || process.env.FILE_IMAGE_COMPRESSION_HEIGHT
+      || '1280',
   }
 }
 

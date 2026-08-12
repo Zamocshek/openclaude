@@ -19,6 +19,11 @@ describe('Open WebUI helper', () => {
     expect(preview.serve).toContain('http://127.0.0.1:8642/v1')
     expect(preview.serve).toContain('ocag...test')
     expect(preview.serve).not.toContain('ocag_test')
+    expect(preview.serve).toContain('AUDIO_STT_ENGINE')
+    expect(preview.serve).toContain('WHISPER_MODEL')
+    expect(preview.serve).toContain('WHISPER_VAD_FILTER')
+    expect(preview.serve).toContain('FILE_IMAGE_COMPRESSION_WIDTH')
+    expect(preview.serve).toContain('FILE_IMAGE_COMPRESSION_HEIGHT')
   })
 
   test('uses loopback for Open WebUI when the agent API binds all interfaces', () => {
