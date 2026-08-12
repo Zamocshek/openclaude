@@ -79,19 +79,23 @@ export function prepareGatewaySubagentRuntime(
 
   if (routes.length === 0) return undefined
 
-  const agentModels: Record<string, { base_url: string; api_key: string }> = {}
+  const agentModels: Record<string, {
+    provider: string
+    model: string
+    base_url: string
+    api_key: string
+  }> = {}
   const agentRouting: Record<string, string> = {}
   const roles: GatewaySubagentRuntime['roles'] = []
 
   for (const [name, route] of routes) {
-    const existing = agentModels[route.model]
-    if (existing && (existing.base_url !== route.baseUrl || existing.api_key !== route.apiKey)) {
-      throw new Error(
-        `Ambiguous subagent model route "${route.model}" is configured for multiple providers or endpoints`,
-      )
+    agentModels[name] = {
+      provider: route.provider,
+      model: route.model,
+      base_url: route.baseUrl,
+      api_key: route.apiKey,
     }
-    agentModels[route.model] = { base_url: route.baseUrl, api_key: route.apiKey }
-    agentRouting[name] = route.model
+    agentRouting[name] = name
     roles.push({ name, provider: route.provider, model: route.model })
   }
 
@@ -104,7 +108,12 @@ export function prepareGatewaySubagentRuntime(
   )
   mkdirSync(stateDir, { recursive: true })
   cleanupStaleGatewaySubagentSettings(stateDir)
-  writeFileSync(settingsPath, `${JSON.stringify({ agentModels, agentRouting }, null, 2)}\n`, {
+  writeFileSync(settingsPath, `${JSON.stringify({
+    agentModels,
+    agentRouting,
+    agentMaxParallel: config.subagents.maxParallel,
+    agentTimeoutMs: config.runner.timeoutMs,
+  }, null, 2)}\n`, {
     encoding: 'utf8',
     mode: 0o600,
   })
@@ -133,10 +142,11 @@ export function buildGatewaySubagentAppendPrompt(
     .map(role => `- ${role.name}: ${role.provider}/${role.model}`)
     .join('\n')
   return [
-    'Gateway delegates are available for independent substantial subtasks. Use them only when delegation improves quality or throughput, then integrate and verify their results.',
+    'Gateway delegates are an always-available execution capability, not a keyword-triggered mode. Reason about decomposition before acting: execute simple work directly, and delegate bounded independent work when another model, API, context window, or tool specialization improves quality or throughput.',
     'Configured Agent subagent_type roles:',
     roleList,
-    `Run at most ${maxParallel} independent delegates in parallel; never let concurrent writers touch the same files.`,
+    `The runtime enforces at most ${maxParallel} concurrent delegate model runs. Multiple independent Agent calls may be issued together; never let concurrent writers touch the same files.`,
+    'The parent remains responsible for task decomposition, result integration, conflict resolution, and final verification. A delegate result is evidence, not automatic completion.',
     'Use gateway-control for requested route changes without passing literal API keys. A route change applies to the next top-level run.',
   ].join('\n')
 }
@@ -210,13 +220,14 @@ function buildGatewayAgentDefinitions(
 ): Record<string, GatewayAgentDefinition> {
   return Object.fromEntries(roles.map(role => [
     role.name,
-    gatewayAgentDefinition(role.name, config.runner.maxTurns),
+    gatewayAgentDefinition(role.name, config.runner.maxTurns, role.name),
   ]))
 }
 
 function gatewayAgentDefinition(
   name: string,
   maxTurns: number,
+  providerProfile: string,
 ): GatewayAgentDefinition {
   const readOnlyTools = ['Read', 'Grep', 'Glob']
   if (name === 'gateway-vision') {
@@ -224,6 +235,7 @@ function gatewayAgentDefinition(
       description: 'Read-only visual inspection through a multimodal Codex model.',
       prompt: 'You are the Gateway Vision subagent. Inspect the exact local image paths in the assignment with the Read tool before answering. Report only observable visual evidence needed for the parent request, including relevant text, layout, objects, colors, and uncertainty. Never infer contents from filenames or captions. Do not modify files, run unrelated tools, or spawn agents. If an image cannot be read, report the exact failure.',
       model: 'inherit',
+      providerProfile,
       maxTurns,
       tools: ['Read'],
     }
@@ -233,6 +245,7 @@ function gatewayAgentDefinition(
       description: 'Fast read-only project and evidence exploration.',
       prompt: 'You are the Gateway Explore subagent. Investigate the assigned question thoroughly with read-only tools. Report concrete evidence, paths, commands, risks, and open questions. Do not modify files or spawn agents.',
       model: 'inherit',
+      providerProfile,
       maxTurns,
       tools: readOnlyTools,
     }
@@ -242,6 +255,7 @@ function gatewayAgentDefinition(
       description: 'Read-only implementation planning and task decomposition.',
       prompt: 'You are the Gateway Plan subagent. Inspect the relevant project state and produce an actionable, ordered implementation plan. Include affected files, dependencies, verification steps, and concurrency boundaries. Do not modify files or spawn agents.',
       model: 'inherit',
+      providerProfile,
       maxTurns,
       tools: readOnlyTools,
     }
@@ -251,6 +265,7 @@ function gatewayAgentDefinition(
       description: 'Independent read-only code and runtime verification.',
       prompt: 'You are the Gateway Review subagent. Independently verify the assigned implementation or claim. Run relevant read-only inspection and tests, identify concrete defects or missing checks, and end with VERDICT: PASS, FAIL, or PARTIAL. Do not modify files or spawn agents.',
       model: 'inherit',
+      providerProfile,
       maxTurns,
       tools: readOnlyTools,
     }
@@ -259,6 +274,7 @@ function gatewayAgentDefinition(
     description: 'Bounded implementation task with verification responsibility.',
     prompt: 'You are the Gateway Implement subagent. Execute only the bounded task in the prompt, preserve unrelated changes, use the existing project patterns, and verify your work before reporting. Do not spawn further agents.',
     model: 'inherit',
+    providerProfile,
     maxTurns,
     disallowedTools: ['Agent'],
   }
@@ -268,6 +284,7 @@ type GatewayAgentDefinition = {
   description: string
   prompt: string
   model: string
+  providerProfile: string
   maxTurns: number
   tools?: string[]
   disallowedTools?: string[]

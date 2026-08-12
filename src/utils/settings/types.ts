@@ -726,23 +726,54 @@ export const SettingsSchema = lazySchema(() =>
         .record(
           z.string(),
           z.object({
+            provider: z
+              .string()
+              .trim()
+              .min(1)
+              .optional()
+              .describe('Human-readable provider identifier for diagnostics'),
+            model: z
+              .string()
+              .trim()
+              .min(1)
+              .optional()
+              .describe('Model sent to the provider. Defaults to the profile key for legacy configs.'),
             base_url: z.string().url().describe('OpenAI-compatible API endpoint (must be https:// or http://)'),
-            api_key: z.string().describe('API key for this provider'),
+            api_key: z.string().optional().describe('API key for this provider'),
+            api_key_env: z
+              .string()
+              .regex(/^[A-Za-z_][A-Za-z0-9_]*$/u)
+              .optional()
+              .describe('Environment variable containing the API key'),
           }),
         )
         .optional()
         .describe(
-          'Map of model name to provider connection info. ' +
-            'Example: { "deepseek-chat": { "base_url": "https://api.deepseek.com/v1", "api_key": "sk-xxx" } }',
+          'Map of provider profile ID to OpenAI-compatible connection info. Legacy model-keyed entries remain valid. ' +
+            'Example: { "deepseek-fast": { "provider": "deepseek", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1", "api_key_env": "DEEPSEEK_API_KEY" } }',
         ),
       agentRouting: z
         .record(z.string(), z.string())
         .optional()
         .describe(
-          'Map of agent identifier (subagent_type or team member name) to model name. ' +
-            'Use "default" key as fallback. Model name must exist in agentModels. ' +
-            'Example: { "Explore": "deepseek-chat", "general-purpose": "gpt-4o", "default": "gpt-4o" }',
+          'Map of agent identifier (subagent_type or team member name) to provider profile ID. ' +
+            'Use "default" key as fallback. Profile ID must exist in agentModels. ' +
+            'Example: { "Explore": "deepseek-fast", "general-purpose": "codex-review", "default": "codex-review" }',
         ),
+      agentMaxParallel: z
+        .number()
+        .int()
+        .min(1)
+        .max(32)
+        .optional()
+        .describe('Hard process-wide limit for concurrent subagent model runs.'),
+      agentTimeoutMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(4 * 60 * 60 * 1_000)
+        .optional()
+        .describe('Wall-clock timeout for each subagent run, including queue wait time.'),
       fastMode: z
         .boolean()
         .optional()

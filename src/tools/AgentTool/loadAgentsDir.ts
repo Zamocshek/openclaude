@@ -82,6 +82,11 @@ const AgentJsonSchema = lazySchema(() =>
       .min(1, 'Model cannot be empty')
       .transform(m => (m.toLowerCase() === 'inherit' ? 'inherit' : m))
       .optional(),
+    providerProfile: z
+      .string()
+      .trim()
+      .min(1, 'Provider profile cannot be empty')
+      .optional(),
     effort: z.union([z.enum(EFFORT_LEVELS), z.number().int()]).optional(),
     permissionMode: z.enum(PERMISSION_MODES).optional(),
     mcpServers: z.array(AgentMcpServerSpecSchema()).optional(),
@@ -113,6 +118,8 @@ export type BaseAgentDefinition = {
   hooks?: HooksSettings // Session-scoped hooks registered when agent starts
   color?: AgentColorName
   model?: string
+  /** Provider profile ID from settings.agentModels. */
+  providerProfile?: string
   effort?: EffortValue
   permissionMode?: PermissionMode
   maxTurns?: number // Maximum number of agentic turns before stopping
@@ -488,6 +495,9 @@ export function parseAgentFromJson(
       },
       source,
       ...(parsed.model ? { model: parsed.model } : {}),
+      ...(parsed.providerProfile
+        ? { providerProfile: parsed.providerProfile }
+        : {}),
       ...(parsed.effort !== undefined ? { effort: parsed.effort } : {}),
       ...(parsed.permissionMode
         ? { permissionMode: parsed.permissionMode }
@@ -571,6 +581,11 @@ export function parseAgentFromMarkdown(
       const trimmed = modelRaw.trim()
       model = trimmed.toLowerCase() === 'inherit' ? 'inherit' : trimmed
     }
+    const providerProfileRaw = frontmatter['providerProfile']
+    const providerProfile =
+      typeof providerProfileRaw === 'string' && providerProfileRaw.trim()
+        ? providerProfileRaw.trim()
+        : undefined
 
     // Parse background flag
     const backgroundRaw = frontmatter['background']
@@ -736,6 +751,7 @@ export function parseAgentFromMarkdown(
         ? { color }
         : {}),
       ...(model !== undefined ? { model } : {}),
+      ...(providerProfile !== undefined ? { providerProfile } : {}),
       ...(parsedEffort !== undefined ? { effort: parsedEffort } : {}),
       ...(isValidPermissionMode
         ? { permissionMode: permissionModeRaw as PermissionMode }

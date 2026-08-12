@@ -71,14 +71,20 @@ describe('gateway subagent runtime', () => {
     ])
     expect(runtime?.agentsJson).not.toContain('test-deepseek-secret')
     const settings = JSON.parse(await readFile(runtime!.settingsPath, 'utf8'))
-    expect(settings.agentModels['deepseek-v4-flash']).toEqual({
+    expect(settings.agentModels['gateway-explore']).toEqual({
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
       base_url: 'https://api.deepseek.com/v1',
       api_key: 'test-deepseek-secret',
     })
-    expect(settings.agentRouting['gateway-explore']).toBe('deepseek-v4-flash')
+    expect(settings.agentRouting['gateway-explore']).toBe('gateway-explore')
+    expect(settings.agentMaxParallel).toBe(2)
+    expect(settings.agentTimeoutMs).toBe(config.runner.timeoutMs)
+    expect(JSON.parse(runtime!.agentsJson)['gateway-explore'].providerProfile)
+      .toBe('gateway-explore')
 
     const prompt = buildGatewaySubagentAppendPrompt(runtime, config.subagents.maxParallel)
-    expect(prompt).toContain('at most 2 independent delegates')
+    expect(prompt).toContain('enforces at most 2 concurrent delegate model runs')
     expect(prompt).toContain('gateway-explore: deepseek/deepseek-v4-flash')
   })
 
@@ -135,7 +141,9 @@ describe('gateway subagent runtime', () => {
     }])
     expect(runtime?.agentsJson).not.toContain('test-opencode-secret')
     const settings = JSON.parse(await readFile(runtime!.settingsPath, 'utf8'))
-    expect(settings.agentModels['deepseek-v4-flash-free']).toEqual({
+    expect(settings.agentModels['gateway-explore']).toEqual({
+      provider: 'opencode-zen',
+      model: 'deepseek-v4-flash-free',
       base_url: 'https://opencode.ai/zen/v1',
       api_key: 'test-opencode-secret',
     })
@@ -200,9 +208,52 @@ describe('gateway subagent runtime', () => {
     expect(agents['gateway-vision'].prompt).toContain('Read tool')
     expect(agents['gateway-vision'].prompt).toContain('observable visual evidence')
     expect(agents['gateway-vision'].tools).toEqual(['Read'])
+    expect(agents['gateway-vision'].providerProfile).toBe('gateway-vision')
     expect(agents['gateway-vision'].disallowedTools).toBeUndefined()
     expect(
       buildGatewaySubagentAppendPrompt(runtime, config.subagents.maxParallel),
     ).toContain('gateway-vision: codex/gpt-5.6-sol?reasoning=medium')
+  })
+
+  test('keeps identical model names isolated across different APIs', async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'openclaude-subagents-'))
+    stateDirs.push(stateDir)
+    process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = stateDir
+    const defaults = getDefaultAgentGatewayConfig()
+    const config = normalizeAgentGatewayConfig({
+      ...defaults,
+      subagents: {
+        enabled: true,
+        maxParallel: 2,
+        routes: {
+          'gateway-plan': {
+            provider: 'provider-a',
+            model: 'shared-model',
+            baseUrl: 'https://provider-a.example/v1',
+            apiKey: 'key-a',
+          },
+          'gateway-review': {
+            provider: 'provider-b',
+            model: 'shared-model',
+            baseUrl: 'https://provider-b.example/v1',
+            apiKey: 'key-b',
+          },
+        },
+      },
+    })
+
+    const runtime = prepareGatewaySubagentRuntime(config, {})
+    const settings = JSON.parse(await readFile(runtime!.settingsPath, 'utf8'))
+
+    expect(settings.agentModels['gateway-plan']).toMatchObject({
+      model: 'shared-model',
+      base_url: 'https://provider-a.example/v1',
+      api_key: 'key-a',
+    })
+    expect(settings.agentModels['gateway-review']).toMatchObject({
+      model: 'shared-model',
+      base_url: 'https://provider-b.example/v1',
+      api_key: 'key-b',
+    })
   })
 })

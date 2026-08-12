@@ -69,6 +69,8 @@ export type InProcessSpawnConfig = {
   planModeRequired: boolean
   /** Optional model override for this teammate */
   model?: string
+  /** Optional provider profile used by the in-process runner. */
+  providerProfile?: string
 }
 
 /**

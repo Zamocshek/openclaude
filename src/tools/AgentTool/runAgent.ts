@@ -15,6 +15,7 @@ import { getSystemContext, getUserContext } from '../../context.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import { query } from '../../query.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
+import { acquireAgentExecutionSlot } from '../../services/api/agentConcurrency.js'
 import { getDumpPromptsPath } from '../../services/api/dumpPrompts.js'
 import { cleanupAgentTracking } from '../../services/api/promptCacheBreakDetection.js'
 import {
@@ -58,9 +59,8 @@ import { clearSessionHooks } from '../../utils/hooks/sessionHooks.js'
 import { executeSubagentStartHooks } from '../../utils/hooks.js'
 import { createUserMessage } from '../../utils/messages.js'
 import { getAgentModel } from '../../utils/model/agent.js'
-import { resolveAgentProvider } from '../../services/api/agentRouting.js'
+import { hasExplicitAgentModelOverride, resolveAgentProvider } from '../../services/api/agentRouting.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
-import type { ModelAlias } from '../../utils/model/aliases.js'
 import {
   clearAgentTranscriptSubdir,
   recordSidechainTranscript,
@@ -271,6 +271,7 @@ export async function* runAgent({
   transcriptSubdir,
   onQueryProgress,
   agentName,
+  providerProfile,
 }: {
   agentDefinition: AgentDefinition
   promptMessages: Message[]
@@ -289,7 +290,7 @@ export async function* runAgent({
     abortController?: AbortController
     agentId?: AgentId
   }
-  model?: ModelAlias
+  model?: string
   maxTurns?: number
   /** Preserve toolUseResult on messages for subagents with viewable transcripts */
   preserveToolUseResults?: boolean
@@ -332,6 +333,8 @@ export async function* runAgent({
   onQueryProgress?: () => void
   /** Agent name (team member name) for routing resolution */
   agentName?: string
+  /** Explicit provider profile ID. Takes priority over role/name routing. */
+  providerProfile?: string
 }): AsyncGenerator<Message, void> {
   // Track subagent usage for feature discovery
 
@@ -343,6 +346,7 @@ export async function* runAgent({
   const rootSetAppState =
     toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState
 
+  const initialSettings = getInitialSettings()
   const resolvedAgentModel = getAgentModel(
     agentDefinition.model,
     toolUseContext.options.mainLoopModel,
@@ -354,9 +358,17 @@ export async function* runAgent({
   const providerOverride = resolveAgentProvider(
     agentName,
     agentDefinition.agentType,
-    getInitialSettings(),
+    initialSettings,
+    providerProfile ?? agentDefinition.providerProfile,
   )
-  const effectiveModel = providerOverride ? providerOverride.model : resolvedAgentModel
+  const effectiveModel = providerOverride
+    ? hasExplicitAgentModelOverride(model)
+      ? getAgentModel(undefined, toolUseContext.options.mainLoopModel, model, permissionMode)
+      : providerOverride.model
+    : resolvedAgentModel
+  const effectiveProviderOverride = providerOverride
+    ? { ...providerOverride, model: effectiveModel }
+    : null
 
   const agentId = override?.agentId ? override.agentId : createAgentId()
 
@@ -525,7 +537,7 @@ export async function* runAgent({
         await getAgentSystemPrompt(
           agentDefinition,
           toolUseContext,
-          resolvedAgentModel,
+          effectiveModel,
           additionalWorkingDirectories,
           resolvedTools,
         ),
@@ -535,12 +547,33 @@ export async function* runAgent({
   // - Override takes precedence
   // - Async agents get a new unlinked controller (runs independently)
   // - Sync agents share parent's controller
-  const agentAbortController = override?.abortController
+  const baseAgentAbortController = override?.abortController
     ? override.abortController
     : isAsync
       ? new AbortController()
       : toolUseContext.abortController
+  let agentAbortController = baseAgentAbortController
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+  let removeParentAbortListener: (() => void) | undefined
+  let agentTimedOut = false
+  const agentTimeoutMs = initialSettings?.agentTimeoutMs
+  if (agentTimeoutMs && !baseAgentAbortController.signal.aborted) {
+    const timeoutController = new AbortController()
+    const forwardAbort = () => timeoutController.abort(baseAgentAbortController.signal.reason)
+    baseAgentAbortController.signal.addEventListener('abort', forwardAbort, { once: true })
+    removeParentAbortListener = () =>
+      baseAgentAbortController.signal.removeEventListener('abort', forwardAbort)
+    timeoutTimer = setTimeout(() => {
+      agentTimedOut = true
+      timeoutController.abort(
+        new AbortError(`Subagent timed out after ${agentTimeoutMs}ms`),
+      )
+    }, agentTimeoutMs)
+    timeoutTimer.unref?.()
+    agentAbortController = timeoutController
+  }
 
+  try {
   // Execute SubagentStart hooks and collect additional context
   const additionalContexts: string[] = []
   for await (const hookResult of executeSubagentStartHooks(
@@ -690,7 +723,7 @@ export async function* runAgent({
     debug: toolUseContext.options.debug,
     verbose: toolUseContext.options.verbose,
     mainLoopModel: effectiveModel,
-    providerOverride: providerOverride ?? undefined,
+    providerOverride: effectiveProviderOverride ?? undefined,
     // For fork children (useExactTools), inherit thinking config to match the
     // parent's API request prefix for prompt cache hits. For regular
     // sub-agents, disable thinking to control output token costs.
@@ -752,14 +785,23 @@ export async function* runAgent({
   )
   void writeAgentMetadata(agentId, {
     agentType: agentDefinition.agentType,
+    model: effectiveModel,
     ...(worktreePath && { worktreePath }),
     ...(description && { description }),
+    ...(providerOverride?.profile && {
+      providerProfile: providerOverride.profile,
+    }),
   }).catch(_err => logForDebugging(`Failed to write agent metadata: ${_err}`))
 
   // Track the last recorded message UUID for parent chain continuity
   let lastRecordedUuid: UUID | null = initialMessages.at(-1)?.uuid ?? null
+  let releaseExecutionSlot: (() => void) | undefined
 
   try {
+    releaseExecutionSlot = await acquireAgentExecutionSlot(
+      initialSettings?.agentMaxParallel,
+      agentAbortController.signal,
+    )
     for await (const message of query({
       messages: initialMessages,
       systemPrompt: agentSystemPrompt,
@@ -821,7 +863,9 @@ export async function* runAgent({
     }
 
     if (agentAbortController.signal.aborted) {
-      throw new AbortError()
+      throw new AbortError(
+        agentTimedOut ? `Subagent timed out after ${agentTimeoutMs}ms` : undefined,
+      )
     }
 
     // Run callback if provided (only built-in agents have callbacks)
@@ -829,6 +873,7 @@ export async function* runAgent({
       agentDefinition.callback()
     }
   } finally {
+    releaseExecutionSlot?.()
     // Clean up agent-specific MCP servers (runs on normal completion, abort, or error)
     await mcpCleanup()
     // Clean up agent's session hooks
@@ -871,6 +916,10 @@ export async function* runAgent({
       )
     }
     /* eslint-enable @typescript-eslint/no-require-imports */
+  }
+  } finally {
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    removeParentAbortListener?.()
   }
 }
 

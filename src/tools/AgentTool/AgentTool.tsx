@@ -12,6 +12,7 @@ import { startAgentSummarization } from '../../services/AgentSummary/agentSummar
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { clearDumpState } from '../../services/api/dumpPrompts.js';
+import { hasExplicitAgentModelOverride, resolveAgentProvider } from '../../services/api/agentRouting.js';
 import { completeAgentTask as completeAsyncAgent, createActivityDescriptionResolver, createProgressTracker, enqueueAgentNotification, failAgentTask as failAsyncAgent, getProgressUpdate, getTokenCountFromTracker, isLocalAgentTask, killAsyncAgent, registerAgentForeground, registerAsyncAgent, unregisterAgentForeground, updateAgentProgress as updateAsyncAgentProgress, updateProgressFromMessage } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
 import { checkRemoteAgentEligibility, formatPreconditionError, getRemoteTaskSessionUrl, registerRemoteAgentTask } from '../../tasks/RemoteAgentTask/RemoteAgentTask.js';
 import { assembleToolPool } from '../../tools.js';
@@ -31,6 +32,7 @@ import type { PermissionResult } from '../../utils/permissions/PermissionResult.
 import { filterDeniedAgents, getDenyRuleForAgent } from '../../utils/permissions/permissions.js';
 import { enqueueSdkEvent } from '../../utils/sdkEventQueue.js';
 import { writeAgentMetadata } from '../../utils/sessionStorage.js';
+import { getInitialSettings } from '../../utils/settings/settings.js';
 import { sleep } from '../../utils/sleep.js';
 import { buildEffectiveSystemPrompt } from '../../utils/systemPrompt.js';
 import { asSystemPrompt } from '../../utils/systemPromptType.js';
@@ -84,7 +86,8 @@ const baseInputSchema = lazySchema(() => z.object({
   description: z.string().describe('A short (3-5 word) description of the task'),
   prompt: z.string().describe('The task for the agent to perform'),
   subagent_type: z.string().optional().describe('The type of specialized agent to use for this task'),
-  model: z.enum(['sonnet', 'opus', 'haiku']).optional().describe("Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent."),
+  model: z.string().trim().min(1).optional().describe("Optional exact model or alias override for this agent. When provider_profile is set, the model runs through that profile's API."),
+  provider_profile: z.string().trim().min(1).optional().describe('Optional provider profile ID from settings.agentModels. Selects the API endpoint and credentials independently from the parent agent.'),
   run_in_background: z.boolean().optional().describe('Set to true to run this agent in the background. You will be notified when it completes.')
 }));
 
@@ -166,6 +169,7 @@ type TeammateSpawnedOutput = {
   agent_id: string;
   agent_type?: string;
   model?: string;
+  provider_profile?: string;
   name: string;
   color?: string;
   tmux_session_name: string;
@@ -242,6 +246,7 @@ export const AgentTool = buildTool({
     subagent_type,
     description,
     model: modelParam,
+    provider_profile,
     run_in_background,
     name,
     team_name,
@@ -288,6 +293,10 @@ export const AgentTool = buildTool({
       if (agentDef?.color) {
         setAgentColor(subagent_type!, agentDef.color);
       }
+      const requestedTeammateProfile = provider_profile ?? agentDef?.providerProfile;
+      const routedTeammateProvider = resolveAgentProvider(name, agentDef?.agentType ?? subagent_type, getInitialSettings(), requestedTeammateProfile);
+      const teammateProviderProfile = routedTeammateProvider?.profile ?? requestedTeammateProfile;
+      const teammateModel = teammateProviderProfile && !hasExplicitAgentModelOverride(model) ? undefined : model ?? (teammateProviderProfile ? undefined : agentDef?.model);
       const result = await spawnTeammate({
         name,
         prompt,
@@ -295,7 +304,8 @@ export const AgentTool = buildTool({
         team_name: teamName,
         use_splitpane: true,
         plan_mode_required: spawnMode === 'plan',
-        model: model ?? agentDef?.model,
+        model: teammateModel,
+        provider_profile: teammateProviderProfile,
         agent_type: subagent_type,
         invokingRequestId: assistantMessage?.requestId
       }, toolUseContext);
@@ -416,7 +426,10 @@ export const AgentTool = buildTool({
     }
 
     // Resolve agent params for logging (these are already resolved in runAgent)
-    const resolvedAgentModel = getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, isForkPath ? undefined : model, permissionMode);
+    const selectedProviderProfile = provider_profile ?? selectedAgent.providerProfile;
+    const routedProvider = resolveAgentProvider(name, selectedAgent.agentType, getInitialSettings(), selectedProviderProfile);
+    const resolvedAgentModel = routedProvider ? hasExplicitAgentModelOverride(model) ? getAgentModel(undefined, toolUseContext.options.mainLoopModel, model, permissionMode) : routedProvider.model : getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, isForkPath ? undefined : model, permissionMode);
+    const resolvedProviderProfile = routedProvider?.profile ?? selectedProviderProfile;
     logEvent('tengu_agent_tool_selected', {
       agent_type: selectedAgent.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       model: resolvedAgentModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -647,6 +660,7 @@ export const AgentTool = buildTool({
       worktreePath: worktreeInfo?.worktreePath,
       description,
       agentName: name,
+      providerProfile: resolvedProviderProfile,
     };
 
     // Helper to wrap execution with a cwd override: explicit cwd arg (KAIROS)
@@ -686,7 +700,9 @@ export const AgentTool = buildTool({
           // writeAgentMetadata handling.
           void writeAgentMetadata(asAgentId(earlyAgentId), {
             agentType: selectedAgent.agentType,
-            description
+            description,
+            model: resolvedAgentModel,
+            ...(resolvedProviderProfile && { providerProfile: resolvedProviderProfile })
           }).catch(_err => logForDebugging(`Failed to clear worktree metadata: ${_err}`));
           return {};
         }
@@ -856,12 +872,29 @@ export const AgentTool = buildTool({
         // const capture for sound type narrowing inside the callback below
         const summaryTaskId = foregroundTaskId;
 
+        // Give the provider stream its own controller so cancellation
+        // ownership can move from the parent turn to a background task without
+        // restarting the model request or duplicating completed work.
+        const foregroundRunController = new AbortController();
+        const parentAbortSignal = toolUseContext.abortController.signal;
+        const forwardParentAbort = () => {
+          foregroundRunController.abort(parentAbortSignal.reason);
+        };
+        if (parentAbortSignal.aborted) {
+          forwardParentAbort();
+        } else {
+          parentAbortSignal.addEventListener('abort', forwardParentAbort, {
+            once: true
+          });
+        }
+
         // Get async iterator for the agent
         const agentIterator = runAgent({
           ...runAgentParams,
           override: {
             ...runAgentParams.override,
-            agentId: syncAgentId
+            agentId: syncAgentId,
+            abortController: foregroundRunController
           },
           onCacheSafeParams: summaryTaskId && getSdkAgentProgressSummariesEnabled() ? (params: CacheSafeParams) => {
             const {
@@ -915,43 +948,39 @@ export const AgentTool = buildTool({
                 // Capture the taskId for use in the async callback
                 const backgroundedTaskId = foregroundTaskId;
                 wasBackgrounded = true;
-                // Stop foreground summarization; the backgrounded closure
-                // below owns its own independent stop function.
-                stopForegroundSummarization?.();
+                // The provider stream itself is handed off, not restarted.
+                // Transfer cancellation and summarization ownership to the
+                // background task before the foreground tool returns.
+                parentAbortSignal.removeEventListener('abort', forwardParentAbort);
+                const backgroundAbortSignal = task.abortController?.signal;
+                const forwardBackgroundAbort = () => {
+                  foregroundRunController.abort(backgroundAbortSignal?.reason);
+                };
+                if (backgroundAbortSignal?.aborted) {
+                  forwardBackgroundAbort();
+                } else {
+                  backgroundAbortSignal?.addEventListener('abort', forwardBackgroundAbort, {
+                    once: true
+                  });
+                }
+                const transferredSummarizationStop = stopForegroundSummarization;
+                stopForegroundSummarization = undefined;
 
                 // Workload: inherited via ALS at `void` invocation time,
                 // same as the async-from-start path above.
                 // Continue agent in background and return async result
                 void runWithAgentContext(syncAgentContext, async () => {
-                  let stopBackgroundedSummarization: (() => void) | undefined;
+                  const stopBackgroundedSummarization = transferredSummarizationStop;
                   try {
-                    // Clean up the foreground iterator so its finally block runs
-                    // (releases MCP connections, session hooks, prompt cache tracking, etc.)
-                    // Timeout prevents blocking if MCP server cleanup hangs.
-                    // .catch() prevents unhandled rejection if timeout wins the race.
-                    await Promise.race([agentIterator.return(undefined).catch(() => {}), sleep(1000)]);
                     // Initialize progress tracking from existing messages
                     const tracker = createProgressTracker();
                     const resolveActivity2 = createActivityDescriptionResolver(toolUseContext.options.tools);
                     for (const existingMsg of agentMessages) {
                       updateProgressFromMessage(tracker, existingMsg, resolveActivity2, toolUseContext.options.tools);
                     }
-                    for await (const msg of runAgent({
-                      ...runAgentParams,
-                      isAsync: true,
-                      // Agent is now running in background
-                      override: {
-                        ...runAgentParams.override,
-                        agentId: asAgentId(backgroundedTaskId),
-                        abortController: task.abortController
-                      },
-                      onCacheSafeParams: getSdkAgentProgressSummariesEnabled() ? (params: CacheSafeParams) => {
-                        const {
-                          stop
-                        } = startAgentSummarization(backgroundedTaskId, asAgentId(backgroundedTaskId), params, rootSetAppState);
-                        stopBackgroundedSummarization = stop;
-                      } : undefined
-                    })) {
+                    let iteratorResult = await nextMessagePromise;
+                    while (!iteratorResult.done) {
+                      const msg = iteratorResult.value;
                       agentMessages.push(msg);
 
                       // Track progress for backgrounded agents
@@ -961,6 +990,7 @@ export const AgentTool = buildTool({
                       if (lastToolName) {
                         emitTaskProgress(tracker, backgroundedTaskId, toolUseContext.toolUseId, description, startTime, lastToolName);
                       }
+                      iteratorResult = await agentIterator.next();
                     }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
 
@@ -1042,6 +1072,18 @@ export const AgentTool = buildTool({
                       ...worktreeResult
                     });
                   } finally {
+                    if (!foregroundRunController.signal.aborted) {
+                      foregroundRunController.abort();
+                    }
+                    // Explicitly close a generator suspended at `yield` if
+                    // progress processing or notification code failed. Its
+                    // finally releases the shared execution slot before MCP
+                    // cleanup, preventing capacity leaks.
+                    await Promise.race([
+                      agentIterator.return(undefined).catch(() => {}),
+                      sleep(5000)
+                    ]);
+                    backgroundAbortSignal?.removeEventListener('abort', forwardBackgroundAbort);
                     stopBackgroundedSummarization?.();
                     // Defensive cleanup: wrap each call so one failure doesn't
                     // prevent the other from running. Without this, if
@@ -1164,6 +1206,8 @@ export const AgentTool = buildTool({
           // Store the error to handle after cleanup
           syncAgentError = toError(error);
         } finally {
+          parentAbortSignal.removeEventListener('abort', forwardParentAbort);
+
           // Clear the background hint UI
           if (toolUseContext.setToolJSX) {
             toolUseContext.setToolJSX(null);

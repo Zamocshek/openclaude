@@ -5,6 +5,10 @@ import type { SettingsJson } from '../../utils/settings/types.js'
  * When present, the API client should use these instead of global env vars.
  */
 export interface ProviderOverride {
+  /** Stable provider profile identifier used for diagnostics and resume. */
+  profile: string
+  /** Human-readable provider identifier when configured. */
+  provider?: string
   /** Model name to send to the API (e.g. "deepseek-chat", "gpt-4o") */
   model: string
   /** OpenAI-compatible base URL */
@@ -20,6 +24,13 @@ function normalize(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, '')
 }
 
+/** A provider profile owns its model unless the caller names a real override. */
+export function hasExplicitAgentModelOverride(
+  model: string | undefined,
+): model is string {
+  return Boolean(model && model !== 'inherit')
+}
+
 /**
  * Look up agent.routing by name or subagent_type, then resolve via agent.models.
  *
@@ -29,18 +40,27 @@ export function resolveAgentProvider(
   name: string | undefined,
   subagentType: string | undefined,
   settings: SettingsJson | null,
+  explicitProfile?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): ProviderOverride | null {
   if (!settings) return null
 
   const routing = settings.agentRouting
   const models = settings.agentModels
-  if (!routing || !models) return null
+  if (!models) {
+    if (explicitProfile) {
+      throw new Error(
+        `Agent provider profile "${explicitProfile}" was requested, but agentModels is not configured`,
+      )
+    }
+    return null
+  }
 
   // Build normalized lookup from routing config.
   // Warn on duplicate normalized keys (e.g. "explore-agent" and "explore_agent"
   // both normalize to "exploreagent") to prevent silent shadowing.
   const normalizedRouting = new Map<string, string>()
-  for (const [key, value] of Object.entries(routing)) {
+  for (const [key, value] of Object.entries(routing ?? {})) {
     const nk = normalize(key)
     if (normalizedRouting.has(nk)) {
       console.error(`[agentRouting] Warning: routing key "${key}" collides with an existing key after normalization (both map to "${nk}"). First entry wins.`)
@@ -50,26 +70,47 @@ export function resolveAgentProvider(
     }
   }
 
-  // Try name first, then subagentType, then "default"
+  // Explicit profile is a first-class launch contract. Otherwise route by
+  // teammate name, agent type, then the optional default profile.
   const candidates = [name, subagentType, 'default'].filter(Boolean) as string[]
-  let modelName: string | undefined
+  let profileId = explicitProfile?.trim() || undefined
 
-  for (const candidate of candidates) {
-    const match = normalizedRouting.get(normalize(candidate))
-    if (match) {
-      modelName = match
-      break
+  if (!profileId) {
+    for (const candidate of candidates) {
+      const match = normalizedRouting.get(normalize(candidate))
+      if (match) {
+        profileId = match
+        break
+      }
     }
   }
 
-  if (!modelName) return null
+  if (!profileId) return null
 
-  const modelConfig = models[modelName]
-  if (!modelConfig) return null
+  const modelConfig = models[profileId]
+  if (!modelConfig) {
+    if (explicitProfile) {
+      throw new Error(`Agent provider profile "${profileId}" does not exist in agentModels`)
+    }
+    console.error(
+      `[agentRouting] Warning: route references missing provider profile "${profileId}"`,
+    )
+    return null
+  }
+
+  const apiKeyEnv = modelConfig.api_key_env?.trim()
+  const apiKey = modelConfig.api_key ?? (apiKeyEnv ? env[apiKeyEnv] : '') ?? ''
+  if (explicitProfile && apiKeyEnv && !apiKey) {
+    throw new Error(
+      `Agent provider profile "${profileId}" requires environment variable ${apiKeyEnv}`,
+    )
+  }
 
   return {
-    model: modelName,
+    profile: profileId,
+    ...(modelConfig.provider ? { provider: modelConfig.provider } : {}),
+    model: modelConfig.model?.trim() || profileId,
     baseURL: modelConfig.base_url,
-    apiKey: modelConfig.api_key,
+    apiKey,
   }
 }

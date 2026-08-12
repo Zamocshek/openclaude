@@ -209,6 +209,8 @@ export type TeammateSpawnConfig = TeammateIdentity & {
   cwd: string
   /** Model to use for this teammate */
   model?: string
+  /** Provider profile to use for this teammate (in-process execution). */
+  providerProfile?: string
   /** System prompt for this teammate (resolved from workflow config) */
   systemPrompt?: string
   /** How to apply the system prompt: 'replace' or 'append' to default */

@@ -324,6 +324,8 @@ describe('agent gateway prompt builder', () => {
     const textSystemPrompt =
       textArgs[textArgs.indexOf('--append-system-prompt') + 1]
     expect(textSystemPrompt).not.toContain('Delegate the visual inspection exactly once')
+    expect(textSystemPrompt).toContain('always-available execution capability')
+    expect(textSystemPrompt).toContain('gateway-vision')
   })
 
   test('replaces image paths with gateway-managed visual evidence before the text parent runs', () => {

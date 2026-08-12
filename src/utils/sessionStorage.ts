@@ -264,6 +264,10 @@ function getAgentMetadataPath(agentId: AgentId): string {
 
 export type AgentMetadata = {
   agentType: string
+  /** Concrete model selected for the original run. */
+  model?: string
+  /** Provider profile selected for the original run. */
+  providerProfile?: string
   /** Worktree path if the agent was spawned with isolation: "worktree" */
   worktreePath?: string
   /** Original task description from the AgentTool input. Persisted so a

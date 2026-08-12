@@ -7562,7 +7562,7 @@ function formatTelegramSubagentStatus(config: AgentGatewayConfig): string {
   const lines = [
     'Gateway subagents',
     `Status: ${status.enabled ? 'ON' : 'OFF'}`,
-    `Parallel read-only delegates: ${status.maxParallel}`,
+    `Concurrent delegate limit (enforced): ${status.maxParallel}`,
     '',
   ]
   if (status.routes.length === 0) {

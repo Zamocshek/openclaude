@@ -736,35 +736,57 @@ For best results, use models with strong tool/function calling support.
 
 ## Agent Routing
 
-OpenClaude can route different agents to different models through settings-based routing. This is useful for cost optimization or splitting work by model strength.
+OpenClaude can run subagents through different OpenAI-compatible APIs in the
+same parent task. Routing uses stable provider profile IDs, so the same model
+name can safely exist behind multiple endpoints. The parent model decides when
+and how to decompose work; gateway delegation is available on every run rather
+than being enabled by prompt keywords.
 
 Add to `~/.claude/settings.json`:
 
 ```json
 {
   "agentModels": {
-    "deepseek-chat": {
+    "deepseek-fast": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
       "base_url": "https://api.deepseek.com/v1",
-      "api_key": "sk-your-key"
+      "api_key_env": "DEEPSEEK_API_KEY"
     },
-    "gpt-4o": {
-      "base_url": "https://api.openai.com/v1",
-      "api_key": "sk-your-key"
+    "codex-ultra": {
+      "provider": "codex",
+      "model": "gpt-5.6-sol?reasoning=ultra",
+      "base_url": "https://chatgpt.com/backend-api/codex",
+      "api_key_env": "CODEX_API_KEY"
     }
   },
   "agentRouting": {
-    "Explore": "deepseek-chat",
-    "Plan": "gpt-4o",
-    "general-purpose": "gpt-4o",
-    "frontend-dev": "deepseek-chat",
-    "default": "gpt-4o"
-  }
+    "Explore": "deepseek-fast",
+    "Plan": "codex-ultra",
+    "general-purpose": "codex-ultra",
+    "default": "codex-ultra"
+  },
+  "agentMaxParallel": 3,
+  "agentTimeoutMs": 1800000
 }
 ```
 
-When no routing match is found, the global provider remains the fallback.
+Resolution priority is an explicit Agent `provider_profile`, teammate name,
+`subagent_type`, then `default`. An explicit `model` can override the selected
+profile's default model while retaining that profile's API and credentials.
+Custom agent JSON/frontmatter can pin `providerProfile: codex-ultra`.
 
-> **Note:** `api_key` values in `settings.json` are stored in plaintext. Keep this file private and do not commit it to version control.
+`agentMaxParallel` is a real FIFO runtime limit, not prompt advice. Queued
+agents can be cancelled without leaking a slot. `agentTimeoutMs` bounds each
+subagent's wall-clock lifetime, including queue wait time. When no routing
+match exists, the parent/global provider remains the fallback.
+
+Legacy model-keyed entries such as `"deepseek-chat": { "base_url": ..., "api_key": ... }`
+remain valid: the profile key is used as the model when `model` is omitted.
+
+Prefer `api_key_env` over a literal `api_key`. Literal keys remain supported
+for backward compatibility, are stored in plaintext, and must never be
+committed. Gateway-generated routing files are ephemeral and mode `0600`.
 
 ## Web Search and Fetch
 

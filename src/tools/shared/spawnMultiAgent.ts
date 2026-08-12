@@ -16,6 +16,7 @@ import type { AppState } from '../../state/AppState.js'
 import { createTaskStateBase, generateTaskId } from '../../Task.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
+import { hasExplicitAgentModelOverride } from '../../services/api/agentRouting.js'
 import { formatAgentId } from '../../utils/agentId.js'
 import { quote } from '../../utils/bash/shellQuote.js'
 import { isInBundledMode } from '../../utils/bundledMode.js'
@@ -111,6 +112,7 @@ export type SpawnOutput = {
   agent_id: string
   agent_type?: string
   model?: string
+  provider_profile?: string
   name: string
   color?: string
   tmux_session_name: string
@@ -129,6 +131,7 @@ export type SpawnTeammateConfig = {
   use_splitpane?: boolean
   plan_mode_required?: boolean
   model?: string
+  provider_profile?: string
   agent_type?: string
   description?: string
   /** request_id of the API call whose response contained the tool_use that
@@ -146,6 +149,7 @@ type SpawnInput = {
   use_splitpane?: boolean
   plan_mode_required?: boolean
   model?: string
+  provider_profile?: string
   agent_type?: string
   description?: string
   invokingRequestId?: string
@@ -382,7 +386,8 @@ async function handleSpawnSplitPane(
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
+  // Pane-based teammates can only inherit the current CLI provider. Explicit
+  // provider profiles are routed to the in-process backend by handleSpawn().
   const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
 
   if (!name || !prompt) {
@@ -905,10 +910,7 @@ async function handleSpawnInProcess(
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
-  const { name, prompt, agent_type, plan_mode_required } = input
-
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const { name, prompt, agent_type, plan_mode_required, provider_profile } = input
 
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
@@ -949,6 +951,13 @@ async function handleSpawnInProcess(
     )
   }
 
+  const providerProfile = provider_profile ?? agentDefinition?.providerProfile
+  // A profile owns its default model. Only an explicitly supplied model may
+  // override it; otherwise legacy teammates keep their existing resolution.
+  const model = providerProfile && !hasExplicitAgentModelOverride(input.model)
+    ? undefined
+    : resolveTeammateModel(input.model, getAppState().mainLoopModel)
+
   // Spawn in-process teammate
   const config: InProcessSpawnConfig = {
     name: sanitizedName,
@@ -957,6 +966,7 @@ async function handleSpawnInProcess(
     color: teammateColor,
     planModeRequired: plan_mode_required ?? false,
     model,
+    providerProfile,
   }
 
   const result = await spawnInProcessTeammate(config, context)
@@ -985,6 +995,7 @@ async function handleSpawnInProcess(
       prompt,
       description: input.description,
       model,
+      providerProfile,
       agentDefinition,
       teammateContext: result.teammateContext,
       // Strip messages: the teammate never reads toolUseContext.messages
@@ -1077,6 +1088,7 @@ async function handleSpawnInProcess(
       agent_id: teammateId,
       agent_type,
       model,
+      provider_profile: providerProfile,
       name: sanitizedName,
       color: teammateColor,
       tmux_session_name: 'in-process',
@@ -1100,7 +1112,12 @@ async function handleSpawn(
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
   // Check if in-process mode is enabled via feature flag
-  if (isInProcessEnabled()) {
+  if (input.provider_profile || isInProcessEnabled()) {
+    if (input.provider_profile && !isInProcessEnabled()) {
+      logForDebugging(
+        '[handleSpawn] Explicit provider_profile requires in-process execution; bypassing pane backend',
+      )
+    }
     return handleSpawnInProcess(input, context)
   }
 

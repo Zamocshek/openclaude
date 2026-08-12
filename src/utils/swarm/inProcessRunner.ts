@@ -73,7 +73,6 @@ import {
   SUBAGENT_REJECT_MESSAGE,
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
 } from '../messages.js'
-import type { ModelAlias } from '../model/aliases.js'
 import {
   applyPermissionUpdates,
   persistPermissionUpdates,
@@ -490,6 +489,8 @@ export type InProcessRunnerConfig = {
   abortController: AbortController
   /** Optional model override for this teammate */
   model?: string
+  /** Optional provider profile override for this teammate. */
+  providerProfile?: string
   /** Optional system prompt override for this teammate */
   systemPrompt?: string
   /** How to apply the system prompt: 'replace' or 'append' to default */
@@ -898,6 +899,7 @@ export async function runInProcessTeammate(
     toolUseContext,
     abortController,
     model,
+    providerProfile,
     systemPrompt,
     systemPromptMode,
     allowedTools,
@@ -1003,6 +1005,9 @@ export async function runInProcessTeammate(
     // Propagate model from custom agent definition so getAgentModel()
     // can use it as a fallback when no tool-level model is specified
     ...(agentDefinition?.model ? { model: agentDefinition.model } : {}),
+    ...(providerProfile ?? agentDefinition?.providerProfile
+      ? { providerProfile: providerProfile ?? agentDefinition?.providerProfile }
+      : {}),
   }
 
   // All messages across all prompts
@@ -1200,7 +1205,8 @@ export async function runInProcessTeammate(
             forkContextMessages,
             querySource: 'agent:custom',
             override: { abortController: currentWorkAbortController },
-            model: model as ModelAlias | undefined,
+            model,
+            providerProfile,
             preserveToolUseResults: true,
             availableTools: toolUseContext.options.tools,
             allowedTools,

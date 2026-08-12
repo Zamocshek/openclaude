@@ -713,9 +713,7 @@ function getApiGatewayAppendSystemPrompt(
     parts.push(LIFE_RPG_APPEND_SYSTEM_PROMPT)
   }
   const subagentPrompt = buildGatewaySubagentAppendPrompt(
-    hasRunnerTool('Agent') && subagentIntent
-      ? subagentRuntime
-      : undefined,
+    hasRunnerTool('Agent') ? subagentRuntime : undefined,
     config.subagents.maxParallel,
   )
   if (subagentPrompt) parts.push(subagentPrompt)
@@ -1539,9 +1537,10 @@ function runOpenClaudeAgentProcess(
     const cwd = options.cwd || options.config.runner.cwd || process.cwd()
     const childEnv = buildAgentChildEnv(process.env, cwd)
     Object.assign(childEnv, options.envOverrides || {})
-    const subagentRuntime = shouldUseGatewaySubagents(options.prompt)
-      ? prepareGatewaySubagentRuntime(options.config, childEnv)
-      : undefined
+    // Delegation is a model-decided capability available on every run. Prompt
+    // heuristics may still tune the surrounding harness, but never decide
+    // whether provider profiles and the Agent tool exist.
+    const subagentRuntime = prepareGatewaySubagentRuntime(options.config, childEnv)
     const runMcpConfig = prepareAgentRunMcpConfig({
       config: options.config,
       prompt: options.prompt,

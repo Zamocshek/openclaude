@@ -148,7 +148,7 @@ export async function resumeAgentBackground({
   }
 
   // Resolve model for analytics metadata (runAgent resolves its own internally)
-  const resolvedAgentModel = getAgentModel(
+  const resolvedAgentModel = meta?.model ?? getAgentModel(
     selectedAgent.model,
     toolUseContext.options.mainLoopModel,
     undefined,
@@ -176,7 +176,7 @@ export async function resumeAgentBackground({
       selectedAgent.agentType,
       isBuiltInAgent(selectedAgent),
     ),
-    model: undefined,
+    model: meta?.model,
     // Fork resume: pass parent's system prompt (cache-identical prefix).
     // Non-fork: undefined → runAgent recomputes under wrapWithCwd so
     // getCwd() sees resumedWorktreePath.
@@ -191,6 +191,7 @@ export async function resumeAgentBackground({
     // Re-persist so metadata survives runAgent's writeAgentMetadata overwrite
     worktreePath: resumedWorktreePath,
     description: meta?.description,
+    providerProfile: meta?.providerProfile ?? selectedAgent.providerProfile,
     contentReplacementState: resumedReplacementState,
   }
 
