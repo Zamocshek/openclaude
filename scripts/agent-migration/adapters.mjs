@@ -144,6 +144,8 @@ function prepareCapabilityRuntime(bundleRoot, output, runtimeRoot, servers, expo
     '      CAPABILITY_ROUTER_HOST: "0.0.0.0"',
     '      CAPABILITY_ROUTER_PORT: "8768"',
     '      CAPABILITY_ROUTER_API_KEY: "${CAPABILITY_ROUTER_API_KEY:?set CAPABILITY_ROUTER_API_KEY}"',
+    '      CAPABILITY_ROUTER_AUTO_SESSION: "${CAPABILITY_ROUTER_AUTO_SESSION:-1}"',
+    '      CAPABILITY_ROUTER_SESSION_TTL_MS: "${CAPABILITY_ROUTER_SESSION_TTL_MS:-43200000}"',
     '      CAPABILITY_ROUTER_WORKSPACE_ROOT: "/workspace"',
     '      CAPABILITY_ROUTER_MCP_CONFIG: "/workspace/capability-router/mcp.container.json"',
     '      CAPABILITY_ROUTER_REGISTRY: "/workspace/imports/nova-agent-bundle/capabilities/registry.json"',

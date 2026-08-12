@@ -17,7 +17,7 @@
         "scripts/mcp-router-launcher.cjs"
       ],
       "env": {
-        "MCPR_TOKEN": "${MCPR_TOKEN}"
+        "MCPR_TOKEN": "${MCPR_TOKEN:-}"
       }
     },
     "openrag": {
@@ -27,7 +27,7 @@
       ],
       "env": {
         "OPENRAG_URL": "${OPENRAG_URL}",
-        "OPENRAG_API_KEY": "${OPENRAG_API_KEY}",
+        "OPENRAG_API_KEY": "${OPENRAG_API_KEY:-}",
         "OPENRAG_MCP_TIMEOUT": "60"
       }
     },
@@ -41,8 +41,8 @@
         "CAMOFOX_MCP_USER_ID": "openclaude-agent",
         "CAMOFOX_MCP_SESSION_KEY": "default",
         "CAMOFOX_MCP_TIMEOUT": "60",
-        "CAMOFOX_ACCESS_KEY": "${CAMOFOX_ACCESS_KEY}",
-        "CAMOFOX_API_KEY": "${CAMOFOX_API_KEY}"
+        "CAMOFOX_ACCESS_KEY": "${CAMOFOX_ACCESS_KEY:-}",
+        "CAMOFOX_API_KEY": "${CAMOFOX_API_KEY:-}"
       }
     },
     "hindsight": {
@@ -54,7 +54,7 @@
         "HINDSIGHT_URL": "${HINDSIGHT_URL}",
         "HINDSIGHT_BANK_ID": "openclaude-agent",
         "HINDSIGHT_MCP_TIMEOUT": "60",
-        "HINDSIGHT_API_KEY": "${HINDSIGHT_API_KEY}"
+        "HINDSIGHT_API_KEY": "${HINDSIGHT_API_KEY:-}"
       }
     },
     "codegraph": {
@@ -89,7 +89,7 @@
         "stdio"
       ],
       "env": {
-        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY:-}"
       }
     },
     "qwen-mm-core": {

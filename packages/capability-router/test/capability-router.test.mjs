@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
@@ -11,8 +12,16 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
 import { CapabilityRouter } from '../src/core.mjs'
+import { buildUi } from '../src/ui.mjs'
 
 const fakeServer = resolve(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'fake-mcp.mjs')
+
+test('web control center emits syntactically valid browser JavaScript', () => {
+  const html = buildUi()
+  const script = html.match(/<script>([\s\S]*?)<\/script>/u)?.[1]
+  assert.ok(script)
+  assert.doesNotThrow(() => new Function(script))
+})
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'capability-router-'))
@@ -114,6 +123,41 @@ test('shares concurrent MCP connection attempts', async t => {
   assert.equal(router.snapshot().servers[0].connected, true)
 })
 
+test('distinguishes required and explicitly optional environment references', async t => {
+  const root = fixture()
+  writeFileSync(join(root, '.mcp.json'), JSON.stringify({
+    mcpServers: {
+      optional: {
+        command: process.execPath,
+        args: [fakeServer],
+        env: { OPTIONAL_API_KEY: '${OPTIONAL_API_KEY:-}' },
+      },
+      required: {
+        command: process.execPath,
+        args: [fakeServer],
+        env: { REQUIRED_API_KEY: '${REQUIRED_API_KEY}' },
+      },
+    },
+  }))
+  const router = new CapabilityRouter({
+    workspaceRoot: root,
+    registryPath: join(root, 'capability-registry.json'),
+    mcpConfigPath: join(root, '.mcp.json'),
+    statePath: join(root, 'state', 'state.json'),
+    environment: {},
+  })
+  t.after(async () => {
+    await router.shutdown()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const servers = new Map(router.snapshot().servers.map(server => [server.name, server]))
+  assert.deepEqual(servers.get('optional').requiredEnvironment, [])
+  assert.deepEqual(servers.get('required').requiredEnvironment, ['REQUIRED_API_KEY'])
+  assert.equal((await router.listServerTools('optional')).length, 2)
+  await assert.rejects(router.listServerTools('required'), /requires environment: REQUIRED_API_KEY/u)
+})
+
 test('keeps imported capabilities portable and scopes skills/files to their stores', async t => {
   const root = fixture()
   const router = new CapabilityRouter({
@@ -209,6 +253,8 @@ test('web control center exposes health, state, and authenticated Streamable HTT
       CAPABILITY_ROUTER_HOST: '127.0.0.1',
       CAPABILITY_ROUTER_PORT: String(port),
       CAPABILITY_ROUTER_API_KEY: apiKey,
+      CAPABILITY_ROUTER_AUTO_SESSION: '1',
+      CAPABILITY_ROUTER_SESSION_TTL_MS: '60000',
       CAPABILITY_ROUTER_WORKSPACE_ROOT: root,
       CAPABILITY_ROUTER_MCP_CONFIG: join(root, '.mcp.json'),
       CAPABILITY_ROUTER_REGISTRY: join(root, 'capability-registry.json'),
@@ -239,8 +285,35 @@ test('web control center exposes health, state, and authenticated Streamable HTT
     await new Promise(resolveWait => setTimeout(resolveWait, 100))
   }
   assert.equal(healthy, true)
+  assert.equal((await fetch(`${base}/favicon.ico`)).status, 204)
   assert.equal((await fetch(`${base}/api/state`)).status, 401)
   assert.equal((await fetch(`${base}/api/state?key=${apiKey}`)).status, 401)
+  const consoleResponse = await fetch(base)
+  assert.equal(consoleResponse.status, 200)
+  assert.match(consoleResponse.headers.get('content-security-policy') || '', /frame-ancestors 'none'/u)
+  const consoleCookie = (consoleResponse.headers.get('set-cookie') || '').split(';')[0]
+  assert.match(consoleCookie, /^capability_router_session=/u)
+  const consoleStateResponse = await fetch(`${base}/api/state`, {
+    headers: { cookie: consoleCookie },
+  })
+  assert.equal(consoleStateResponse.status, 200)
+  assert.equal((await consoleStateResponse.json()).servers.length, 1)
+  const foreignHostStatus = await new Promise((resolveStatus, rejectRequest) => {
+    const request = httpRequest(`${base}/api/state`, {
+      headers: { cookie: consoleCookie, host: 'router.example' },
+    }, response => {
+      response.resume()
+      resolveStatus(response.statusCode)
+    })
+    request.once('error', rejectRequest)
+    request.end()
+  })
+  assert.equal(foreignHostStatus, 401)
+  assert.equal((await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: { cookie: consoleCookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  })).status, 401)
   const stateResponse = await fetch(`${base}/api/state`, { headers: { authorization: `Bearer ${apiKey}` } })
   assert.equal(stateResponse.status, 200)
   assert.equal((await stateResponse.json()).servers.length, 1)

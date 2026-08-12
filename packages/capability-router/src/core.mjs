@@ -25,7 +25,8 @@ const DEFAULT_STATE = {
 }
 
 const SECRET_KEY_RE = /(?:api[_-]?key|token|secret|password|authorization|cookie|private[_-]?key)/iu
-const ENV_REFERENCE_RE = /^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$/u
+const ENV_REFERENCE_RE = /^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)(:-)?\}$/u
+const ENV_REFERENCE_GLOBAL_RE = /\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)(:-)?\}/gu
 const ROUTING_STOP_WORDS = new Set([
   'and', 'are', 'for', 'from', 'into', 'its', 'the', 'this', 'that', 'use', 'using', 'with',
   'или', 'для', 'как', 'это', 'этот', 'эта', 'эти', 'из', 'на', 'по', 'при', 'с', 'со', 'и', 'в', 'во',
@@ -106,7 +107,9 @@ function envReferences(value, output = new Set()) {
   } else if (value && typeof value === 'object') {
     for (const item of Object.values(value)) envReferences(item, output)
   } else if (typeof value === 'string') {
-    for (const match of value.matchAll(/\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}/gu)) output.add(match[1])
+    for (const match of value.matchAll(ENV_REFERENCE_GLOBAL_RE)) {
+      if (!match[2]) output.add(match[1])
+    }
   }
   return output
 }
@@ -117,9 +120,10 @@ function expandEnvironment(value, environment, missing) {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expandEnvironment(item, environment, missing)]))
   }
   if (typeof value !== 'string') return value
-  return value.replace(/\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}/gu, (match, name) => {
+  return value.replace(ENV_REFERENCE_GLOBAL_RE, (match, name, optional) => {
     const resolved = environment[name]
     if (resolved === undefined || resolved === '') {
+      if (optional) return ''
       missing.add(name)
       return match
     }
@@ -173,7 +177,7 @@ function assertPortableSecrets(server) {
     for (const [key, value] of Object.entries(values || {})) {
       if (!SECRET_KEY_RE.test(key) || typeof value !== 'string' || !value.trim()) continue
       const exactReference = ENV_REFERENCE_RE.test(value.trim())
-      const embeddedReference = /\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}/u.test(value)
+      const embeddedReference = /\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*(?::-)?\}/u.test(value)
       if (!exactReference && !embeddedReference) {
         throw new Error(`${server.name}.${scope}.${key} must use an environment reference such as \${${key}}`)
       }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -13,6 +14,13 @@ const host = process.env.CAPABILITY_ROUTER_HOST || '127.0.0.1'
 const port = Number(process.env.CAPABILITY_ROUTER_PORT || 8768)
 const apiKey = process.env.CAPABILITY_ROUTER_API_KEY || ''
 const maxBodyBytes = Number(process.env.CAPABILITY_ROUTER_MAX_BODY_BYTES || 268_435_456)
+const autoSession = /^(?:1|true|yes|on)$/iu.test(process.env.CAPABILITY_ROUTER_AUTO_SESSION || '')
+const configuredSessionTtlMs = Number(process.env.CAPABILITY_ROUTER_SESSION_TTL_MS || 43_200_000)
+const sessionTtlMs = Number.isFinite(configuredSessionTtlMs) && configuredSessionTtlMs >= 60_000
+  ? configuredSessionTtlMs
+  : 43_200_000
+const consoleSessions = new Map()
+const consoleCookieName = 'capability_router_session'
 
 if (!['127.0.0.1', 'localhost', '::1'].includes(host) && !apiKey) {
   throw new Error('CAPABILITY_ROUTER_API_KEY is required when binding outside loopback')
@@ -28,17 +36,71 @@ function sendJson(response, status, value) {
   response.end(body)
 }
 
-function sendText(response, status, value, contentType = 'text/plain; charset=utf-8') {
+function sendText(response, status, value, contentType = 'text/plain; charset=utf-8', headers = {}) {
   const body = Buffer.from(String(value))
-  response.writeHead(status, { 'content-type': contentType, 'content-length': body.length, 'cache-control': 'no-store' })
+  response.writeHead(status, {
+    'content-type': contentType,
+    'content-length': body.length,
+    'cache-control': 'no-store',
+    ...headers,
+  })
   response.end(body)
 }
 
-function authorized(request) {
+function requestHostname(request) {
+  const rawHost = String(request.headers.host || '').trim()
+  try {
+    return new URL(`http://${rawHost}`).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+function isLoopbackConsoleRequest(request) {
+  return autoSession && ['127.0.0.1', 'localhost', '::1'].includes(requestHostname(request))
+}
+
+function pruneConsoleSessions(now = Date.now()) {
+  for (const [token, expiresAt] of consoleSessions) {
+    if (expiresAt <= now) consoleSessions.delete(token)
+  }
+}
+
+function issueConsoleSession() {
+  const now = Date.now()
+  pruneConsoleSessions(now)
+  const token = randomBytes(32).toString('base64url')
+  consoleSessions.set(token, now + sessionTtlMs)
+  return `${consoleCookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(sessionTtlMs / 1000)}`
+}
+
+function requestCookie(request, name) {
+  for (const part of String(request.headers.cookie || '').split(';')) {
+    const separator = part.indexOf('=')
+    if (separator < 0) continue
+    if (part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim()
+  }
+  return ''
+}
+
+function hasConsoleSession(request) {
+  if (!isLoopbackConsoleRequest(request)) return false
+  const token = requestCookie(request, consoleCookieName)
+  if (!token) return false
+  const expiresAt = consoleSessions.get(token)
+  if (!expiresAt || expiresAt <= Date.now()) {
+    consoleSessions.delete(token)
+    return false
+  }
+  return true
+}
+
+function authorized(request, { allowConsoleSession = false } = {}) {
   if (!apiKey) return true
   const authorization = request.headers.authorization || ''
   return authorization === `Bearer ${apiKey}`
     || request.headers['x-capability-router-key'] === apiKey
+    || (allowConsoleSession && hasConsoleSession(request))
 }
 
 async function bodyBuffer(request, limit = maxBodyBytes) {
@@ -88,14 +150,27 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || `${host}:${port}`}`)
   try {
     if (url.pathname === '/' && request.method === 'GET') {
-      sendText(response, 200, buildUi(), 'text/html; charset=utf-8')
+      const localConsole = isLoopbackConsoleRequest(request)
+      sendText(response, 200, buildUi(), 'text/html; charset=utf-8', {
+        ...(localConsole ? { 'set-cookie': issueConsoleSession() } : {}),
+        'content-security-policy': "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        'x-content-type-options': 'nosniff',
+        'x-frame-options': 'DENY',
+        'referrer-policy': 'no-referrer',
+      })
+      return
+    }
+    if (url.pathname === '/favicon.ico' && request.method === 'GET') {
+      response.writeHead(204, { 'cache-control': 'public, max-age=86400' })
+      response.end()
       return
     }
     if (url.pathname === '/health' && request.method === 'GET') {
       sendJson(response, 200, { ok: true, service: 'capability-router', version: '1.0.0' })
       return
     }
-    if ((url.pathname.startsWith('/api/') || url.pathname === '/mcp') && !authorized(request)) {
+    const apiRequest = url.pathname.startsWith('/api/')
+    if ((apiRequest || url.pathname === '/mcp') && !authorized(request, { allowConsoleSession: apiRequest })) {
       sendJson(response, 401, { error: 'Unauthorized' })
       return
     }

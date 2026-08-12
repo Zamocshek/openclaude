@@ -49,6 +49,16 @@ The dark web interface manages MCP servers, skills, routing, uploads, and
 downloads. Loopback binding needs no key. A non-loopback bind is rejected unless
 `CAPABILITY_ROUTER_API_KEY` is set.
 
+Docker and reverse-proxy deployments can keep that API key while enabling
+`CAPABILITY_ROUTER_AUTO_SESSION=1`. Opening the UI through literal `localhost`,
+`127.0.0.1`, or `::1` then issues a short-lived `HttpOnly`, `SameSite=Strict`
+browser cookie. Public hostnames and the `/mcp` endpoint still require the
+Bearer key. Configure the lifetime with `CAPABILITY_ROUTER_SESSION_TTL_MS`.
+
+Environment references use `${NAME}` for required values and `${NAME:-}` for
+optional credentials. Missing required values fail before a server starts;
+optional values stay compatible with public or local no-key modes.
+
 The package is deliberately self-contained: its registry, MCP JSON, skill
 directories, state file, and workspace root are all explicit environment
 inputs. A migration bundle can therefore copy this directory into Hermes,
