@@ -48,6 +48,10 @@ import {
 import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
 import { hasVisionInputReference } from './vision.js'
 import {
+  inspectImagesWithLocalQwen,
+  isLocalQwenMmEnabled,
+} from './qwenMmVision.js'
+import {
   createAgentInteraction,
   extractAgentInteractionEnvelopes,
   getAgentInteractionKey,
@@ -1452,8 +1456,33 @@ async function runScheduledOpenClaudeAgent(
   const startedAt = Date.now()
   let evidence = ''
   let visionResult: AgentRunResult | undefined
+  const localVisionActivity: string[] = []
+  const effectiveServers = readPreparedMcpServerNames(
+    resolveEffectiveMcpConfigPath(cwd),
+  )
+  const localQwenRouted = isLocalQwenMmEnabled()
+    && effectiveServers.has('qwen-mm-local')
 
-  if (route && routeEnv) {
+  if (localQwenRouted) {
+    routedOptions.onProgress?.('vision preflight: inspecting image with local qwen-mm')
+    try {
+      evidence = await inspectImagesWithLocalQwen({
+        imagePaths,
+        prompt: sanitizeVisualPrompt(extractCurrentUserRequest(routedOptions.prompt)),
+        signal: routedOptions.signal,
+      })
+      localVisionActivity.push('local qwen-mm: visual evidence ready')
+      routedOptions.onProgress?.('vision preflight: local qwen-mm evidence ready')
+    } catch (error) {
+      const failure = redactAgentText(
+        error instanceof Error ? error.message : String(error),
+      ).slice(0, 1200)
+      localVisionActivity.push(`local qwen-mm fallback: ${failure}`)
+      routedOptions.onProgress?.('vision preflight: local qwen-mm unavailable; trying configured fallback')
+    }
+  }
+
+  if (!evidence && route && routeEnv) {
     routedOptions.onProgress?.('vision preflight: inspecting image with gateway-vision')
     visionResult = await runOpenClaudeAgentProcess({
       prompt: buildGatewayVisionPrompt(routedOptions.prompt, imagePaths),
@@ -1477,7 +1506,7 @@ async function runScheduledOpenClaudeAgent(
       evidence = `Vision inspection was unavailable: ${redactAgentText(failure).slice(0, 1200)}`
       routedOptions.onProgress?.('vision preflight: unavailable; continuing with an explicit limitation')
     }
-  } else {
+  } else if (!evidence) {
     evidence = 'Vision inspection was unavailable because gateway-vision is not configured or has no usable credential.'
     routedOptions.onProgress?.('vision preflight: gateway-vision unavailable')
   }
@@ -1494,7 +1523,7 @@ async function runScheduledOpenClaudeAgent(
     ...(visionResult?.costUsd || result.costUsd
       ? { costUsd: (visionResult?.costUsd || 0) + (result.costUsd || 0) }
       : {}),
-    activity: [...visionActivity, ...(result.activity || [])],
+    activity: [...localVisionActivity, ...visionActivity, ...(result.activity || [])],
     ...(taskRoute ? { taskRoute } : {}),
   }
 }

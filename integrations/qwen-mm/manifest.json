@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "qwen-mm-local",
+  "name": "Qwen-MM Local Vision",
+  "license": "Apache-2.0",
+  "upstream": {
+    "repository": "https://github.com/QwenLM/Qwen-MM-Plugins",
+    "revision": "8d6ea5a1f658260743307c52c2024ec87599fa48"
+  },
+  "runtime": {
+    "provider": "ollama",
+    "model": "qwen3-vl:2b-instruct",
+    "baseUrlEnv": "QWEN_MM_BASE_URL",
+    "dockerBaseUrl": "http://openclaude-ollama:11434/v1",
+    "hostBaseUrl": "http://127.0.0.1:11434/v1"
+  },
+  "mcpServers": ["qwen-mm-core", "qwen-mm-local"],
+  "portableTargets": ["openclaude", "hermes", "opencode", "openclaw", "codex"]
+}

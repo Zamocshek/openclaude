@@ -49,6 +49,16 @@ describe('task-aware MCP routing', () => {
     expect(route.servers.has('openrag')).toBe(false)
   })
 
+  test('routes visual work to local Qwen-MM without unrelated tools', () => {
+    const route = selectMcpServersForPrompt(
+      'Current request:\nПрочитай текст на изображении local_path: /workspace/photo.png',
+      { codingIntent: false },
+    )
+
+    expect([...route.servers].sort()).toEqual(['qwen-mm-core', 'qwen-mm-local'])
+    expect(route.reasons).toContain('multimodal')
+  })
+
   test('supports an explicit all-tools escape hatch', () => {
     const route = selectMcpServersForPrompt(
       'Use all MCP tools for this task',

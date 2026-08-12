@@ -85,6 +85,7 @@ import {
   parseMcpConfigImport,
   removeManagedMcpServer,
   setManagedMcpServerEnabled,
+  setManagedMcpServerGroupEnabled,
   type ManagedMcpServer,
 } from './mcpRegistry.js'
 import {
@@ -533,6 +534,8 @@ const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
   },
 ]
 
+const QWEN_MM_SERVER_NAMES = ['qwen-mm-core', 'qwen-mm-local'] as const
+
 const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
   {
     title: 'Basics',
@@ -555,6 +558,7 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/mcp enable <name>', description: 'enable an MCP server' },
       { syntax: '/mcp disable <name>', description: 'disable an MCP server' },
       { syntax: '/mcp remove <name>', description: 'remove an MCP server' },
+      { syntax: '/qwenmm [on|off|status]', description: 'control local Qwen-MM vision', botDescription: 'Control local Qwen-MM vision' },
     ],
   },
   {
@@ -1755,6 +1759,11 @@ export class TelegramAgentBridge {
       return
     }
 
+    if (commandText === '/qwenmm' || commandText.startsWith('/qwenmm ')) {
+      await this.handleQwenMmCommand(chatId, getTelegramCommandBody(text, 'qwenmm'))
+      return
+    }
+
     if (commandText === '/android' || commandText.startsWith('/android ')) {
       await this.handleAndroidCommand(
         chatId,
@@ -2450,6 +2459,51 @@ export class TelegramAgentBridge {
       formatTelegramMcpMenu(servers),
       buildTelegramMcpKeyboard(servers),
     )
+  }
+
+  private async sendQwenMmMenu(chatId: string): Promise<void> {
+    const servers = await listManagedMcpServers(this.mcpProjectRoot())
+    await this.sendMessageWithKeyboard(
+      chatId,
+      formatTelegramQwenMmMenu(servers),
+      buildTelegramQwenMmKeyboard(servers),
+    )
+  }
+
+  private async editQwenMmMenu(query: TelegramCallbackQuery): Promise<void> {
+    const servers = await listManagedMcpServers(this.mcpProjectRoot())
+    await this.editCallbackMessage(
+      query,
+      formatTelegramQwenMmMenu(servers),
+      buildTelegramQwenMmKeyboard(servers),
+    )
+  }
+
+  private async handleQwenMmCommand(chatId: string, commandBody: string): Promise<void> {
+    const action = commandBody.trim().toLowerCase()
+    if (!action || ['status', 'show', 'list'].includes(action)) {
+      await this.sendQwenMmMenu(chatId)
+      return
+    }
+    if (['on', 'enable', 'start'].includes(action)) {
+      await setManagedMcpServerGroupEnabled(
+        this.mcpProjectRoot(),
+        QWEN_MM_SERVER_NAMES,
+        true,
+      )
+      await this.sendQwenMmMenu(chatId)
+      return
+    }
+    if (['off', 'disable', 'stop'].includes(action)) {
+      await setManagedMcpServerGroupEnabled(
+        this.mcpProjectRoot(),
+        QWEN_MM_SERVER_NAMES,
+        false,
+      )
+      await this.sendQwenMmMenu(chatId)
+      return
+    }
+    await this.sendMessage(chatId, 'Usage: /qwenmm [on|off|status]')
   }
 
   private async handleMcpImport(
@@ -4278,6 +4332,24 @@ export class TelegramAgentBridge {
 
       if (data === 'menu:mcp') {
         await this.editMcpMenu(query)
+        return
+      }
+
+      if (data === 'menu:qwenmm') {
+        await this.editQwenMmMenu(query)
+        return
+      }
+
+      const qwenMmAction = data.match(/^qwenmm:(on|off|status)$/u)
+      if (qwenMmAction) {
+        if (qwenMmAction[1] !== 'status') {
+          await setManagedMcpServerGroupEnabled(
+            this.mcpProjectRoot(),
+            QWEN_MM_SERVER_NAMES,
+            qwenMmAction[1] === 'on',
+          )
+        }
+        await this.editQwenMmMenu(query)
         return
       }
 
@@ -6113,6 +6185,7 @@ export function buildTelegramControlKeyboard(): TelegramInlineKeyboard {
       { text: 'Android devices', callback_data: 'menu:android' },
       { text: 'Subagents', callback_data: 'menu:subagents' },
     ],
+    [{ text: 'Qwen-MM vision', callback_data: 'menu:qwenmm' }],
     [
       { text: 'Schedules', callback_data: 'menu:schedule' },
       { text: 'Memory', callback_data: 'menu:memory' },
@@ -6353,6 +6426,62 @@ export function buildTelegramMcpKeyboard(
   ])
   rows.push([{ text: 'Control panel', callback_data: 'menu:control' }])
   return rows
+}
+
+function getTelegramQwenMmServers(
+  servers: ManagedMcpServer[],
+): ManagedMcpServer[] {
+  return QWEN_MM_SERVER_NAMES
+    .map(name => servers.find(server => server.name === name))
+    .filter((server): server is ManagedMcpServer => Boolean(server))
+}
+
+export function formatTelegramQwenMmMenu(
+  servers: ManagedMcpServer[],
+): string {
+  const qwenServers = getTelegramQwenMmServers(servers)
+  const enabled = qwenServers.filter(server => server.enabled).length
+  const state = qwenServers.length !== QWEN_MM_SERVER_NAMES.length
+    ? 'UNAVAILABLE'
+    : enabled === qwenServers.length
+      ? 'ON'
+      : enabled === 0
+        ? 'OFF'
+        : 'PARTIAL'
+  return [
+    'Qwen-MM local multimodal layer',
+    `State: ${state}`,
+    'Provider: Ollama (local only)',
+    'Model: qwen3-vl:2b-instruct',
+    'Cloud API cost: none',
+    '',
+    ...QWEN_MM_SERVER_NAMES.map(name => {
+      const server = qwenServers.find(item => item.name === name)
+      return `${server?.enabled ? 'ON' : 'OFF'} ${name}`
+    }),
+    '',
+    'Tools are selected lazily for images, video, OCR, grounding, crops, and visual artifacts.',
+    'Changes apply to the next agent run.',
+  ].join('\n')
+}
+
+export function buildTelegramQwenMmKeyboard(
+  servers: ManagedMcpServer[],
+): TelegramInlineKeyboard {
+  const qwenServers = getTelegramQwenMmServers(servers)
+  const allEnabled = qwenServers.length === QWEN_MM_SERVER_NAMES.length
+    && qwenServers.every(server => server.enabled)
+  return [
+    [{
+      text: allEnabled ? 'Disable Qwen-MM' : 'Enable Qwen-MM',
+      callback_data: allEnabled ? 'qwenmm:off' : 'qwenmm:on',
+    }],
+    [
+      { text: 'Refresh', callback_data: 'qwenmm:status' },
+      { text: 'MCP servers', callback_data: 'menu:mcp' },
+    ],
+    [{ text: 'Control panel', callback_data: 'menu:control' }],
+  ]
 }
 
 function formatTelegramMcpServer(server: ManagedMcpServer): string {

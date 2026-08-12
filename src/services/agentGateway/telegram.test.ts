@@ -14,6 +14,7 @@ import {
   buildTelegramAndroidKeyboard,
   buildTelegramAudioAgentText,
   buildTelegramMcpKeyboard,
+  buildTelegramQwenMmKeyboard,
   buildTelegramModelKeyboard,
   buildTelegramProviderKeyboard,
   buildTelegramProviderProfileUpdate,
@@ -31,6 +32,7 @@ import {
   formatTelegramQueueNotice,
   formatTelegramAndroidMenu,
   formatTelegramMcpMenu,
+  formatTelegramQwenMmMenu,
   formatTelegramSkillDetails,
   formatTelegramSkillStoreMenu,
   formatTelegramConversationTranscript,
@@ -121,6 +123,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/panel|control - button control panel')
     expect(help).toContain('/newchat - reset chat context; keep durable memory')
     expect(help).toContain('/mcp add <json> - import mcpServers JSON')
+    expect(help).toContain('/qwenmm [on|off|status] - control local Qwen-MM vision')
     expect(help).toContain('/android - manage Android devices')
     expect(help).toContain('/skills - browse the Skill Store')
     expect(help).toContain('/skill create <json> - create a persistent SKILL.md')
@@ -242,6 +245,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(controlActions).toContain('menu:providers')
     expect(controlActions).toContain('menu:mcp')
     expect(controlActions).toContain('menu:android')
+    expect(controlActions).toContain('menu:qwenmm')
     expect(controlActions).toContain('menu:skills')
     expect(controlActions).toContain('menu:runtime')
     expect(controlActions).toContain('menu:schedule')
@@ -265,6 +269,15 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(runtimeActions).toContain('runtime:evolution')
     expect(runtimeActions).toContain('runtime:wake')
     expect(runtimeActions).toContain('runtime:restart')
+
+    const qwenServers = [
+      { ...servers[0]!, name: 'qwen-mm-core', origin: 'base' as const },
+      { ...servers[0]!, name: 'qwen-mm-local', origin: 'base' as const },
+    ]
+    expect(formatTelegramQwenMmMenu(qwenServers)).toContain('State: ON')
+    expect(formatTelegramQwenMmMenu(qwenServers)).toContain('Cloud API cost: none')
+    expect(buildTelegramQwenMmKeyboard(qwenServers).flat()
+      .map(button => button.callback_data)).toContain('qwenmm:off')
   })
 
   test('builds Android device menus with active and discovered devices', () => {

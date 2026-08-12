@@ -29,6 +29,8 @@ services:
         condition: service_healthy
       capability-router:
         condition: service_healthy
+      qwen-mm-bootstrap:
+        condition: service_completed_successfully
     environment:
       # Keep enough heap for large contexts while bounding each Node runtime so
       # concurrent MCP/native allocations cannot exhaust the Docker VM.
@@ -121,6 +123,10 @@ services:
       GITHUB_MCP_PAT: "${GITHUB_MCP_PAT:-}"
       OPENCLAUDE_AGENT_SEMANTIC_ROUTING: "${OPENCLAUDE_AGENT_SEMANTIC_ROUTING:-1}"
       OPENCLAUDE_AGENT_SEMANTIC_ROUTER_TIMEOUT_MS: "${OPENCLAUDE_AGENT_SEMANTIC_ROUTER_TIMEOUT_MS:-20000}"
+      OPENCLAUDE_QWEN_MM_ENABLED: "${OPENCLAUDE_QWEN_MM_ENABLED:-1}"
+      QWEN_MM_BASE_URL: "${QWEN_MM_BASE_URL:-http://openclaude-ollama:11434/v1}"
+      QWEN_MM_MODEL: "${QWEN_MM_MODEL:-qwen3-vl:2b-instruct}"
+      QWEN_MM_TIMEOUT_MS: "${QWEN_MM_TIMEOUT_MS:-300000}"
       CAPABILITY_ROUTER_WORKSPACE_ROOT: "/workspace"
       CAPABILITY_ROUTER_MCP_CONFIG: "/workspace/.mcp.json"
       CAPABILITY_ROUTER_REGISTRY: "/workspace/capability-registry.json"
@@ -284,6 +290,8 @@ services:
     user: "0:0"
     privileged: true
     depends_on:
+      qwen-mm-bootstrap:
+        condition: service_completed_successfully
       searxng:
         condition: service_healthy
       telegram-mcp:
@@ -345,6 +353,10 @@ services:
       GITHUB_MCP_PAT: "${GITHUB_MCP_PAT:-}"
       OPENCLAUDE_AGENT_SEMANTIC_ROUTING: "${OPENCLAUDE_AGENT_SEMANTIC_ROUTING:-1}"
       OPENCLAUDE_AGENT_SEMANTIC_ROUTER_TIMEOUT_MS: "${OPENCLAUDE_AGENT_SEMANTIC_ROUTER_TIMEOUT_MS:-20000}"
+      OPENCLAUDE_QWEN_MM_ENABLED: "${OPENCLAUDE_QWEN_MM_ENABLED:-1}"
+      QWEN_MM_BASE_URL: "${QWEN_MM_BASE_URL:-http://openclaude-ollama:11434/v1}"
+      QWEN_MM_MODEL: "${QWEN_MM_MODEL:-qwen3-vl:2b-instruct}"
+      QWEN_MM_TIMEOUT_MS: "${QWEN_MM_TIMEOUT_MS:-300000}"
       PENTEST_STATE_DIR: "${PENTEST_STATE_DIR:-/workspace/.openclaude-data/pentest}"
       PENTEST_GATEWAY_AUTH_TOKEN: "${PENTEST_GATEWAY_AUTH_TOKEN:-}"
       OPENCLAUDE_CONTEXT_WINDOW_TOKENS: "${OPENCLAUDE_CONTEXT_WINDOW_TOKENS:-${OPENCLAUDE_MAX_CONTEXT_TOKENS:-}}"
@@ -466,6 +478,8 @@ services:
     user: "0:0"
     privileged: true
     depends_on:
+      qwen-mm-bootstrap:
+        condition: service_completed_successfully
       searxng:
         condition: service_healthy
       telegram-mcp:
@@ -527,6 +541,10 @@ services:
       GITHUB_MCP_PAT: "${GITHUB_MCP_PAT:-}"
       OPENCLAUDE_AGENT_SEMANTIC_ROUTING: "${OPENCLAUDE_AGENT_SEMANTIC_ROUTING:-1}"
       OPENCLAUDE_AGENT_SEMANTIC_ROUTER_TIMEOUT_MS: "${OPENCLAUDE_AGENT_SEMANTIC_ROUTER_TIMEOUT_MS:-20000}"
+      OPENCLAUDE_QWEN_MM_ENABLED: "${OPENCLAUDE_QWEN_MM_ENABLED:-1}"
+      QWEN_MM_BASE_URL: "${QWEN_MM_BASE_URL:-http://openclaude-ollama:11434/v1}"
+      QWEN_MM_MODEL: "${QWEN_MM_MODEL:-qwen3-vl:2b-instruct}"
+      QWEN_MM_TIMEOUT_MS: "${QWEN_MM_TIMEOUT_MS:-300000}"
       PENTEST_STATE_DIR: "${PENTEST_STATE_DIR:-/workspace/.openclaude-data/pentest}"
       PENTEST_GATEWAY_AUTH_TOKEN: "${PENTEST_GATEWAY_AUTH_TOKEN:-}"
       OPENCLAUDE_CONTEXT_WINDOW_TOKENS: "${OPENCLAUDE_CONTEXT_WINDOW_TOKENS:-${OPENCLAUDE_MAX_CONTEXT_TOKENS:-}}"
@@ -857,6 +875,19 @@ services:
       - "${OPENCLAUDE_OPEN_WEBUI_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_OPEN_WEBUI_HOST_PORT:-8080}:8080"
     volumes:
       - open-webui:/app/backend/data
+
+  qwen-mm-bootstrap:
+    image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee
+    restart: "no"
+    logging: *default-logging
+    depends_on:
+      openclaude-ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://openclaude-ollama:11434"
+      QWEN_MM_MODEL: "${QWEN_MM_MODEL:-qwen3-vl:2b-instruct}"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ['ollama pull "$${QWEN_MM_MODEL}"']
 
   openclaude-ollama:
     image: ollama/ollama:latest@sha256:bfc9c6d53cc6989aa5131a6fde6b162b2802d4d337657f3253b5f69579bddeee

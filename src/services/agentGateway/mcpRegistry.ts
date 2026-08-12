@@ -335,22 +335,40 @@ export async function setManagedMcpServerEnabled(
   name: string,
   enabled: boolean,
 ): Promise<ManagedMcpServer[]> {
+  return setManagedMcpServerGroupEnabled(projectRoot, [name], enabled)
+}
+
+export async function setManagedMcpServerGroupEnabled(
+  projectRoot: string,
+  names: readonly string[],
+  enabled: boolean,
+): Promise<ManagedMcpServer[]> {
   return withRegistryLock(async () => {
     const paths = statePaths(projectRoot)
     const base = await loadBaseConfig(paths.root)
     const state = await loadState(paths.root)
-    const existing = state.servers[name]
-    const baseConfig = base.mcpServers[name]
-    if (!existing && !baseConfig) throw new McpRegistryError(`MCP server not found: ${name}`)
+    const uniqueNames = [...new Set(names)]
+    if (uniqueNames.length === 0) {
+      throw new McpRegistryError('At least one MCP server name is required')
+    }
+    for (const name of uniqueNames) {
+      if (!state.servers[name] && !base.mcpServers[name]) {
+        throw new McpRegistryError(`MCP server not found: ${name}`)
+      }
+    }
 
-    if (existing) {
-      if (existing.origin === 'base' && enabled) delete state.servers[name]
-      else existing.enabled = enabled
-    } else if (!enabled && baseConfig) {
-      state.servers[name] = {
-        enabled: false,
-        origin: 'base',
-        config: baseConfig,
+    for (const name of uniqueNames) {
+      const existing = state.servers[name]
+      const baseConfig = base.mcpServers[name]
+      if (existing) {
+        if (existing.origin === 'base' && enabled) delete state.servers[name]
+        else existing.enabled = enabled
+      } else if (!enabled && baseConfig) {
+        state.servers[name] = {
+          enabled: false,
+          origin: 'base',
+          config: baseConfig,
+        }
       }
     }
     await writeJsonAtomic(paths.statePath, state)

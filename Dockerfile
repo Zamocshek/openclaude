@@ -78,7 +78,9 @@ RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
     && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
     && ln -sf /root/.local/bin/uvx /usr/local/bin/uvx \
     && uv python install 3.13 \
-    && uv tool install --python 3.13 "android-mcp==0.2.0"
+    && uv tool install --python 3.13 "android-mcp==0.2.0" \
+    && uv tool install --python 3.13 \
+      "qwen-mm-plugins[core,api] @ git+https://github.com/QwenLM/Qwen-MM-Plugins.git@8d6ea5a1f658260743307c52c2024ec87599fa48"
 
 # Copy only what's needed to run
 COPY --from=build /app/dist/cli.mjs dist/cli.mjs
@@ -106,6 +108,7 @@ COPY scripts/pentest-mcp.cjs scripts/pentest-mcp.cjs
 # changes do not trigger a fresh apt install during every Docker rebuild.
 COPY scripts/gateway-control-mcp.mjs scripts/gateway-control-mcp.mjs
 COPY scripts/android-mcp-launcher.cjs scripts/android-mcp-launcher.cjs
+COPY scripts/qwen-mm-launcher.cjs scripts/qwen-mm-launcher.cjs
 COPY scripts/register-artifact.mjs scripts/register-artifact.mjs
 
 COPY scripts/release/test-research-mcp.cjs scripts/release/test-research-mcp.cjs
@@ -117,6 +120,7 @@ COPY scripts/release/ssh-access.sh scripts/release/ssh-access.sh
 COPY scripts/release/vps-ssh-bootstrap.sh scripts/release/vps-ssh-bootstrap.sh
 COPY scripts/agent-migration/ scripts/agent-migration/
 COPY integrations/local-transcription/ integrations/local-transcription/
+COPY integrations/qwen-mm/ integrations/qwen-mm/
 COPY capability-registry.json capability-registry.json
 COPY packages/capability-router/ packages/capability-router/
 COPY skills/agent-migration/ skills/agent-migration/
@@ -130,6 +134,8 @@ RUN chmod +x scripts/docker-entrypoint.sh \
     && chmod +x scripts/release/vps-ssh-bootstrap.sh \
     && chmod +x scripts/agent-migration/cli.mjs \
     && chmod +x integrations/local-transcription/transcribe.py \
+    && chmod +x integrations/qwen-mm/local_server.py \
+    && chmod +x scripts/qwen-mm-launcher.cjs \
     && ln -sf /app/scripts/release/ssh-doctor.mjs /usr/local/bin/openclaude-ssh-doctor \
     && ln -sf /app/scripts/release/ssh-access.sh /usr/local/bin/openclaude-ssh \
     && ln -sf /app/scripts/agent-migration/cli.mjs /usr/local/bin/openclaude-migrate \

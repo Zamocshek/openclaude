@@ -7,7 +7,8 @@
     ".claude/skills",
     ".codex/skills",
     "integrations/telegram-mcp/skills",
-    "integrations/telegram-mcp/maton skills for telegram"
+    "integrations/telegram-mcp/maton skills for telegram",
+    "integrations/qwen-mm/skills"
   ],
   "servers": {
     "mcp-router": {
@@ -44,6 +45,18 @@
       "description": "Version-aware official library and framework documentation retrieval.",
       "tags": ["documentation", "library", "framework", "sdk", "api", "coding"],
       "intents": ["read documentation", "use library api", "verify framework version", "write code"]
+    },
+    "qwen-mm-core": {
+      "description": "Local Qwen-MM media preparation, video frames, crops, visualizations, and annotated artifacts.",
+      "tags": ["multimodal", "vision", "image", "video", "local", "media"],
+      "intents": ["inspect image", "inspect video", "extract frames", "crop image", "visualize media"],
+      "allowedTools": ["read_image", "media_info", "read_video", "visualize", "crop", "draw_bbox", "save_view"]
+    },
+    "qwen-mm-local": {
+      "description": "Local-only Qwen3-VL visual reasoning, OCR, and object grounding through Ollama.",
+      "tags": ["multimodal", "vision", "image", "ocr", "grounding", "local", "ollama"],
+      "intents": ["describe image", "read image text", "detect object", "understand screenshot", "analyze visual input"],
+      "allowedTools": ["vision_chat", "ocr", "grounding"]
     },
     "github": {
       "description": "GitHub repositories, pull requests, issues, Actions, commits, and authenticated operations.",
@@ -95,6 +108,14 @@
       "root": "integrations/local-transcription",
       "cliEntrypoint": "transcribe.py",
       "description": "Agent-neutral faster-whisper CLI for local voice commands and audio-file transcription."
+    },
+    {
+      "id": "qwen-mm-local",
+      "name": "Qwen-MM Local Vision",
+      "kind": "multimodal-tool-layer",
+      "root": "integrations/qwen-mm",
+      "mcpEntrypoint": "local_server.py",
+      "description": "Pinned portable Qwen-MM core plus local Ollama Qwen3-VL vision, OCR, and grounding."
     },
     {
       "id": "artifact-transport",

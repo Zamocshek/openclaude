@@ -9,6 +9,7 @@ import {
   removeManagedMcpServer,
   resolveEffectiveMcpConfigPath,
   setManagedMcpServerEnabled,
+  setManagedMcpServerGroupEnabled,
 } from './mcpRegistry.js'
 
 const temporaryPaths: string[] = []
@@ -110,5 +111,38 @@ describe('agent gateway managed MCP registry', () => {
     expect(servers.map(server => server.name)).toEqual(['core'])
     expect(JSON.parse(await readFile(resolveEffectiveMcpConfigPath(project)!, 'utf8'))
       .mcpServers.core).toBeTruthy()
+  })
+
+  test('toggles a capability server group atomically', async () => {
+    const { project } = await makeProject()
+    const parsed = parseMcpConfigImport(JSON.stringify({
+      mcpServers: {
+        vision: { command: 'node', args: ['vision.js'] },
+      },
+    }))
+    if (!parsed || parsed.ok === false) {
+      throw new Error(parsed?.ok === false ? parsed.error : 'parse failed')
+    }
+    await importManagedMcpServers(project, parsed.config)
+
+    await setManagedMcpServerGroupEnabled(project, ['core', 'vision'], false)
+    let servers = await listManagedMcpServers(project)
+    expect(servers
+      .filter(server => ['core', 'vision'].includes(server.name))
+      .every(server => server.enabled === false)).toBe(true)
+
+    await expect(setManagedMcpServerGroupEnabled(
+      project,
+      ['core', 'missing'],
+      true,
+    )).rejects.toThrow('MCP server not found: missing')
+    servers = await listManagedMcpServers(project)
+    expect(servers.find(server => server.name === 'core')?.enabled).toBe(false)
+
+    await setManagedMcpServerGroupEnabled(project, ['core', 'vision'], true)
+    servers = await listManagedMcpServers(project)
+    expect(servers
+      .filter(server => ['core', 'vision'].includes(server.name))
+      .every(server => server.enabled === true)).toBe(true)
   })
 })

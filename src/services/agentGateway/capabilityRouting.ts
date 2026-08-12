@@ -47,6 +47,13 @@ export const CAPABILITY_CATALOG: readonly CapabilityCatalogEntry[] = [
       'Camofox -> create/list tab, snapshot, act by stable refs, then screenshot when visual proof is requested; use Skill(qwen-collab) for browser AI models.',
   },
   {
+    id: 'multimodal',
+    servers: ['qwen-mm-core', 'qwen-mm-local'],
+    routes: ['multimodal'],
+    summary:
+      'Qwen-MM local -> use vision_chat/OCR/grounding for textual evidence; use core for metadata, video frames, crops, visualizations, and annotated artifacts. Never send raw image blocks to a text-only coordinator.',
+  },
+  {
     id: 'memory',
     servers: ['hindsight'],
     routes: ['explicit-memory'],
@@ -118,6 +125,8 @@ const SERVER_ALIASES: Readonly<Record<string, readonly string[]>> = {
   codegraph: ['codegraph', 'code graph', 'граф кода'],
   searxng: ['searxng', 'search engine', 'поиск в интернете'],
   context7: ['context7', 'library docs', 'документация библиотек'],
+  'qwen-mm-core': ['qwen mm core', 'qwen multimodal', 'local vision', 'media tools'],
+  'qwen-mm-local': ['qwen mm', 'qwen vl', 'qwen3 vl', 'local qwen vision', 'local ocr'],
   pentest: ['pentest', 'pentestcode', 'security assessment', 'пентест', 'аудит безопасности'],
   'telegram-mcp': [
     'telegram mcp',
@@ -146,6 +155,8 @@ const RESEARCH_RE =
   /(?:\b(?:research|search the web|web search|current|latest|news|sources?|look up|verify online)\b|(?:исслед|поиск в интернете|найди в сети|актуальн|последн(?:ие|яя)|новост|источник|проверь в интернете))/iu
 const BROWSER_RE =
   /(?:\b(?:browser|camofox|website|web page|screenshot|click|log in|sign in|open the page)\b|(?:браузер|камуфокс|камоуфокс|сайт|веб-?страниц|скриншот|нажми|авториз|залогин|открой страницу))/iu
+const MULTIMODAL_RE =
+  /(?:\b(?:image|photo|picture|vision|visual|ocr|grounding|screenshot|video|frame)\b|\.(?:png|jpe?g|webp|gif|bmp|mp4|mov|mkv|webm)\b|(?:изображен|картинк|фото|скриншот|видео|кадр|распознай\s+текст|прочитай\s+текст|объект\s+на))/iu
 const MEMORY_RE =
   /(?:\b(?:remember|memory|recall|forget|prior decision|our decisions|earlier context|preference|hindsight)\b|(?:запомни|памят|вспомни|забудь|предыдущ(?:ее|ий)|предпочтени|наш(?:и|их)\s+решени|что\s+мы\s+решили|раньше))/iu
 const RAG_RE =
@@ -215,6 +226,7 @@ export function selectMcpServersForPrompt(
   if (options.codingIntent) add('coding', 'codegraph', 'context7')
   if (RESEARCH_RE.test(request)) add('research', 'searxng')
   if (BROWSER_RE.test(request)) add('browser', 'camofox')
+  if (MULTIMODAL_RE.test(request)) add('multimodal', 'qwen-mm-core', 'qwen-mm-local')
   if (BROWSER_MODEL_RE.test(request)) add('browser-model', 'camofox')
   if (MEMORY_RE.test(request)) add('explicit-memory', 'hindsight')
   if (RAG_RE.test(request)) add('rag', 'openrag')

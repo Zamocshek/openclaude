@@ -18,6 +18,7 @@
       "scripts",
       "integrations/telegram-mcp",
       "integrations/local-transcription",
+      "integrations/qwen-mm",
       ".mcp.json",
       "package.json",
       "bun.lock",
@@ -55,6 +56,10 @@
         "root": "integrations/local-transcription"
       },
       {
+        "id": "qwen-mm-local",
+        "root": "integrations/qwen-mm"
+      },
+      {
         "id": "artifact-transport",
         "root": "scripts"
       }
@@ -65,7 +70,8 @@
       ".claude/skills",
       ".codex/skills",
       "integrations/telegram-mcp/skills",
-      "integrations/telegram-mcp/maton skills for telegram"
+      "integrations/telegram-mcp/maton skills for telegram",
+      "integrations/qwen-mm/skills"
     ]
   }
 }

@@ -92,6 +92,20 @@
         "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
       }
     },
+    "qwen-mm-core": {
+      "command": "node",
+      "args": [
+        "scripts/qwen-mm-launcher.cjs",
+        "core"
+      ]
+    },
+    "qwen-mm-local": {
+      "command": "node",
+      "args": [
+        "scripts/qwen-mm-launcher.cjs",
+        "api"
+      ]
+    },
     "github": {
       "type": "http",
       "url": "https://api.githubcopilot.com/mcp/",

@@ -190,3 +190,23 @@ the default `routed` mode. The complete downstream registry remains in
 `capability-router/mcp.json`, so enabling a new server does not enlarge an
 agent's prompt until routing selects it. Skills keep their own `SKILL.md` and
 references; components keep their package manifests and persistent state paths.
+
+## Local Qwen-MM after migration
+
+The `qwen-mm-local` component is exported with its pinned upstream revision,
+portable MCP declarations, launcher, and `qwen-mm-local` skill. It never
+exports model weights or provider credentials. On the target machine, install
+Ollama and run:
+
+```bash
+ollama pull qwen3-vl:2b-instruct
+export QWEN_MM_BASE_URL=http://127.0.0.1:11434/v1
+node ./scripts/qwen-mm-launcher.cjs api --check-system
+```
+
+For Docker targets, `portable-services.compose.yml` uses the internal Ollama
+address and boots the model into a persistent volume. The standard MCP tool
+surface remains `qwen-mm-core` for local media operations and `qwen-mm-local`
+for vision chat, OCR, and grounding. No DashScope key is required: visual
+evidence is returned as text to the coordinating agent, preserving compatibility
+with text-only providers such as DeepSeek.
