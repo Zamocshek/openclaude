@@ -56,6 +56,17 @@ import type { EvolutionResult, EvolutionType } from './evolution.js'
 import { buildSelfEditPrompt, selfRead, selfWrite, selfEdit, selfList, gitStatus, gitDiff, gitCommit, gitLog, gitReset } from './selfEdit.js'
 import { runInfiniteTask } from './infiniteTask.js'
 import {
+  clearAgentGoal,
+  finishAgentGoalLoop,
+  formatAgentGoal,
+  getAgentGoal,
+  markAgentGoalLoopStarted,
+  pauseAgentGoalLoop,
+  recoverInterruptedAgentGoalLoops,
+  requestAgentGoalLoop,
+  setAgentGoal,
+} from './goalLoop.js'
+import {
   getReasoningEffortForModel,
   isCodexAlias,
   type ReasoningEffort,
@@ -642,7 +653,8 @@ const TELEGRAM_COMMAND_HELP_SECTIONS: TelegramCommandHelpSection[] = [
       { syntax: '/evolve [on|off|now|status]', description: 'control evolution or run one cycle' },
       { syntax: '/tools [on|off|list|enable NAME|disable NAME]', description: 'toggle model tools', botDescription: 'Control model tools' },
       { syntax: '/review', description: 'run a deep architecture review cycle' },
-      { syntax: '/infinite <goal>', description: 'run a persistent task loop' },
+      { syntax: '/goal [status|clear|<objective>]', description: 'set persistent objective', botDescription: 'Set a persistent objective' },
+      { syntax: '/loop [start|stop|status|<objective>]', description: 'run or resume objective', botDescription: 'Run or resume a goal loop' },
     ],
   },
   {
@@ -760,6 +772,8 @@ export class TelegramAgentBridge {
   private consecutivePollErrors = 0
   /** Active AbortControllers per chatId — for /stop */
   private activeTasks = new Map<string, ActiveTelegramTask>()
+  /** Goal id for an active persistent /loop execution in a chat. */
+  private activeGoalLoops = new Map<string, string>()
   /** FIFO agent task queue per chatId. Commands still run immediately. */
   private taskQueues = new Map<string, Promise<void>>()
   private queuedTaskCounts = new Map<string, number>()
@@ -789,6 +803,9 @@ export class TelegramAgentBridge {
   start(): void {
     if (!this.config.telegram.enabled || !this.config.telegram.botToken) return
     void this.ensureChatModesLoaded()
+    void recoverInterruptedAgentGoalLoops().catch(error => {
+      void recordTelegramError('system', 'goal-loop-recovery', error)
+    })
     void this.registerBotCommands()
     this.pollAbortController = new AbortController()
     this.pollPromise = this.pollLoop(this.pollAbortController.signal).catch(error => {
@@ -847,6 +864,7 @@ export class TelegramAgentBridge {
       ...this.taskQueues.values(),
     ]
     this.activeTasks.clear()
+    this.activeGoalLoops.clear()
     this.taskQueues.clear()
     this.queuedTaskCounts.clear()
     this.chatQueueEpochs.clear()
@@ -1903,6 +1921,16 @@ export class TelegramAgentBridge {
       return
     }
 
+    if (commandText === '/goal' || commandText.startsWith('/goal ')) {
+      await this.handleGoalCommand(chatId, commandText.slice('/goal'.length).trim())
+      return
+    }
+
+    if (commandText === '/loop' || commandText.startsWith('/loop ')) {
+      await this.handleLoopCommand(chatId, commandText.slice('/loop'.length).trim())
+      return
+    }
+
     if (text === '/cron' || text.startsWith('/cron ')) {
       await this.handleCronCommand(chatId, text.slice('/cron'.length).trim())
       return
@@ -2008,8 +2036,8 @@ export class TelegramAgentBridge {
       return
     }
 
-    if (text.startsWith('/infinite ')) {
-      await this.handleInfiniteTaskCommand(chatId, text.slice('/infinite '.length))
+    if (text === '/infinite' || text.startsWith('/infinite ')) {
+      await this.handleLoopCommand(chatId, text.slice('/infinite'.length).trim())
       return
     }
 
@@ -3729,7 +3757,10 @@ export class TelegramAgentBridge {
     const chatJobs = jobs.filter(
       job => job.origin?.platform === 'telegram' && job.origin.chatId === chatId,
     )
-    const evolution = await loadEvolutionState()
+    const [evolution, goal] = await Promise.all([
+      loadEvolutionState(),
+      getAgentGoal(chatId),
+    ])
     const consciousness = runtime?.consciousness
     const consciousnessStatus = consciousness?.getStatus()
     const uptimeMs = runtime ? Date.now() - runtime.startedAt : 0
@@ -3754,12 +3785,14 @@ export class TelegramAgentBridge {
       `Evolution mode: ${evolution.enabled ? 'ON' : 'OFF'}`,
       `Evolution cycles: ${evolution.totalCyclesCompleted} completed, ${evolution.totalCyclesFailed} failed`,
       evolution.lastCycleAt ? `Last evolution: ${evolution.lastCycleAt.slice(0, 16)} (${evolution.lastCycleType})` : 'Last evolution: never',
+      goal ? `Goal: ${goal.status}; loop: ${goal.loopStatus}; iterations: ${goal.totalIterations}` : 'Goal: none',
     ].filter(Boolean) as string[]
 
     await this.sendMessage(chatId, lines.join('\n'))
   }
 
   private async handlePanicCommand(chatId: string): Promise<void> {
+    await this.pauseAllActiveGoalLoops()
     for (const task of this.activeTasks.values()) {
       task.progress?.dispose()
       task.controller.abort()
@@ -3775,6 +3808,7 @@ export class TelegramAgentBridge {
   }
 
   private async handleRestartCommand(chatId: string): Promise<void> {
+    await this.pauseAllActiveGoalLoops()
     for (const task of this.activeTasks.values()) {
       task.progress?.dispose()
       task.controller.abort()
@@ -4661,6 +4695,11 @@ export class TelegramAgentBridge {
         return
       }
 
+      if (data === 'runtime:goals') {
+        await this.sendMessage(chatId, formatAgentGoal(await getAgentGoal(chatId)))
+        return
+      }
+
       if (data === 'runtime:restart') {
         await this.editCallbackMessage(
           query,
@@ -5002,6 +5041,8 @@ export class TelegramAgentBridge {
       return
     }
 
+    const activeGoalId = this.activeGoalLoops.get(chatId)
+    if (activeGoalId) await pauseAgentGoalLoop(chatId, activeGoalId)
     task.controller.abort()
     task.progress?.dispose()
     this.activeTasks.delete(chatId)
@@ -5051,32 +5092,104 @@ export class TelegramAgentBridge {
     })
   }
 
-  private async handleInfiniteTaskCommand(
+  private async handleGoalCommand(
     chatId: string,
-    goal: string,
+    commandBody: string,
   ): Promise<void> {
-    const trimmedGoal = goal.trim()
-    if (!trimmedGoal) {
-      await this.sendMessage(chatId, 'Usage: /infinite <goal>')
-      return
-    }
-    if (!this.config.ouroboros.enabled || !this.config.ouroboros.infiniteTasksEnabled) {
-      await this.sendMessage(chatId, 'Infinite task mode is disabled. Enable it in /agent-gateway first.')
+    const input = commandBody.trim()
+    const action = input.toLowerCase()
+    if (!input || ['status', 'state'].includes(action)) {
+      await this.sendMessage(chatId, formatAgentGoal(await getAgentGoal(chatId)))
       return
     }
 
-    await this.enqueueChatTask(
+    if (['clear', 'cancel', 'remove'].includes(action)) {
+      if (this.activeGoalLoops.has(chatId)) await this.stopTask(chatId)
+      const cleared = await clearAgentGoal(chatId)
+      await this.sendMessage(
+        chatId,
+        cleared
+          ? 'Persistent goal cleared. Conversation memory, files, and identity were not changed.'
+          : 'No persistent goal was set for this chat.',
+      )
+      return
+    }
+
+    if (this.activeGoalLoops.has(chatId)) await this.stopTask(chatId)
+    const goal = await setAgentGoal({ chatId, objective: input })
+    await this.sendMessage(
       chatId,
-      `infinite task: ${trimmedGoal.slice(0, 80)}`,
-      () => this.runQueuedInfiniteTask(chatId, trimmedGoal),
+      `${formatAgentGoal(goal)}\n\nRun it with /loop start, or use /loop <objective> to set and run in one command.`,
     )
   }
 
-  private async runQueuedInfiniteTask(
+  private async handleLoopCommand(
     chatId: string,
-    trimmedGoal: string,
+    commandBody: string,
   ): Promise<void> {
-    const taskId = `task_${randomUUID().replace(/-/g, '')}`
+    const input = commandBody.trim()
+    const action = input.toLowerCase()
+    if (!input || ['status', 'state'].includes(action)) {
+      await this.sendMessage(chatId, formatAgentGoal(await getAgentGoal(chatId)))
+      return
+    }
+
+    if (['stop', 'pause', 'cancel'].includes(action)) {
+      const goal = await getAgentGoal(chatId)
+      if (!goal) {
+        await this.sendMessage(chatId, 'No persistent goal is active for this chat.')
+        return
+      }
+      await pauseAgentGoalLoop(chatId, goal.id)
+      if (this.activeGoalLoops.get(chatId) === goal.id) {
+        await this.stopTask(chatId)
+      }
+      await this.sendMessage(chatId, 'Goal loop paused. The goal is preserved; resume with /loop start.')
+      return
+    }
+
+    let goal = await getAgentGoal(chatId)
+    if (!['start', 'resume', 'run'].includes(action)) {
+      if (this.activeGoalLoops.has(chatId)) {
+        await this.sendMessage(chatId, 'A goal loop is already running. Use /loop stop before replacing its objective.')
+        return
+      }
+      goal = await setAgentGoal({ chatId, objective: input })
+    }
+    if (!goal) {
+      await this.sendMessage(chatId, 'Set a goal first: /goal <objective>')
+      return
+    }
+    if (goal.status === 'achieved') {
+      await this.sendMessage(chatId, 'This goal is already achieved. Set a new /goal before starting another loop.')
+      return
+    }
+    if (this.activeGoalLoops.has(chatId)) {
+      await this.sendMessage(chatId, 'A goal loop is already running. Use /loop status or /loop stop.')
+      return
+    }
+
+    const requested = await requestAgentGoalLoop(chatId, goal.id)
+    if (!requested) {
+      await this.sendMessage(chatId, 'This goal cannot be resumed. Set a new objective with /goal <objective>.')
+      return
+    }
+    await this.enqueueChatTask(
+      chatId,
+      `goal loop: ${requested.objective.slice(0, 80)}`,
+      () => this.runQueuedGoalLoop(chatId, requested.id, requested.objective),
+    )
+  }
+
+  private async runQueuedGoalLoop(
+    chatId: string,
+    goalId: string,
+    objective: string,
+  ): Promise<void> {
+    const taskId = `goal_task_${randomUUID().replace(/-/g, '')}`
+    const claimedGoal = await markAgentGoalLoopStarted(chatId, goalId, taskId)
+    if (!claimedGoal) return
+
     const activeTaskId = randomUUID().replace(/-/g, '')
     const controller = new AbortController()
     this.activeTasks.set(chatId, {
@@ -5084,78 +5197,115 @@ export class TelegramAgentBridge {
       controller,
       messageId: 0,
     })
-    let progress: TelegramTaskProgress
+    this.activeGoalLoops.set(chatId, goalId)
+    let progress: TelegramTaskProgress | undefined
+    const consciousness = getAgentGatewayRuntime()?.consciousness
+    consciousness?.pause()
+    consciousness?.injectObservation(`Goal loop started: ${objective.slice(0, 300)}`)
+
     try {
       progress = await this.createTaskProgress(
         chatId,
-        `Running infinite task ${taskId}`,
+        `Running goal loop ${taskId}`,
         activeTaskId,
         controller.signal,
       )
-    } catch (error) {
-      if (this.activeTasks.get(chatId)?.taskId === activeTaskId) {
-        this.activeTasks.delete(chatId)
-      }
-      throw error
-    }
-    const active = this.activeTasks.get(chatId)
-    if (!active || active.taskId !== activeTaskId || controller.signal.aborted) {
-      progress.dispose()
-      return
-    }
-    active.messageId = progress.messageId
-    active.progress = progress
-    const consciousness = getAgentGatewayRuntime()?.consciousness
-    consciousness?.pause()
-    consciousness?.injectObservation(`Infinite task started: ${trimmedGoal.slice(0, 300)}`)
-    progress.addEvent(`infinite task: ${taskId}`)
+      const active = this.activeTasks.get(chatId)
+      if (!active || active.taskId !== activeTaskId || controller.signal.aborted) return
+      active.messageId = progress.messageId
+      active.progress = progress
+      progress.addEvent(`goal: ${objective.slice(0, 160)}`)
 
-    try {
-      const state = await runInfiniteTask(taskId, trimmedGoal, this.config, {
+      const state = await runInfiniteTask(taskId, objective, this.config, {
         signal: controller.signal,
-        maxIterations: 20,
         onCancelled: () => controller.signal.aborted,
         onAgentProgress: event => {
-          const active = this.activeTasks.get(chatId)?.progress
-          active?.addEvent(event)
+          this.activeTasks.get(chatId)?.progress?.addEvent(event)
         },
-        onProgress: async progress => {
-          const last = progress.history.at(-1)
-          const active = this.activeTasks.get(chatId)?.progress
-          active?.setPhase(`Infinite task iteration ${progress.iterations}/${progress.maxIterations}`)
-          if (last?.lesson) {
-            active?.addEvent(`lesson: ${last.lesson.slice(0, 120)}`)
-          }
-          active?.addEvent(`next strategy: ${progress.currentStrategy.slice(0, 120)}`)
+        onProgress: async iterationState => {
+          const last = iterationState.history.at(-1)
+          const iterationLimit = iterationState.maxIterations === null
+            ? 'unbounded'
+            : String(iterationState.maxIterations)
+          const activeProgress = this.activeTasks.get(chatId)?.progress
+          activeProgress?.setPhase(`Goal loop iteration ${iterationState.iterations}/${iterationLimit}`)
+          if (last?.lesson) activeProgress?.addEvent(`lesson: ${last.lesson.slice(0, 180)}`)
+          activeProgress?.addEvent(`next strategy: ${iterationState.currentStrategy.slice(0, 180)}`)
         },
       })
 
       const last = state.history.at(-1)
-      const lines = [
-        `Infinite task ${state.status}: ${taskId}`,
-        `Iterations: ${state.iterations}/${state.maxIterations}`,
-        state.completedAt ? `Completed at: ${state.completedAt}` : '',
-        '',
-        last?.text
-          ? last.text.slice(0, 3000)
+      const outcome = last?.text || state.currentStrategy
+      const terminalStatus = state.status === 'running' ? 'failed' : state.status
+      const finishedGoal = await finishAgentGoalLoop(chatId, goalId, {
+        taskId,
+        status: terminalStatus,
+        iterations: state.iterations,
+        outcome,
+        error: state.status === 'completed' || state.status === 'cancelled'
+          ? undefined
           : state.currentStrategy,
+      })
+      const iterationLimit = state.maxIterations === null ? 'unbounded' : String(state.maxIterations)
+      const lines = [
+        `Goal loop ${state.status}: ${taskId}`,
+        `Iterations: ${state.iterations}/${iterationLimit}`,
+        state.completedAt ? `Finished: ${state.completedAt}` : '',
+        '',
+        outcome.slice(0, 3000),
+        '',
+        formatAgentGoal(finishedGoal),
       ].filter(Boolean)
       if (state.status === 'completed') {
-        await progress.finish('completed', 'Infinite task finished.')
+        await progress.finish('completed', 'Goal achieved.')
       } else if (state.status === 'cancelled') {
         progress.dispose()
       } else {
-        await progress.finish('failed', 'Infinite task stopped before completion.')
+        await progress.finish('failed', 'Goal loop is blocked and can be resumed.')
       }
-      await this.deliverAgentText(chatId, lines.join('\n'), 'Infinite task finished.')
+      await this.deliverAgentText(chatId, lines.join('\n'), 'Goal loop finished.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const finishedGoal = await finishAgentGoalLoop(chatId, goalId, {
+        taskId,
+        status: controller.signal.aborted ? 'cancelled' : 'failed',
+        iterations: 0,
+        error: message,
+      })
+      if (controller.signal.aborted) {
+        progress?.dispose()
+      } else {
+        await progress?.finish('failed', 'Goal loop is blocked and can be resumed.')
+        await this.deliverAgentText(
+          chatId,
+          [
+            'Goal loop blocked by a runtime error; the objective is preserved.',
+            `Error: ${message.slice(0, 1500)}`,
+            '',
+            formatAgentGoal(finishedGoal),
+          ].join('\n'),
+          'Goal loop blocked.',
+        )
+      }
     } finally {
-      consciousness?.injectObservation(`Infinite task stopped: ${trimmedGoal.slice(0, 300)}`)
+      consciousness?.injectObservation(`Goal loop stopped: ${objective.slice(0, 300)}`)
       consciousness?.resume()
-      progress.dispose()
+      progress?.dispose()
+      if (this.activeGoalLoops.get(chatId) === goalId) {
+        this.activeGoalLoops.delete(chatId)
+      }
       if (this.activeTasks.get(chatId)?.taskId === activeTaskId) {
         this.activeTasks.delete(chatId)
       }
     }
+  }
+
+  private async pauseAllActiveGoalLoops(): Promise<void> {
+    const activeGoals = [...this.activeGoalLoops.entries()]
+    await Promise.allSettled(
+      activeGoals.map(([goalChatId, goalId]) => pauseAgentGoalLoop(goalChatId, goalId)),
+    )
+    this.activeGoalLoops.clear()
   }
 
   private async handleUndoCommand(chatId: string): Promise<void> {
@@ -6692,6 +6842,7 @@ export function buildTelegramRuntimeKeyboard(
       { text: 'Evolve now', callback_data: 'runtime:evolve' },
       { text: 'Architecture review', callback_data: 'runtime:review' },
     ],
+    [{ text: 'Goal and loop', callback_data: 'runtime:goals' }],
     [{ text: 'Wake consciousness now', callback_data: 'runtime:wake' }],
     [
       { text: 'Restart', callback_data: 'runtime:restart' },

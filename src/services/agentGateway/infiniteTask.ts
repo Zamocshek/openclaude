@@ -23,6 +23,7 @@ import { join } from 'path'
 import { getAgentGatewayStateDir } from './config.js'
 import type { AgentGatewayConfig } from './config.js'
 import { runOpenClaudeAgentWithCompletionGate } from './taskQuality.js'
+import type { AgentRunResult } from './agentRunner.js'
 import { buildSelfEditPrompt, gitStatus, gitDiff } from './selfEdit.js'
 
 // ---------------------------------------------------------------------------
@@ -33,10 +34,10 @@ export type InfiniteTaskState = {
   taskId: string
   goal: string
   iterations: number
-  maxIterations: number
+  maxIterations: number | null
   budgetSpent: number
-  budgetLimit: number
-  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  budgetLimit: number | null
+  status: 'running' | 'completed' | 'blocked' | 'failed' | 'cancelled'
   history: TaskIteration[]
   currentStrategy: string
   startedAt: string
@@ -52,6 +53,7 @@ export type TaskIteration = {
   durationMs: number
   strategy: string
   lesson: string
+  failureSignature?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -94,24 +96,52 @@ export async function cancelTask(taskId: string): Promise<boolean> {
 // Infinite Loop
 // ---------------------------------------------------------------------------
 
-const DEFAULT_MAX_ITERATIONS = 50
-const DEFAULT_BUDGET_LIMIT = 10.0 // USD
+const MAX_CONFIGURED_ITERATIONS = 2_000
+const MAX_REPEATED_FAILURES = 3
+
+export function getInfiniteTaskMaxIterations(
+  env: NodeJS.ProcessEnv = process.env,
+): number | null {
+  const raw = String(env.OPENCLAUDE_OUROBOROS_LOOP_MAX_ITERATIONS || '').trim()
+  if (!raw || /^(?:0|unlimited|infinite|forever)$/iu.test(raw)) return null
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.min(MAX_CONFIGURED_ITERATIONS, parsed)
+    : null
+}
+
+export function getInfiniteTaskBudgetLimit(
+  env: NodeJS.ProcessEnv = process.env,
+): number | null {
+  const raw = String(env.OPENCLAUDE_OUROBOROS_LOOP_BUDGET_USD || '').trim()
+  if (!raw || /^(?:0|unlimited|infinite|forever)$/iu.test(raw)) return null
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
 
 export async function runInfiniteTask(
   taskId: string,
   goal: string,
   config: AgentGatewayConfig,
   options?: {
-    maxIterations?: number
-    budgetLimit?: number
+    maxIterations?: number | null
+    budgetLimit?: number | null
     onProgress?: (state: InfiniteTaskState) => Promise<void>
     onAgentProgress?: (event: string) => void
     onCancelled?: () => boolean
     signal?: AbortSignal
+    runAgent?: typeof runOpenClaudeAgentWithCompletionGate
+    analyzeFailure?: (input: {
+      stderr: string
+      stdout: string
+      state: InfiniteTaskState
+      config: AgentGatewayConfig
+      signal?: AbortSignal
+    }) => Promise<FailureAnalysis>
   },
 ): Promise<InfiniteTaskState> {
-  const maxIterations = options?.maxIterations ?? DEFAULT_MAX_ITERATIONS
-  const budgetLimit = options?.budgetLimit ?? DEFAULT_BUDGET_LIMIT
+  const maxIterations = options?.maxIterations ?? getInfiniteTaskMaxIterations()
+  const budgetLimit = options?.budgetLimit ?? getInfiniteTaskBudgetLimit()
 
   const state: InfiniteTaskState = {
     taskId,
@@ -131,9 +161,13 @@ export async function runInfiniteTask(
   let currentPrompt = goal
   let strategy = 'Initial approach'
 
-  for (let i = 1; i <= maxIterations; i++) {
+  for (let i = 1; maxIterations === null || i <= maxIterations; i++) {
     // Check cancellation
-    if (options?.signal?.aborted || options?.onCancelled?.()) {
+    if (
+      options?.signal?.aborted
+      || options?.onCancelled?.()
+      || await isTaskPersistentlyCancelled(taskId)
+    ) {
       state.status = 'cancelled'
       state.completedAt = new Date().toISOString()
       await saveTaskState(state)
@@ -141,9 +175,9 @@ export async function runInfiniteTask(
     }
 
     // Check budget
-    if (state.budgetSpent >= budgetLimit) {
+    if (budgetLimit !== null && state.budgetSpent >= budgetLimit) {
       state.status = 'failed'
-      state.currentStrategy = `Budget exhausted ($${state.budgetSpent.toFixed(2)} / $${budgetLimit})`
+      state.currentStrategy = `Budget exhausted ($${state.budgetSpent.toFixed(2)} / $${budgetLimit.toFixed(2)})`
       state.completedAt = new Date().toISOString()
       await saveTaskState(state)
       return state
@@ -157,7 +191,7 @@ export async function runInfiniteTask(
     // Build the prompt with full context from previous iterations
     const prompt = buildIterationPrompt(currentPrompt, state, strategy)
 
-    const result = await runOpenClaudeAgentWithCompletionGate({
+    const result = await (options?.runAgent || runOpenClaudeAgentWithCompletionGate)({
       prompt,
       config,
       signal: options?.signal,
@@ -167,6 +201,10 @@ export async function runInfiniteTask(
     })
 
     const durationMs = Date.now() - startTime
+    const measuredCost = Number(result.costUsd || 0)
+    if (Number.isFinite(measuredCost) && measuredCost > 0) {
+      state.budgetSpent += measuredCost
+    }
 
     if (options?.signal?.aborted || options?.onCancelled?.()) {
       state.status = 'cancelled'
@@ -188,7 +226,11 @@ export async function runInfiniteTask(
 
     state.history.push(iteration)
 
-    if (result.exitCode === 0) {
+    if (
+      result.exitCode === 0
+      && result.completionStatus !== 'blocked'
+      && result.completionGate?.status !== 'blocked'
+    ) {
       // Success!
       state.status = 'completed'
       state.completedAt = new Date().toISOString()
@@ -197,7 +239,45 @@ export async function runInfiniteTask(
     }
 
     // Failure — analyze and adapt
-    const analysis = await analyzeFailure(result.stderr, result.text, state, config)
+    if (
+      result.completionStatus === 'blocked'
+      || result.completionGate?.status === 'blocked'
+    ) {
+      state.status = 'blocked'
+      state.currentStrategy = result.completionGate?.reason
+        || result.diagnostic
+        || 'The completion gate reported a blocker.'
+      iteration.lesson = state.currentStrategy.slice(0, 1_000)
+      state.completedAt = new Date().toISOString()
+      await saveTaskState(state)
+      return state
+    }
+
+    iteration.failureSignature = createFailureSignature(result)
+    if (hasRepeatedFailureSignature(state.history, iteration.failureSignature)) {
+      state.status = 'blocked'
+      state.currentStrategy = 'The same failure repeated without durable progress. The loop stopped as blocked so it can be resumed with a changed environment, input, or strategy.'
+      iteration.lesson = state.currentStrategy
+      state.completedAt = new Date().toISOString()
+      await saveTaskState(state)
+      return state
+    }
+
+    const analysis = options?.analyzeFailure
+      ? await options.analyzeFailure({
+        stderr: result.stderr,
+        stdout: result.text,
+        state,
+        config,
+        signal: options.signal,
+      })
+      : await analyzeFailure(
+        result.stderr,
+        result.text,
+        state,
+        config,
+        options?.signal,
+      )
     iteration.lesson = analysis.lesson
     strategy = analysis.nextStrategy
 
@@ -218,9 +298,9 @@ export async function runInfiniteTask(
     }
   }
 
-  // Max iterations reached
-  state.status = 'failed'
-  state.currentStrategy = `Max iterations reached (${maxIterations})`
+  // A configured cap is a checkpoint, not proof that the goal itself failed.
+  state.status = 'blocked'
+  state.currentStrategy = `Loop iteration checkpoint reached (${maxIterations}). Resume with /loop start to continue.`
   state.completedAt = new Date().toISOString()
   await saveTaskState(state)
   return state
@@ -303,6 +383,7 @@ async function analyzeFailure(
   stdout: string,
   state: InfiniteTaskState,
   config: AgentGatewayConfig,
+  signal?: AbortSignal,
 ): Promise<FailureAnalysis> {
   // Try to analyze with LLM for intelligent strategy adjustment
   const analysisPrompt = [
@@ -343,6 +424,7 @@ async function analyzeFailure(
         },
       },
       suppressObservers: true,
+      signal,
     })
 
     if (result.exitCode === 0) {
@@ -378,6 +460,37 @@ async function analyzeFailure(
     lesson: stderr.slice(0, 200) || 'Unknown error',
     nextStrategy: fallbackStrategies[strategyIndex]!,
   }
+}
+
+async function isTaskPersistentlyCancelled(taskId: string): Promise<boolean> {
+  const persisted = await loadTaskState(taskId)
+  return persisted?.status === 'cancelled'
+}
+
+function createFailureSignature(result: AgentRunResult): string {
+  const source = [
+    result.failureKind || 'execution',
+    result.diagnostic || '',
+    result.stderr || '',
+  ].join('\n')
+  return source
+    .toLowerCase()
+    .replace(/[a-f0-9]{16,}/gu, '<id>')
+    .replace(/\b\d+\b/gu, '<n>')
+    .replace(/\s+/gu, ' ')
+    .slice(0, 500)
+}
+
+function hasRepeatedFailureSignature(
+  history: TaskIteration[],
+  signature: string,
+): boolean {
+  if (!signature) return false
+  const recent = history
+    .filter(item => item.failureSignature)
+    .slice(-MAX_REPEATED_FAILURES)
+  return recent.length === MAX_REPEATED_FAILURES
+    && recent.every(item => item.failureSignature === signature)
 }
 
 // ---------------------------------------------------------------------------

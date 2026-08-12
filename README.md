@@ -150,8 +150,11 @@ Telegram:
   `/deletejob <id>` - manage scheduled agent jobs
 - `/restart`, `/panic`, `/bg [start|stop|now|status]`,
   `/consciousness [start|stop|now|status]`, `/evolution [on|off|status]`,
-  `/evolve [on|off|now|status]`, `/review`, `/infinite <goal>` - control the
-  long-running gateway/Ouroboros loops
+  `/evolve [on|off|now|status]`, `/review`,
+  `/goal [status|clear|<objective>]`,
+  `/loop [start|stop|status|<objective>]`, `/infinite <goal>` - control the
+  long-running gateway/Ouroboros loops. `/infinite` remains a compatibility
+  alias for `/loop <goal>`.
 - `/identity`, `/scratchpad`, `/bible`, `/architecture`, `/git`,
   `/git status`, `/git log`, `/git diff [path]`, `/git commit <msg>`,
   `/undo` - inspect memory and repository state
@@ -170,6 +173,16 @@ by `OPENCLAUDE_OUROBOROS_MAX_ROUNDS`. Enabling evolution schedules the first
 cycle on the next background wakeup and later cycles no more often than
 `OPENCLAUDE_EVOLUTION_INTERVAL_SECONDS` (default: six hours). `/evolve now` and
 `/review` are one-off runs and do not silently enable autonomous evolution.
+
+`/goal <objective>` persists one explicit objective per Telegram chat in the
+gateway state volume without modifying durable memory, identity, or RPG files.
+`/loop start` claims that objective and runs the adaptive Ouroboros loop. The
+loop is unbounded by default; optional `OPENCLAUDE_OUROBOROS_LOOP_MAX_ITERATIONS`
+and `OPENCLAUDE_OUROBOROS_LOOP_BUDGET_USD` set deliberate deployment limits.
+`/stop` or `/loop stop` pauses the execution but preserves the goal, while
+`/goal clear` removes only that goal. A gateway restart demotes any stale active
+loop to `paused`, never silently creates a ghost worker. Three identical failed
+iterations become a resumable `blocked` state rather than a blind retry storm.
 
 ### Release Scripts
 

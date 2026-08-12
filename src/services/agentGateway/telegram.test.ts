@@ -135,6 +135,8 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/bg [start|stop|now|status] - control background consciousness')
     expect(help).toContain('/consciousness [start|stop|now|status] - alias for /bg')
     expect(help).toContain('/evolve [on|off|now|status] - control evolution or run one cycle')
+    expect(help).toContain('/goal [status|clear|<objective>] - set persistent objective')
+    expect(help).toContain('/loop [start|stop|status|<objective>] - run or resume objective')
     expect(help).toContain('/dsflash - switch to DeepSeek V4 Flash')
     expect(help).toContain('/gemmacoder - switch to LM Studio Huihui Gemma Coder')
     expect(help).toContain(
