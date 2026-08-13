@@ -236,14 +236,19 @@ Runtime data is stored in `TELEGRAM_MCP_CONTENT_DB` (default:
 - **content_quality_review(chat_id, text, requested_format?, format_mode?)**:
   run the managed-channel quality gate for thematic fit, encoding, depth,
   readability, and Telegram limits without storing or publishing anything.
+- **content_campaign_plan(name, targets_json, excluded_targets_json?, requested_format?, min_chars?)**:
+  persist an exact allowlist/exclusion contract before any multi-channel action.
+- **content_campaign_status(campaign_id)**: report complete only when every
+  required target has an authoritative message receipt and matching readback.
 - **content_similarity_check(text, threshold?, roles?, format_mode?)**: check any candidate text
   against stored `source`, `draft`, and `published` posts while ignoring presentation markup.
 - **content_create_draft(text, target_chat_id?, source_post_id?, format_mode?, allow_formatting_loss?)**: store a draft only
   when it is not identical or strongly similar to previous content, preserving its formatting.
 - **content_prepare_publish(draft_id, target_chat_id?, format_mode?, silent?, link_preview?, send_as?)**:
   revalidate quality and create one idempotent pending formatted send action.
-- **content_prepare_publish_batch(items_json)**: prepare up to 50 drafts
-  sequentially and return a durable per-item receipt without transport scripts.
+- **content_prepare_publish_batch(items_json, campaign_id?)**: fail-closed
+  preflight for up to 50 drafts. Managed multi-channel batches require a
+  campaign and must exactly match its targets before any action is created.
 - **assistant_action_status_batch(action_ids_json)**: reconcile multiple actions
   without retrying or repeating their sends.
 - **assistant_confirm_action(action_id)**: send after explicit approval and mark the
@@ -252,9 +257,10 @@ Runtime data is stored in `TELEGRAM_MCP_CONTENT_DB` (default:
 Recommended flow:
 `content_sync_sources` -> `content_research_context` -> agent rewrites ->
 `content_channel_post_brief` -> `content_quality_review` ->
-`content_create_draft` -> `content_prepare_publish` (or one batch prepare) ->
+`content_create_draft` -> `content_campaign_plan` for a multi-channel wave ->
+`content_prepare_publish` (or one batch prepare with campaign ID) ->
 approve each exact action -> `assistant_confirm_action` once ->
-`assistant_action_status_batch`.
+`assistant_action_status_batch` -> `content_campaign_status`.
 
 For a specific old or donor message, use `content_capture_source_post` before
 drafting and pass the returned numeric `source_post.id`. Telegram links and
@@ -274,6 +280,11 @@ precedence for that request. Format `auto` lets the agent choose useful depth;
 explicit `short`, `standard`, and `long` modes are also available. There is no
 global 350-900 character restriction. Text posts must remain within Telegram's
 4096 UTF-16-unit limit and media captions within 1024 units.
+
+For network campaigns, `standard` (700+ characters) is the default developed
+format unless the user explicitly asks for short form. A profile with
+`publishing_enabled=false` is blocked across managed draft and primary send
+paths; it cannot be restored by a model instruction.
 
 ### Rich Telegram Posts
 

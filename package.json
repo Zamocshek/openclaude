@@ -20,6 +20,7 @@
     "agent-portability.json",
     "capability-registry.json",
     "docs/agent-migration.md",
+    "docs/nova-capability-playbook.md",
     "docs/schemas/agent-portability-v1.schema.json",
     "docs/schemas/capability-registry-v1.schema.json",
     "README.md"

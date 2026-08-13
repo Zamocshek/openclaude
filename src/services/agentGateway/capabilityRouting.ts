@@ -160,7 +160,7 @@ const MULTIMODAL_RE =
 const MEMORY_RE =
   /(?:\b(?:remember|memory|recall|forget|prior decision|our decisions|earlier context|preference|hindsight)\b|(?:запомни|памят|вспомни|забудь|предыдущ(?:ее|ий)|предпочтени|наш(?:и|их)\s+решени|что\s+мы\s+решили|раньше))/iu
 const RAG_RE =
-  /(?:\b(?:lightrag|light rag|openrag|rag|knowledge base|ingest(?:ion)?|retrieval|document corpus)\b|(?:лайтраг|лайт раг|опенраг|база знаний|индексац|загрузи документ|по документам|корпус документ))/iu
+  /(?:\b(?:lightrag|light rag|openrag|rag|knowledge base|ingest(?:ion)?|retrieval|document corpus)\b|(?:лайтраг|лайт раг|опенраг|(?<![\p{L}\p{N}_])раг(?![\p{L}\p{N}_])|база знаний|индексац|загрузи документ|по документам|корпус документ))/iu
 const TELEGRAM_ACCOUNT_RE =
   /(?:\b(?:telegram mcp|telegram account|telegram session|send (?:a )?telegram|read telegram)\b|(?:телеграм(?:м)?\s+(?:mcp|мсп|аккаунт|сесси)|отправь.+телеграм|прочитай.+телеграм))/iu
 const CONTROL_RE =

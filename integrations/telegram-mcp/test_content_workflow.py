@@ -158,3 +158,60 @@ def test_source_reference_resolves_public_and_private_post_links(tmp_path, monke
 
         assert public["id"] == source["id"]
         assert private["id"] == source["id"]
+
+
+def test_campaign_requires_verified_readback_for_completion(tmp_path, monkeypatch):
+    with _connect(tmp_path, monkeypatch) as conn:
+        draft = cw.create_draft(
+            conn,
+            text="A developed post with a durable delivery receipt.",
+            target_chat_id="-1002",
+            target_account_id="publisher",
+        )["draft"]
+        campaign = cw.create_campaign(
+            conn,
+            name="receipt-regression",
+            account_id="publisher",
+            required_targets=[
+                {
+                    "profile_id": "target-profile",
+                    "name": "Target",
+                    "reference": "-1002",
+                }
+            ],
+            excluded_targets=[],
+            requested_format="standard",
+            min_chars=1,
+        )
+        cw.assign_campaign_item(
+            conn,
+            campaign_id=campaign["id"],
+            target_profile_id="target-profile",
+            draft_id=draft["id"],
+            action_id=41,
+            expected_peer_id="-1002",
+        )
+        unverified = cw.record_campaign_delivery(
+            conn,
+            campaign_id=campaign["id"],
+            draft_id=draft["id"],
+            action_id=41,
+            actual_peer_id="-1002",
+            message_id=99,
+            verification={"verified": False, "readback_text_matches": False},
+        )
+        verified = cw.record_campaign_delivery(
+            conn,
+            campaign_id=campaign["id"],
+            draft_id=draft["id"],
+            action_id=41,
+            actual_peer_id="-1002",
+            message_id=99,
+            verification={"verified": True, "readback_text_matches": True},
+        )
+        conn.commit()
+
+        assert unverified["status"] == "sent"
+        assert unverified["items"][0]["status"] == "sent"
+        assert verified["status"] == "verified"
+        assert verified["items"][0]["status"] == "verified"

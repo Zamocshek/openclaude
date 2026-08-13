@@ -534,6 +534,9 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('For this document or knowledge-base request')
     expect(systemPrompt).toContain('lightrag_search')
     expect(systemPrompt).toContain('lightrag_ingest_file')
+    expect(systemPrompt).toContain('OpenRAG is retired')
+    expect(systemPrompt).toContain('http://lightrag:9621')
+    expect(systemPrompt).toContain('Never report indexed or unavailable')
   })
 
   test('adds CodeGraph guidance for code exploration and impact analysis', () => {
@@ -572,6 +575,10 @@ describe('agent gateway prompt builder', () => {
     expect(systemPrompt).toContain('is not permission to send anything')
     expect(systemPrompt).toContain('invoke the maton-api-gateway Skill')
     expect(systemPrompt).toContain('maton_telegram_*')
+    expect(systemPrompt).toContain('content_campaign_plan')
+    expect(systemPrompt).toContain('content_campaign_status')
+    expect(systemPrompt).toContain('publishing_enabled=false is final')
+    expect(systemPrompt).toContain('docs/nova-capability-playbook.md')
   })
 
   test('enables verifier-first terminal execution only when requested', () => {

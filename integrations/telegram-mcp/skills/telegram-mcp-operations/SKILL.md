@@ -170,21 +170,23 @@ restricted. A restricted target must be unblocked or replaced; do not retry it.
 ### Multi-channel campaigns
 
 Treat every channel as an independently resumable item. Before the first send,
-save a manifest containing the channel reference, account, exact approved text,
-text fingerprint, profile description source, and chosen format. For each item
-use this sequence:
+create the durable manifest with `content_campaign_plan`. Pass the literal
+target allowlist and exclusions from the request; omitted channels are not
+implicitly authorized. Standard depth is the default unless short form is
+explicitly requested. For each item use this sequence:
 
 ```text
 check_posting_access
+-> content_campaign_plan once for the exact target set
 -> content_channel_post_brief
 -> content_quality_review
 -> content_capture_source_post for every reused Telegram source
 -> content_create_draft
--> content_prepare_publish_batch once for the approved draft set
+-> content_prepare_publish_batch once with campaign_id
 -> assistant_confirm_action exactly once
 -> assistant_action_status_batch
 -> read the published message back and compare its text
--> save action_id + message_id + verification result in the manifest
+-> content_campaign_status; require complete=true
 ```
 
 Use the high-level MCP tools directly. Never create temporary `publish_*.py`
@@ -192,7 +194,9 @@ files, call the MCP HTTP transport with `curl`/`urllib`, or copy MCP session IDs
 Maton connection IDs, bot tokens, or Telegram sessions into source files. Those
 transport details are ephemeral and bypass validation, idempotency, redaction,
 and durable action reconciliation. `content_prepare_publish_batch` processes
-items sequentially and returns one receipt per draft; resume from that receipt.
+items only after a complete preflight and returns one receipt per draft. A local
+pipeline database row is editorial metadata, not proof of Telegram delivery.
+`publishing_enabled=false` is final for every managed path.
 
 Never repeat `assistant_confirm_action` after a timeout or tool error. The action
 is claimed atomically before network I/O. Inspect it with

@@ -38,6 +38,24 @@ describe('task-aware MCP routing', () => {
     expect([...route.servers]).toEqual(['hindsight'])
   })
 
+  test('routes Cyrillic RAG requests to LightRAG', () => {
+    const route = selectMcpServersForPrompt(
+      'Сохрани доноров в пайплайнах, памяти и в раг, затем проверь индексацию.',
+      { codingIntent: false },
+    )
+
+    expect(route.servers.has('lightrag')).toBe(true)
+    expect(route.reasons).toContain('rag')
+  })
+
+  test('does not route an ordinary Russian word containing rag letters', () => {
+    const route = selectMcpServersForPrompt('Опиши тактику против сильного врага.', {
+      codingIntent: false,
+    })
+
+    expect(route.servers.has('lightrag')).toBe(false)
+  })
+
   test('routes browser and control requests to their dedicated servers', () => {
     const route = selectMcpServersForPrompt(
       'Открой сайт через Camofox, сделай скриншот и проверь Android device',

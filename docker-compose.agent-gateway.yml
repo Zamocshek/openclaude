@@ -974,6 +974,13 @@ services:
       EMBEDDING_MODEL: "${LIGHTRAG_EMBEDDING_MODEL:-nomic-embed-text:latest}"
       EMBEDDING_DIM: "${LIGHTRAG_EMBEDDING_DIM:-768}"
       EMBEDDING_TOKEN_LIMIT: "${LIGHTRAG_EMBEDDING_TOKEN_LIMIT:-8192}"
+      # The bundled Ollama embedding model is CPU-bound on most desktop hosts.
+      # LightRAG defaults to eight concurrent calls, which can make every call
+      # hit its timeout during a graph flush. Keep ingestion serialized by
+      # default while retaining explicit deployment-level overrides.
+      EMBEDDING_FUNC_MAX_ASYNC: "${LIGHTRAG_EMBEDDING_FUNC_MAX_ASYNC:-1}"
+      EMBEDDING_BATCH_NUM: "${LIGHTRAG_EMBEDDING_BATCH_NUM:-4}"
+      EMBEDDING_TIMEOUT: "${LIGHTRAG_EMBEDDING_TIMEOUT:-180}"
       SUMMARY_LANGUAGE: "${LIGHTRAG_SUMMARY_LANGUAGE:-Russian}"
       MAX_EXTRACTION_RECORDS: "${LIGHTRAG_MAX_EXTRACTION_RECORDS:-60}"
       MAX_EXTRACTION_ENTITIES: "${LIGHTRAG_MAX_EXTRACTION_ENTITIES:-30}"

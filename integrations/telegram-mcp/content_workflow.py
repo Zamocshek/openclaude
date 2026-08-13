@@ -24,6 +24,8 @@ CHANNEL_KINDS = {"source", "target"}
 POST_ROLES = {"source", "draft", "published"}
 SETTING_RESEARCH_ACCOUNT = "research_account_id"
 SETTING_SIMILARITY_THRESHOLD = "similarity_threshold"
+CAMPAIGN_STATUSES = {"planned", "prepared", "partially_sent", "sent", "verified", "failed"}
+CAMPAIGN_ITEM_STATUSES = {"planned", "pending", "sent", "verified", "failed"}
 
 
 def account_key(account_id: Optional[str]) -> str:
@@ -98,6 +100,40 @@ def _init_db(conn: sqlite3.Connection) -> None:
             ON content_posts (account_id, chat_id, message_id);
         CREATE INDEX IF NOT EXISTS ix_content_posts_fingerprint
             ON content_posts (fingerprint);
+
+        CREATE TABLE IF NOT EXISTS content_campaigns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned',
+            account_id TEXT NOT NULL,
+            required_targets_json TEXT NOT NULL,
+            excluded_targets_json TEXT NOT NULL,
+            requested_format TEXT NOT NULL,
+            min_chars INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS content_campaign_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            campaign_id INTEGER NOT NULL REFERENCES content_campaigns(id) ON DELETE CASCADE,
+            target_profile_id TEXT NOT NULL,
+            target_reference TEXT NOT NULL,
+            draft_id INTEGER REFERENCES content_posts(id),
+            status TEXT NOT NULL DEFAULT 'planned',
+            action_id INTEGER,
+            expected_peer_id TEXT,
+            actual_peer_id TEXT,
+            message_id INTEGER,
+            verification_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (campaign_id, target_profile_id),
+            UNIQUE (campaign_id, draft_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_content_campaign_items_status
+            ON content_campaign_items (campaign_id, status);
         """)
     conn.commit()
 
@@ -646,6 +682,190 @@ def set_post_status(
         (str(status), now_iso(), int(post_id)),
     )
     return get_post(conn, post_id)
+
+
+def create_campaign(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    account_id: Optional[str],
+    required_targets: Sequence[Dict[str, Any]],
+    excluded_targets: Sequence[Dict[str, Any]],
+    requested_format: str,
+    min_chars: int,
+) -> Dict[str, Any]:
+    """Persist an exact, fail-closed publication contract before any send."""
+    required = [dict(item) for item in required_targets]
+    excluded = [dict(item) for item in excluded_targets]
+    if not required:
+        raise ValueError("campaign requires at least one target")
+    required_ids = [str(item.get("profile_id") or "").strip() for item in required]
+    excluded_ids = {str(item.get("profile_id") or "").strip() for item in excluded}
+    if any(not item for item in required_ids):
+        raise ValueError("every campaign target requires profile_id")
+    if len(required_ids) != len(set(required_ids)):
+        raise ValueError("campaign targets must be unique")
+    overlap = sorted(set(required_ids) & excluded_ids)
+    if overlap:
+        raise ValueError(f"campaign target is also excluded: {', '.join(overlap)}")
+    now = now_iso()
+    cursor = conn.execute(
+        """
+        INSERT INTO content_campaigns
+            (name, status, account_id, required_targets_json,
+             excluded_targets_json, requested_format, min_chars, created_at, updated_at)
+        VALUES (?, 'planned', ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(name or "").strip() or f"campaign-{now}",
+            account_key(account_id),
+            json.dumps(required, ensure_ascii=False, sort_keys=True),
+            json.dumps(excluded, ensure_ascii=False, sort_keys=True),
+            str(requested_format or "standard").strip().lower(),
+            max(1, int(min_chars)),
+            now,
+            now,
+        ),
+    )
+    campaign_id = int(cursor.lastrowid)
+    for target in required:
+        conn.execute(
+            """
+            INSERT INTO content_campaign_items
+                (campaign_id, target_profile_id, target_reference, status,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, 'planned', ?, ?)
+            """,
+            (
+                campaign_id,
+                str(target["profile_id"]),
+                str(target.get("reference") or target["profile_id"]),
+                now,
+                now,
+            ),
+        )
+    return get_campaign(conn, campaign_id) or {}
+
+
+def get_campaign(conn: sqlite3.Connection, campaign_id: int) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM content_campaigns WHERE id = ?", (int(campaign_id),)
+    ).fetchone()
+    if row is None:
+        return None
+    campaign = row_dict(row)
+    campaign["required_targets"] = _json_loads(campaign.pop("required_targets_json")) or []
+    campaign["excluded_targets"] = _json_loads(campaign.pop("excluded_targets_json")) or []
+    items = conn.execute(
+        """
+        SELECT * FROM content_campaign_items
+        WHERE campaign_id = ? ORDER BY id
+        """,
+        (int(campaign_id),),
+    ).fetchall()
+    campaign["items"] = []
+    for item_row in items:
+        item = row_dict(item_row)
+        item["verification"] = _json_loads(item.pop("verification_json"))
+        campaign["items"].append(item)
+    return campaign
+
+
+def assign_campaign_item(
+    conn: sqlite3.Connection,
+    *,
+    campaign_id: int,
+    target_profile_id: str,
+    draft_id: int,
+    action_id: int,
+    expected_peer_id: Optional[Any],
+) -> None:
+    now = now_iso()
+    cursor = conn.execute(
+        """
+        UPDATE content_campaign_items
+        SET draft_id = ?, action_id = ?, expected_peer_id = ?, status = 'pending',
+            updated_at = ?
+        WHERE campaign_id = ? AND target_profile_id = ? AND status = 'planned'
+        """,
+        (
+            int(draft_id),
+            int(action_id),
+            str(expected_peer_id) if expected_peer_id is not None else None,
+            now,
+            int(campaign_id),
+            str(target_profile_id),
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError(
+            f"campaign {campaign_id} target {target_profile_id} is not available for assignment"
+        )
+    _refresh_campaign_status(conn, campaign_id)
+
+
+def record_campaign_delivery(
+    conn: sqlite3.Connection,
+    *,
+    campaign_id: int,
+    draft_id: int,
+    action_id: int,
+    actual_peer_id: Any,
+    message_id: int,
+    verification: Dict[str, Any],
+) -> Dict[str, Any]:
+    verified = bool(verification.get("verified"))
+    status = "verified" if verified else "sent"
+    now = now_iso()
+    cursor = conn.execute(
+        """
+        UPDATE content_campaign_items
+        SET status = ?, action_id = ?, actual_peer_id = ?, message_id = ?,
+            verification_json = ?, updated_at = ?
+        WHERE campaign_id = ? AND draft_id = ?
+        """,
+        (
+            status,
+            int(action_id),
+            str(actual_peer_id),
+            int(message_id),
+            json.dumps(verification, ensure_ascii=False, sort_keys=True),
+            now,
+            int(campaign_id),
+            int(draft_id),
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise ValueError(
+            f"campaign {campaign_id} has no item for draft {draft_id}"
+        )
+    _refresh_campaign_status(conn, campaign_id)
+    return get_campaign(conn, campaign_id) or {}
+
+
+def _refresh_campaign_status(conn: sqlite3.Connection, campaign_id: int) -> str:
+    rows = conn.execute(
+        "SELECT status FROM content_campaign_items WHERE campaign_id = ?",
+        (int(campaign_id),),
+    ).fetchall()
+    statuses = [str(row["status"]) for row in rows]
+    if not statuses:
+        status = "failed"
+    elif all(item == "verified" for item in statuses):
+        status = "verified"
+    elif all(item in {"sent", "verified"} for item in statuses):
+        status = "sent"
+    elif any(item in {"sent", "verified"} for item in statuses):
+        status = "partially_sent"
+    elif all(item == "pending" for item in statuses):
+        status = "prepared"
+    else:
+        status = "planned"
+    conn.execute(
+        "UPDATE content_campaigns SET status = ?, updated_at = ? WHERE id = ?",
+        (status, now_iso(), int(campaign_id)),
+    )
+    return status
 
 
 def mark_draft_published(

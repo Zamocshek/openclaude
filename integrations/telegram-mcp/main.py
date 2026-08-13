@@ -2308,6 +2308,7 @@ async def telegram_bot_prepare_send_message(
 ) -> str:
     """Prepare a local Bot API send; confirmation performs the publish once."""
     try:
+        _assert_managed_channel_publishable(chat_id)
         if not tbot.TelegramBotConfig.from_env().configured:
             raise tbot.TelegramBotError("TELEGRAM_MCP_BOT_TOKEN is not configured")
         target = _maton_telegram_chat_id(chat_id)
@@ -2485,6 +2486,7 @@ async def maton_telegram_prepare_send_message(
 ) -> str:
     """Prepare sendMessage with two required fields; confirmation performs the send."""
     try:
+        _assert_managed_channel_publishable(chat_id)
         selected_id = await _maton_telegram_connection_id(connection_id)
         target = _maton_telegram_chat_id(chat_id)
         message = _maton_telegram_text(text, "text", 4096)
@@ -2530,6 +2532,7 @@ async def maton_telegram_prepare_send_animation(
 ) -> str:
     """Prepare sendAnimation for an HTTP URL or Telegram file_id; confirmation sends it."""
     try:
+        _assert_managed_channel_publishable(chat_id)
         selected_id = await _maton_telegram_connection_id(connection_id)
         target = _maton_telegram_chat_id(chat_id)
         animation_ref = str(animation or "").strip()
@@ -2838,6 +2841,7 @@ async def send_message(chat_id: Union[int, str], message: str, account_id: Optio
         account_id: Session name from list_accounts. Omit for default account.
     """
     try:
+        _assert_managed_channel_publishable(chat_id)
         c = await _get_client(account_id)
         entity = await c.get_entity(chat_id)
         await _safe_call(c.send_message(entity, message))
@@ -4274,6 +4278,7 @@ async def send_file(chat_id: Union[int, str], file_path: str, caption: str = Non
         account_id: Session name from list_accounts. Omit for default account.
     """
     try:
+        _assert_managed_channel_publishable(chat_id)
         c = await _get_client(account_id)
         if not os.path.isfile(file_path):
             return f"File not found: {file_path}"
@@ -5702,6 +5707,7 @@ async def send_gif(chat_id: Union[int, str], gif_id: int, account_id: Optional[s
         gif_id: Telegram document ID for the GIF (from get_gif_search).
     """
     try:
+        _assert_managed_channel_publishable(chat_id)
         c = await _get_client(account_id)
         if not isinstance(gif_id, int):
             return "gif_id must be a Telegram document ID (integer), not a file path. Use get_gif_search to find IDs."
@@ -7602,6 +7608,41 @@ def _content_quality_for_target(
         raise
 
 
+def _managed_channel_profile(reference: Union[int, str]) -> Optional[Dict[str, Any]]:
+    """Resolve a bundled channel policy without treating unknown chats as errors."""
+    try:
+        return cp.find_profile(reference)
+    except cp.ChannelProfileError as error:
+        if str(error).startswith("no channel profile matches"):
+            return None
+        raise
+
+
+class _ManagedPublishingBlockedError(ValueError):
+    """A managed channel policy rejected an external publishing mutation."""
+
+
+def _assert_managed_channel_publishable(
+    reference: Union[int, str],
+) -> Optional[Dict[str, Any]]:
+    profile = _managed_channel_profile(reference)
+    if profile is not None and not profile.get("publishing_enabled", True):
+        note = str(profile.get("operational_note") or "publishing is disabled").strip()
+        raise _ManagedPublishingBlockedError(
+            f"Managed channel '{profile['name']}' is disabled: {note}"
+        )
+    return profile
+
+
+def _campaign_target(reference: Union[int, str]) -> Dict[str, str]:
+    profile = cp.find_profile(reference)
+    return {
+        "profile_id": str(profile["id"]),
+        "name": str(profile["name"]),
+        "reference": str(reference),
+    }
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Content Workflow Config",
@@ -8067,6 +8108,153 @@ def content_channel_profiles(
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Content Campaign Plan", openWorldHint=False, readOnlyHint=False
+    )
+)
+def content_campaign_plan(
+    name: str,
+    targets_json: str,
+    excluded_targets_json: str = "[]",
+    account_id: Optional[str] = None,
+    requested_format: str = "standard",
+    min_chars: Optional[int] = None,
+) -> str:
+    """Create an exact multi-channel publication contract before any send action.
+
+    ``targets_json`` and ``excluded_targets_json`` are JSON arrays of channel
+    references. The target list is an allowlist: a batch must match it exactly.
+    Standard format (700+ characters) is the default for a developed network post.
+    """
+    try:
+        targets = json.loads(targets_json)
+        excluded = json.loads(excluded_targets_json)
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("targets_json must be a non-empty JSON array")
+        if not isinstance(excluded, list):
+            raise ValueError("excluded_targets_json must be a JSON array")
+        registry = cp.load_profiles()
+        modes = registry["format_policy"]["modes"]
+        mode = str(requested_format or "standard").strip().lower()
+        if mode not in {"auto", *modes.keys()}:
+            raise ValueError("requested_format must be auto, short, standard, or long")
+        minimum = int(
+            min_chars
+            if min_chars is not None
+            else modes["standard" if mode == "auto" else mode]["min_chars"]
+        )
+        if minimum < 1 or minimum > int(registry["format_policy"]["telegram_utf16_limit"]):
+            raise ValueError("min_chars must be between 1 and 4096")
+
+        required_targets = [_campaign_target(item) for item in targets]
+        excluded_targets = [_campaign_target(item) for item in excluded]
+        disabled = []
+        profiles_by_id = {item["id"]: item for item in registry["channels"]}
+        for target in required_targets:
+            profile = profiles_by_id[target["profile_id"]]
+            if not profile.get("publishing_enabled", True):
+                disabled.append(
+                    {
+                        **target,
+                        "operational_note": profile.get("operational_note"),
+                    }
+                )
+        if disabled:
+            return _json(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "block_reason": "channel_disabled",
+                    "disabled_targets": disabled,
+                    "message": "A disabled channel cannot enter a publication campaign.",
+                }
+            )
+
+        with cw.connect() as conn:
+            campaign = cw.create_campaign(
+                conn,
+                name=name,
+                account_id=account_id,
+                required_targets=required_targets,
+                excluded_targets=excluded_targets,
+                requested_format=mode,
+                min_chars=minimum,
+            )
+            conn.commit()
+        return _json(
+            {
+                "ok": True,
+                "campaign": campaign,
+                "contract": {
+                    "exact_target_count": len(required_targets),
+                    "required_profile_ids": [
+                        item["profile_id"] for item in required_targets
+                    ],
+                    "excluded_profile_ids": [
+                        item["profile_id"] for item in excluded_targets
+                    ],
+                    "requested_format": mode,
+                    "min_chars": minimum,
+                },
+                "next_step": (
+                    "Create one reviewed draft per required target, then call "
+                    "content_prepare_publish_batch with this campaign_id."
+                ),
+            }
+        )
+    except (ValueError, cp.ChannelProfileError, json.JSONDecodeError) as e:
+        return _json(
+            {
+                "ok": False,
+                "blocked": True,
+                "error_type": "campaign_contract_error",
+                "error": str(e),
+            }
+        )
+    except Exception as e:
+        return log_and_format_error("content_campaign_plan", e)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Content Campaign Status", openWorldHint=False, readOnlyHint=True
+    )
+)
+def content_campaign_status(campaign_id: int) -> str:
+    """Return exact campaign progress; complete means every item has readback proof."""
+    try:
+        with cw.connect() as conn:
+            campaign = cw.get_campaign(conn, campaign_id)
+        if campaign is None:
+            return _json(
+                {
+                    "ok": False,
+                    "campaign_id": campaign_id,
+                    "status": "not_found",
+                }
+            )
+        counts: Dict[str, int] = {}
+        for item in campaign["items"]:
+            counts[item["status"]] = counts.get(item["status"], 0) + 1
+        return _json(
+            {
+                "ok": True,
+                "campaign": campaign,
+                "counts": counts,
+                "complete": campaign["status"] == "verified",
+                "completion_rule": (
+                    "Every required target must have a unique draft, a sent action, "
+                    "the expected peer_id, a Telegram message_id, and matching readback text."
+                ),
+            }
+        )
+    except Exception as e:
+        return log_and_format_error(
+            "content_campaign_status", e, campaign_id=campaign_id
+        )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Content Channel Post Brief", openWorldHint=False, readOnlyHint=True
     )
 )
@@ -8132,12 +8320,17 @@ def content_quality_review(
         return _json(
             {
                 "ok": True,
-                "blocked": not review["passed"],
+                "blocked": (
+                    not review["passed"]
+                    or not review.get("publishing_enabled", True)
+                ),
                 "quality": review,
                 "formatting": pf.preview(post),
                 "next_step": (
                     "Revise the post and review it again."
                     if not review["passed"]
+                    else "Publishing is disabled for this managed channel."
+                    if not review.get("publishing_enabled", True)
                     else "Create the channel-specific draft."
                 ),
             }
@@ -8370,6 +8563,16 @@ def content_create_draft(
                 requested_format=requested_format,
                 description_override=description_override,
             )
+            if quality["enforced"] and not quality.get("publishing_enabled", True):
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "channel_disabled",
+                        "quality": quality,
+                        "message": "Publishing is disabled for this managed channel.",
+                    }
+                )
             if quality["enforced"] and not quality["passed"]:
                 return _json(
                     {
@@ -8427,6 +8630,8 @@ async def content_prepare_publish(
     send_as: Optional[Union[int, str]] = None,
     media_path: Optional[str] = None,
     force_document: Optional[bool] = None,
+    campaign_id: Optional[int] = None,
+    campaign_profile_id: Optional[str] = None,
 ) -> str:
     """
     Convert a stored content draft into a pending Telegram send action.
@@ -8556,6 +8761,17 @@ async def content_prepare_publish(
                 requested_format=draft_meta.get("requested_format", "auto"),
                 description_override=draft_meta.get("description_override"),
             )
+            if quality["enforced"] and not quality.get("publishing_enabled", True):
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "channel_disabled",
+                        "draft_id": draft_id,
+                        "quality": quality,
+                        "message": "Publishing is disabled for this managed channel.",
+                    }
+                )
             if quality["enforced"] and not quality["passed"]:
                 return _json(
                     {
@@ -8571,6 +8787,23 @@ async def content_prepare_publish(
         with am.connect() as action_conn:
             existing = am.find_action_for_content_draft(action_conn, draft_id)
         if existing is not None:
+            existing_payload = json.loads(existing["payload_json"] or "{}")
+            if campaign_id is not None and int(
+                existing_payload.get("content_campaign_id") or 0
+            ) != int(campaign_id):
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "campaign_action_conflict",
+                        "draft_id": draft_id,
+                        "existing_action_id": existing["id"],
+                        "message": (
+                            "This draft already belongs to another durable action; "
+                            "reconcile it before preparing a campaign action."
+                        ),
+                    }
+                )
             return _json(
                 {
                     "ok": True,
@@ -8586,6 +8819,32 @@ async def content_prepare_publish(
         await _validate_custom_emoji_access(c, post)
         with am.connect() as conn:
             _, peer, title = await _assistant_resolve_chat(c, conn, account_key, target_chat)
+            resolved_profile = _assert_managed_channel_publishable(peer)
+            resolved_profile_id = (
+                str(resolved_profile["id"]) if resolved_profile is not None else None
+            )
+            if campaign_id is not None:
+                if not campaign_profile_id:
+                    return _json(
+                        {
+                            "ok": False,
+                            "blocked": True,
+                            "block_reason": "campaign_profile_missing",
+                            "draft_id": draft_id,
+                        }
+                    )
+                if resolved_profile_id != str(campaign_profile_id):
+                    return _json(
+                        {
+                            "ok": False,
+                            "blocked": True,
+                            "block_reason": "campaign_target_mismatch",
+                            "draft_id": draft_id,
+                            "expected_profile_id": campaign_profile_id,
+                            "actual_profile_id": resolved_profile_id,
+                            "actual_peer_id": peer,
+                        }
+                    )
             action_id = am.create_pending_action(
                 conn,
                 action_type="send_message",
@@ -8604,9 +8863,30 @@ async def content_prepare_publish(
                     "send_as": send_as,
                     "media_path": chosen_media_path,
                     "force_document": chosen_force_document,
+                    "content_campaign_id": int(campaign_id)
+                    if campaign_id is not None
+                    else None,
+                    "content_campaign_profile_id": campaign_profile_id,
                 },
             )
             conn.commit()
+        if campaign_id is not None:
+            try:
+                with cw.connect() as content_conn:
+                    cw.assign_campaign_item(
+                        content_conn,
+                        campaign_id=int(campaign_id),
+                        target_profile_id=str(campaign_profile_id),
+                        draft_id=int(draft_id),
+                        action_id=int(action_id),
+                        expected_peer_id=peer,
+                    )
+                    content_conn.commit()
+            except Exception:
+                with am.connect() as action_conn:
+                    am.resolve_pending_action(action_conn, action_id, "cancelled")
+                    action_conn.commit()
+                raise
         with cw.connect() as content_conn:
             cw.set_post_status(content_conn, draft_id, "pending")
             content_conn.commit()
@@ -8615,6 +8895,8 @@ async def content_prepare_publish(
                 "ok": True,
                 "pending_action_id": action_id,
                 "draft_id": draft_id,
+                "campaign_id": campaign_id,
+                "campaign_profile_id": campaign_profile_id,
                 "target": {"peer_id": peer, "title": title, "account_id": account_key},
                 "formatting": pf.preview(post),
                 "quality": quality,
@@ -8637,21 +8919,216 @@ async def content_prepare_publish(
     )
 )
 @tool_timeout(TOOL_OPERATION_TIMEOUT)
-async def content_prepare_publish_batch(items_json: str) -> str:
-    """Prepare multiple drafts sequentially and return a resumable per-item receipt."""
+async def content_prepare_publish_batch(
+    items_json: str,
+    campaign_id: Optional[int] = None,
+) -> str:
+    """Preflight a complete campaign, then prepare its durable send actions.
+
+    Multi-channel managed publications require a campaign contract. The entire
+    target/draft/quality set is checked before the first pending action is made.
+    """
     try:
         items = json.loads(items_json)
         if not isinstance(items, list) or not items:
             raise ValueError("items_json must be a non-empty JSON array")
         if len(items) > 50:
             raise ValueError("a batch can contain at most 50 drafts")
-        results = []
+        campaign = None
+        if campaign_id is not None:
+            with cw.connect() as content_conn:
+                campaign = cw.get_campaign(content_conn, campaign_id)
+            if campaign is None:
+                return _json(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "block_reason": "campaign_not_found",
+                        "campaign_id": campaign_id,
+                    }
+                )
+            if campaign["status"] != "planned":
+                return _json(
+                    {
+                        "ok": True,
+                        "idempotent": True,
+                        "campaign": campaign,
+                        "message": (
+                            "This campaign already has durable state. Inspect it with "
+                            "content_campaign_status instead of preparing it again."
+                        ),
+                    }
+                )
+
+        preflight = []
+        seen_drafts: set[int] = set()
+        seen_profiles: set[str] = set()
+        preflight_errors = []
         for index, item in enumerate(items):
             if not isinstance(item, dict) or "draft_id" not in item:
-                results.append(
-                    {"index": index, "ok": False, "error": "draft_id is required"}
+                preflight_errors.append(
+                    {"index": index, "error": "draft_id is required"}
                 )
                 continue
+            draft_id = int(item["draft_id"])
+            if draft_id in seen_drafts:
+                preflight_errors.append(
+                    {"index": index, "draft_id": draft_id, "error": "duplicate draft_id"}
+                )
+                continue
+            seen_drafts.add(draft_id)
+            with cw.connect() as content_conn:
+                draft = cw.get_post(content_conn, draft_id)
+            if draft is None or draft.get("role") != "draft":
+                preflight_errors.append(
+                    {
+                        "index": index,
+                        "draft_id": draft_id,
+                        "ok": False,
+                        "error_type": "not_found",
+                        "error": "draft was not found or is not a draft",
+                    }
+                )
+                continue
+            target = item.get("target_chat_id") or draft.get("chat_id")
+            if target is None:
+                preflight_errors.append(
+                    {"index": index, "draft_id": draft_id, "error": "target_chat_id is required"}
+                )
+                continue
+            try:
+                profile = _assert_managed_channel_publishable(target)
+            except Exception as error:
+                preflight_errors.append(
+                    {"index": index, "draft_id": draft_id, "error": str(error)}
+                )
+                continue
+            profile_id = str(profile["id"]) if profile is not None else None
+            if profile_id is not None and profile_id in seen_profiles:
+                preflight_errors.append(
+                    {
+                        "index": index,
+                        "draft_id": draft_id,
+                        "error": f"duplicate campaign target: {profile_id}",
+                    }
+                )
+                continue
+            if profile_id is not None:
+                seen_profiles.add(profile_id)
+
+            campaign_format = (
+                str(campaign["requested_format"]) if campaign is not None else None
+            )
+            quality = _content_quality_for_target(
+                target,
+                draft["text"],
+                requested_format=(
+                    campaign_format
+                    or str((draft.get("meta") or {}).get("requested_format") or "auto")
+                ),
+                description_override=(draft.get("meta") or {}).get(
+                    "description_override"
+                ),
+            )
+            text_chars = len(re.sub(r"\s+", " ", str(draft["text"] or "")).strip())
+            if quality["enforced"] and (
+                not quality.get("publishing_enabled", True) or not quality["passed"]
+            ):
+                preflight_errors.append(
+                    {
+                        "index": index,
+                        "draft_id": draft_id,
+                        "error": "managed channel quality gate failed",
+                        "quality": quality,
+                    }
+                )
+                continue
+            if campaign is not None and text_chars < int(campaign["min_chars"]):
+                preflight_errors.append(
+                    {
+                        "index": index,
+                        "draft_id": draft_id,
+                        "error": (
+                            f"draft is too short for campaign contract "
+                            f"({text_chars}/{campaign['min_chars']} chars)"
+                        ),
+                    }
+                )
+                continue
+            preflight.append(
+                {
+                    "index": index,
+                    "item": item,
+                    "draft_id": draft_id,
+                    "target": target,
+                    "profile_id": profile_id,
+                    "quality": quality,
+                    "text_chars": text_chars,
+                }
+            )
+
+        managed_count = sum(1 for item in preflight if item["profile_id"] is not None)
+        if campaign is None and len(items) > 1 and managed_count:
+            preflight_errors.append(
+                {
+                    "error": (
+                        "managed multi-channel batches require content_campaign_plan "
+                        "and campaign_id"
+                    )
+                }
+            )
+        if campaign is not None:
+            required = {
+                str(item["profile_id"]) for item in campaign["required_targets"]
+            }
+            excluded = {
+                str(item["profile_id"]) for item in campaign["excluded_targets"]
+            }
+            actual = {
+                str(item["profile_id"])
+                for item in preflight
+                if item["profile_id"] is not None
+            }
+            if any(item["profile_id"] is None for item in preflight):
+                preflight_errors.append(
+                    {"error": "every campaign target must have a managed channel profile"}
+                )
+            if actual != required:
+                preflight_errors.append(
+                    {
+                        "error": "batch targets do not exactly match the campaign allowlist",
+                        "missing_profile_ids": sorted(required - actual),
+                        "unexpected_profile_ids": sorted(actual - required),
+                    }
+                )
+            forbidden = sorted(actual & excluded)
+            if forbidden:
+                preflight_errors.append(
+                    {
+                        "error": "batch contains explicitly excluded targets",
+                        "excluded_profile_ids": forbidden,
+                    }
+                )
+        if preflight_errors:
+            return _json(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "block_reason": "batch_preflight_failed",
+                    "campaign_id": campaign_id,
+                    "errors": preflight_errors,
+                    "items": preflight_errors,
+                    "total": len(items),
+                    "prepared": 0,
+                    "failed": len(preflight_errors),
+                    "message": "No pending actions were created.",
+                }
+            )
+
+        results = []
+        for prepared in preflight:
+            index = prepared["index"]
+            item = prepared["item"]
             allowed = {
                 "draft_id",
                 "target_chat_id",
@@ -8665,6 +9142,10 @@ async def content_prepare_publish_batch(items_json: str) -> str:
                 "force_document",
             }
             arguments = {key: value for key, value in item.items() if key in allowed}
+            arguments["target_chat_id"] = prepared["target"]
+            if campaign_id is not None:
+                arguments["campaign_id"] = int(campaign_id)
+                arguments["campaign_profile_id"] = prepared["profile_id"]
             raw_result = await content_prepare_publish(**arguments)
             try:
                 result = json.loads(raw_result)
@@ -8683,6 +9164,7 @@ async def content_prepare_publish_batch(items_json: str) -> str:
                 "total": len(results),
                 "prepared": len(results) - len(failures),
                 "failed": len(failures),
+                "campaign_id": campaign_id,
                 "items": results,
                 "next_step": (
                     "Review every exact pending action, confirm each approved action once, "
@@ -8785,6 +9267,7 @@ async def post_prepare_send(
     This does not send anything; confirm through assistant_confirm_action.
     """
     try:
+        _assert_managed_channel_publishable(chat_id)
         normalized_media_path = _validated_media_path(media_path)
         max_length = pf.MAX_CAPTION_UTF16_LENGTH if normalized_media_path else pf.MAX_MESSAGE_UTF16_LENGTH
         post = pf.parse_post(text, format_mode, max_utf16_length=max_length)
@@ -9121,6 +9604,7 @@ async def assistant_prepare_send(
     human approval. Premium custom emojis require a Premium personal account.
     """
     try:
+        _assert_managed_channel_publishable(chat_id)
         normalized_media_path = _validated_media_path(media_path)
         max_length = pf.MAX_CAPTION_UTF16_LENGTH if normalized_media_path else pf.MAX_MESSAGE_UTF16_LENGTH
         post = pf.parse_post(message, format_mode, max_utf16_length=max_length)
@@ -9218,6 +9702,21 @@ async def assistant_confirm_action(action_id: int) -> str:
             account_id = action["account_id"]
             action_type = action["action_type"]
 
+        # Re-check managed-channel policy at execution time. This prevents a
+        # stale pending action from bypassing a channel that was disabled after
+        # the action was prepared.
+        if action_type == "send_message":
+            _assert_managed_channel_publishable(payload["chat_id"])
+        elif action_type == "telegram_bot_send_message":
+            _assert_managed_channel_publishable(payload["body"]["chat_id"])
+        elif (
+            action_type == "maton_request"
+            and str(payload.get("app", "")).lower() == "telegram"
+            and isinstance(payload.get("body"), dict)
+            and payload["body"].get("chat_id") is not None
+        ):
+            _assert_managed_channel_publishable(payload["body"]["chat_id"])
+
         if action_type == "maton_connection_create":
             result = await mt.MatonClient().create_connection(
                 app=payload["app"], method=payload.get("method", "OAUTH2")
@@ -9303,14 +9802,43 @@ async def assistant_confirm_action(action_id: int) -> str:
 
         entity = await c.get_entity(_entity_arg(payload["chat_id"]))
         sent, sent_text = await _send_pending_rich_post(c, entity, payload)
+        peer = am.peer_id(entity)
+        readback_text = None
+        readback_error = None
+        try:
+            readback = await c.get_messages(entity, ids=int(sent.id))
+            if readback is None:
+                raise ValueError("Telegram returned no message during readback")
+            readback_text = am.message_text(readback)
+        except Exception as readback_exception:
+            readback_error = (
+                f"{type(readback_exception).__name__}: {readback_exception}"
+            )
+        verification = {
+            "verified": (
+                readback_error is None
+                and int(getattr(sent, "id", 0) or 0) > 0
+                and str(readback_text or "") == str(sent_text or "")
+            ),
+            "expected_peer_id": str(payload["chat_id"]),
+            "actual_peer_id": str(peer),
+            "peer_matches": str(peer) == str(payload["chat_id"]),
+            "message_id": int(sent.id),
+            "readback_text_matches": str(readback_text or "") == str(sent_text or ""),
+            "readback_error": readback_error,
+        }
+        verification["verified"] = bool(
+            verification["verified"] and verification["peer_matches"]
+        )
         external_result = {
             "ok": True,
             "action_id": action_id,
             "status": "sent",
             "message_id": sent.id,
+            "target_peer_id": peer,
+            "verification": verification,
         }
         with am.connect() as conn:
-            peer = am.peer_id(entity)
             am.resolve_pending_action(conn, action_id, "sent", result=external_result)
             am.upsert_chat(
                 conn,
@@ -9355,6 +9883,27 @@ async def assistant_confirm_action(action_id: int) -> str:
                     f"{content_error}"
                 )
         external_result["content_published"] = content_publish
+        campaign_publish = None
+        if payload.get("content_campaign_id") and payload.get("content_draft_id"):
+            try:
+                with cw.connect() as content_conn:
+                    campaign_publish = cw.record_campaign_delivery(
+                        content_conn,
+                        campaign_id=int(payload["content_campaign_id"]),
+                        draft_id=int(payload["content_draft_id"]),
+                        action_id=int(action_id),
+                        actual_peer_id=peer,
+                        message_id=int(sent.id),
+                        verification=verification,
+                    )
+                    content_conn.commit()
+            except Exception as campaign_error:
+                logger.exception(
+                    "content campaign delivery marker failed "
+                    f"(action_id={action_id}, campaign_id={payload.get('content_campaign_id')}): "
+                    f"{campaign_error}"
+                )
+        external_result["content_campaign"] = campaign_publish
         with am.connect() as conn:
             am.resolve_pending_action(conn, action_id, "sent", result=external_result)
             conn.commit()
@@ -9367,7 +9916,14 @@ async def assistant_confirm_action(action_id: int) -> str:
                     am.resolve_pending_action(
                         conn, action_id, "sent", result=external_result
                     )
-                elif isinstance(e, (tbot.TelegramBotAPIError, _MatonTelegramOperationError)):
+                elif isinstance(
+                    e,
+                    (
+                        tbot.TelegramBotAPIError,
+                        _MatonTelegramOperationError,
+                        _ManagedPublishingBlockedError,
+                    ),
+                ):
                     am.resolve_pending_action(
                         conn,
                         action_id,
@@ -9392,6 +9948,19 @@ async def assistant_confirm_action(action_id: int) -> str:
             )
         if external_result is not None:
             return _json(external_result)
+        if isinstance(e, _ManagedPublishingBlockedError):
+            return _json(
+                {
+                    "ok": False,
+                    "blocked": True,
+                    "block_reason": "channel_disabled",
+                    "action_id": action_id,
+                    "status": "failed",
+                    "retry_safe": False,
+                    "delivery_state": "not_sent",
+                    "error": str(e),
+                }
+            )
         return log_and_format_error("assistant_confirm_action", e, action_id=action_id)
 
 

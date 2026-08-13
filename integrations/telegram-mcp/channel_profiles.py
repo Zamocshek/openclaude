@@ -299,6 +299,8 @@ def review_post(
         "passed": not blockers and score >= 70,
         "score": score,
         "channel": {"id": profile["id"], "name": profile["name"]},
+        "publishing_enabled": profile.get("publishing_enabled", True),
+        "operational_note": profile.get("operational_note"),
         "profile_confidence": profile_confidence or None,
         "description": effective_description(profile, description_override),
         "format": {
