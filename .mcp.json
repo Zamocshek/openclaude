@@ -126,6 +126,10 @@
     "telegram-mcp": {
       "type": "http",
       "url": "http://telegram-mcp:8766/mcp"
+    },
+    "cua-desktops": {
+      "type": "http",
+      "url": "http://cua-desktop-pool:8767/mcp"
     }
   }
 }

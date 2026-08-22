@@ -25,6 +25,7 @@ authoritative for names, arguments, and availability.
 | Code change | `Skill(code)`, CodeGraph, Context7 | inspect symbols and impact, read versioned docs, edit, test, diff |
 | Current research | SearXNG and web reader | discover sources, open primary sources, cross-check dates |
 | Browser action | Camofox | list/create tab, snapshot, act by stable refs, final snapshot/screenshot |
+| Full GUI/computer-use task | CUA Desktop Pool | doctor, list/reuse named desktop, observe, one small act batch, observe/verify, preserve or explicitly destroy |
 | Image/video understanding | Qwen-MM local/core | media metadata, local vision/OCR/grounding, derived artifact verification |
 | Durable personal fact | Hindsight | recall, retain/forget only when requested, verify result |
 | Document corpus | LightRAG | health, ingest, track, search, cite retrieved evidence |

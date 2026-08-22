@@ -1,0 +1,12 @@
+**
+!docker/
+!docker/Dockerfile
+!docker/*.sh
+!docker/supervisord.conf
+!Dockerfile.mcp
+!pyproject.toml
+!README.md
+!src/
+!src/**
+!scripts/
+!scripts/mcp-container-entrypoint.sh

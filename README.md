@@ -74,6 +74,13 @@ the remaining optional companion services. See the
 [portable deployment guide](docs/portable-deployment.md) for Telegram,
 provider, Codex subscription, and public-server setup.
 
+The base stack also includes CUA Desktop Pool, a portable MCP service for
+persistent isolated Linux GUI desktops. NOVA reaches it through the Capability
+Router, while other MCP clients can use `http://127.0.0.1:19767/mcp` directly.
+It supports parallel desktops, screenshots, mouse/keyboard actions, shell,
+clipboard, files, suspend/resume, and explicit cleanup. Start or stop it alone
+with `npm run release:cua:up` and `npm run release:cua:down`.
+
 LightRAG WebUI is available at `http://localhost:9621/webui`. Existing OpenRAG
 indexes can be exported, reconstructed, re-indexed, and verified without
 deleting the source volume:
@@ -558,6 +565,11 @@ node ./nova-hermes/install-capabilities.mjs
 
 Use `--exposure direct` only when a target must receive every downstream MCP
 schema eagerly. See [`docs/agent-migration.md`](docs/agent-migration.md).
+
+CUA Desktop Pool is exported as a self-contained component with its MCP skill
+and Docker build context. OpenCode, OpenClaw, Hermes, Codex, and generic MCP
+clients receive a host-safe endpoint instead of NOVA's internal Docker DNS
+address, so the same bundle works after moving to another machine.
 
 ### Skill Store
 

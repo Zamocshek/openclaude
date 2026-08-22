@@ -8,7 +8,8 @@
     ".codex/skills",
     "integrations/telegram-mcp/skills",
     "integrations/telegram-mcp/maton skills for telegram",
-    "integrations/qwen-mm/skills"
+    "integrations/qwen-mm/skills",
+    "integrations/cua-desktop-pool/skills"
   ],
   "servers": {
     "mcp-router": {
@@ -72,6 +73,13 @@
       "description": "Telegram account and Bot API operations, Maton workflows, channels, messages, media, and posting.",
       "tags": ["telegram", "channel", "message", "media", "posting", "maton"],
       "intents": ["send telegram message", "publish channel post", "read telegram", "manage telegram account"]
+    },
+    "cua-desktops": {
+      "description": "Persistent isolated Linux GUI desktops for browser, computer-use, screenshots, shell, files, and parallel visual tasks.",
+      "tags": ["computer use", "desktop", "gui", "browser", "screenshot", "parallel", "sandbox"],
+      "intents": ["use desktop", "operate gui", "open application", "visual verification", "parallel browser task"],
+      "portableUrl": "http://127.0.0.1:19767/mcp",
+      "allowedTools": ["desktop_doctor", "desktop_create", "desktop_list", "desktop_view", "desktop_observe", "desktop_dimensions", "desktop_act", "desktop_shell", "desktop_clipboard", "desktop_file", "desktop_suspend", "desktop_resume", "desktop_destroy"]
     }
   },
   "components": [
@@ -133,6 +141,14 @@
       "root": "scripts",
       "cliEntrypoint": "register-artifact.mjs",
       "description": "Agent-neutral validated marker contract for returning generated binary files across runtimes and Telegram recovery passes."
+    },
+    {
+      "id": "cua-desktop-pool",
+      "name": "CUA Desktop Pool",
+      "kind": "computer-use-mcp",
+      "root": "integrations/cua-desktop-pool",
+      "mcpEntrypoint": "src/cua_desktop_pool/mcp_server.py",
+      "description": "Self-contained stdio and Streamable HTTP MCP server for isolated persistent GUI desktops."
     }
   ]
 }

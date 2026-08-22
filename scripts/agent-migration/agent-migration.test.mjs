@@ -295,6 +295,49 @@ describe('agent migration bundle', () => {
     expect(readFileSync(join(output, 'keep.txt'), 'utf8')).toBe('working profile')
   })
 
+  test('moves a standalone computer-use component and rewrites its target URL', async () => {
+    const { root, home, workspace } = fixture()
+    const componentRoot = join(workspace, 'integrations', 'cua-desktop-pool')
+    mkdirSync(componentRoot, { recursive: true })
+    writeFileSync(join(componentRoot, 'Dockerfile.mcp'), 'FROM scratch\n')
+    writeFileSync(join(componentRoot, 'README.md'), '# Portable CUA fixture\n')
+
+    const mcp = readJson(join(workspace, '.mcp.json'))
+    mcp.mcpServers['cua-desktops'] = { type: 'http', url: 'http://cua-desktop-pool:8767/mcp' }
+    writeJson(join(workspace, '.mcp.json'), mcp)
+    const registry = readJson(join(workspace, 'capability-registry.json'))
+    registry.servers['cua-desktops'] = {
+      portableUrl: 'http://127.0.0.1:19767/mcp',
+      description: 'Portable CUA fixture',
+    }
+    registry.components.push({
+      id: 'cua-desktop-pool',
+      root: 'integrations/cua-desktop-pool',
+    })
+    writeJson(join(workspace, 'capability-registry.json'), registry)
+    const descriptor = readJson(join(workspace, 'agent-portability.json'))
+    descriptor.capabilities.components.push({
+      id: 'cua-desktop-pool',
+      root: 'integrations/cua-desktop-pool',
+    })
+    writeJson(join(workspace, 'agent-portability.json'), descriptor)
+
+    const bundle = join(root, 'cua.agent-bundle')
+    await exportOpenClaudeBundle({ sourceHome: home, workspace, output: bundle })
+    const output = join(root, 'opencode-cua')
+    await adaptBundle({ bundle, target: 'opencode', output })
+
+    expect(existsSync(join(
+      output,
+      'imports/nova-agent-bundle/capabilities/components/cua-desktop-pool/Dockerfile.mcp',
+    ))).toBe(true)
+    expect(readFileSync(join(output, 'portable-services.compose.yml'), 'utf8')).toContain('cua-desktop-pool:')
+    expect(readJson(join(output, 'capability-router', 'mcp.json')).mcpServers['cua-desktops'].url)
+      .toBe('http://127.0.0.1:19767/mcp')
+    expect(readJson(join(output, 'capability-router', 'mcp.container.json')).mcpServers['cua-desktops'].url)
+      .toBe('http://cua-desktop-pool:8767/mcp')
+  })
+
   test('detects tampering before adaptation', async () => {
     const { root, home, workspace } = fixture()
     const output = join(root, 'nova.agent-bundle')

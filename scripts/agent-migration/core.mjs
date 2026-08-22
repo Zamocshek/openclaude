@@ -308,6 +308,9 @@ function normalizeMcpServer(name, raw, source, state, metadata = {}) {
   const command = commandArray?.[0] || (typeof raw.command === 'string' ? raw.command : undefined)
   const commandArgs = commandArray?.slice(1) || (Array.isArray(raw.args) ? raw.args.map(String) : [])
   const url = typeof raw.url === 'string' ? raw.url : undefined
+  const portableUrl = typeof (raw.portableUrl || metadata.portableUrl) === 'string'
+    ? String(raw.portableUrl || metadata.portableUrl)
+    : undefined
   if (!command && !url) return undefined
   const env = sanitizeStructured(raw.env || raw.environment || {}, state, ['mcp', name, 'env'])
   const headers = sanitizeStructured(raw.headers || raw.http_headers || {}, state, ['mcp', name, 'headers'])
@@ -321,6 +324,7 @@ function normalizeMcpServer(name, raw, source, state, metadata = {}) {
     ...(command ? { command, args: commandArgs } : {}),
     ...(typeof raw.cwd === 'string' ? { cwd: raw.cwd } : {}),
     ...(url ? { url } : {}),
+    ...(portableUrl ? { portableUrl } : {}),
     ...(Object.keys(env).length ? { env } : {}),
     ...(Object.keys(headers).length ? { headers } : {}),
     ...(Array.isArray(raw.allowedTools || metadata.allowedTools)

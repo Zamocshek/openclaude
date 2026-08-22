@@ -218,3 +218,32 @@ surface remains `qwen-mm-core` for local media operations and `qwen-mm-local`
 for vision chat, OCR, and grounding. No DashScope key is required: visual
 evidence is returned as text to the coordinating agent, preserving compatibility
 with text-only providers such as DeepSeek.
+
+## CUA Desktop Pool after migration
+
+The `cua-desktop-pool` component is exported with its Python MCP server,
+container build, lean XFCE desktop image definition, tests, and portable
+`cua-desktop-operator` skill. No running desktop, browser session, or machine
+credential is copied. This keeps a migration reproducible without leaking host
+state.
+
+The generated `portable-services.compose.yml` starts the MCP endpoint on
+`127.0.0.1:19767`, attaches spawned desktops to a dedicated Docker network, and
+keeps noVNC viewers bound to localhost. It requires Docker with Linux containers
+and access to `/var/run/docker.sock`:
+
+```bash
+docker compose -f portable-services.compose.yml up -d --build cua-desktop-pool capability-router
+```
+
+Host-native OpenCode, OpenClaw, Hermes, Codex, and generic MCP configs use
+`http://127.0.0.1:19767/mcp`. The router container keeps the service-DNS address
+`http://cua-desktop-pool:8767/mcp`. This split prevents exported profiles from
+retaining a source machine path or an address that only works inside NOVA's
+Compose network.
+
+For a single host-native agent without Compose, create a Python 3.11-3.13
+environment in `capabilities/components/cua-desktop-pool`, install the package,
+and run `cua-desktop-pool-mcp`; stdio is the default transport. In either mode,
+the first calls should be `desktop_doctor` and `desktop_list`, followed by the
+skill's observe-act-observe loop.

@@ -19,6 +19,7 @@
       "integrations/telegram-mcp",
       "integrations/local-transcription",
       "integrations/qwen-mm",
+      "integrations/cua-desktop-pool",
       ".mcp.json",
       "package.json",
       "bun.lock",
@@ -62,6 +63,10 @@
       {
         "id": "artifact-transport",
         "root": "scripts"
+      },
+      {
+        "id": "cua-desktop-pool",
+        "root": "integrations/cua-desktop-pool"
       }
     ],
     "skillRoots": [
@@ -71,7 +76,8 @@
       ".codex/skills",
       "integrations/telegram-mcp/skills",
       "integrations/telegram-mcp/maton skills for telegram",
-      "integrations/qwen-mm/skills"
+      "integrations/qwen-mm/skills",
+      "integrations/cua-desktop-pool/skills"
     ]
   }
 }

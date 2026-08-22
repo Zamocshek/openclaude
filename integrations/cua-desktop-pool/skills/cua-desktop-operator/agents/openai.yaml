@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cua Desktop Operator"
+  short_description: "Operate parallel Cua desktops safely"
+  default_prompt: "Use $cua-desktop-operator to run this task on an isolated Cua desktop and verify the result."

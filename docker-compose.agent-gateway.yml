@@ -29,6 +29,8 @@ services:
         condition: service_healthy
       capability-router:
         condition: service_healthy
+      cua-desktop-pool:
+        condition: service_healthy
       lightrag:
         condition: service_healthy
       qwen-mm-bootstrap:
@@ -236,6 +238,7 @@ services:
       HINDSIGHT_API_KEY: "${HINDSIGHT_API_KEY:-}"
       HINDSIGHT_BANK_ID: "${HINDSIGHT_BANK_ID:-openclaude-agent}"
       HINDSIGHT_MCP_TIMEOUT: "${HINDSIGHT_MCP_TIMEOUT:-60}"
+      CUA_POOL_MCP_URL: "http://cua-desktop-pool:8767/mcp"
     ports:
       - "${OPENCLAUDE_AGENT_API_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_API_HOST_PORT:-8642}:8642"
       - "${OPENCLAUDE_AGENT_WEB_BIND_ADDRESS:-127.0.0.1}:${OPENCLAUDE_AGENT_WEB_3000_PORT:-13000}:3000"
@@ -744,6 +747,39 @@ services:
       retries: 12
       start_period: 20s
 
+  cua-desktop-pool:
+    build:
+      context: ./integrations/cua-desktop-pool
+      dockerfile: Dockerfile.mcp
+    image: openclaude-cua-desktop-pool:local
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    environment:
+      CUA_POOL_MCP_TRANSPORT: "streamable-http"
+      CUA_POOL_MCP_HOST: "0.0.0.0"
+      CUA_POOL_MCP_PORT: "8767"
+      CUA_POOL_DOCKER_NETWORK: "${OPENCLAUDE_CUA_NETWORK_NAME:-openclaude-cua-control}"
+      CUA_POOL_VIEW_HOST: "${CUA_POOL_VIEW_HOST:-127.0.0.1}"
+      CUA_POOL_IMAGE: "${CUA_POOL_IMAGE:-cua-desktop-pool-xfce:local}"
+      CUA_POOL_MAX_DESKTOPS: "${CUA_POOL_MAX_DESKTOPS:-2}"
+      CUA_POOL_CPUS: "${CUA_POOL_CPUS:-2}"
+      CUA_POOL_MEMORY_MB: "${CUA_POOL_MEMORY_MB:-3072}"
+      CUA_POOL_READY_TIMEOUT: "${CUA_POOL_READY_TIMEOUT:-180}"
+    ports:
+      - "${CUA_POOL_MCP_BIND_ADDRESS:-127.0.0.1}:${CUA_POOL_MCP_HOST_PORT:-19767}:8767"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - default
+      - cua-control
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8767),5); s.close()"]
+      interval: 15s
+      timeout: 6s
+      retries: 20
+      start_period: 30s
+
   omniroute-redis:
     image: redis:8.6.2-alpine@sha256:c5e375abb885e6b2021c0377879e4890bf76f9065b8922ffc113f2b226b9fc17
     restart: unless-stopped
@@ -801,6 +837,8 @@ services:
     depends_on:
       omniroute:
         condition: service_healthy
+      cua-desktop-pool:
+        condition: service_healthy
     environment:
       CAPABILITY_ROUTER_HOST: "0.0.0.0"
       CAPABILITY_ROUTER_PORT: "8768"
@@ -837,6 +875,7 @@ services:
       CONTEXT7_API_KEY: "${CONTEXT7_API_KEY:-}"
       GITHUB_MCP_PAT: "${GITHUB_MCP_PAT:-}"
       PENTEST_STATE_DIR: "/data/pentest"
+      CUA_POOL_MCP_URL: "http://cua-desktop-pool:8767/mcp"
     ports:
       - "${CAPABILITY_ROUTER_BIND_ADDRESS:-127.0.0.1}:${CAPABILITY_ROUTER_HOST_PORT:-19868}:8768"
     volumes:
@@ -1067,6 +1106,10 @@ services:
       timeout: 10s
       retries: 20
       start_period: 20s
+
+networks:
+  cua-control:
+    name: "${OPENCLAUDE_CUA_NETWORK_NAME:-openclaude-cua-control}"
 
 volumes:
   openclaude-config:

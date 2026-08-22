@@ -55,20 +55,25 @@ function runtimeBundleRoot(runtimeRoot) {
   return join(runtimeRoot, 'imports', 'nova-agent-bundle')
 }
 
-function directServerForTarget(server, runtimeRoot) {
-  if (server.transport !== 'stdio') return { ...server }
+function directServerForTarget(server, runtimeRoot, options = {}) {
+  if (server.transport !== 'stdio') {
+    return {
+      ...server,
+      ...(options.portableHttp && server.portableUrl ? { url: server.portableUrl } : {}),
+    }
+  }
   return {
     ...server,
     cwd: join(runtimeBundleRoot(runtimeRoot), 'workspace'),
   }
 }
 
-function standardMcpConfig(servers, runtimeRoot) {
+function standardMcpConfig(servers, runtimeRoot, options = {}) {
   return {
     mcpServers: Object.fromEntries(servers
       .filter(server => server.name !== 'capability-router')
       .map(server => {
-        const portable = directServerForTarget(server, runtimeRoot)
+        const portable = directServerForTarget(server, runtimeRoot, options)
         return [portable.name, portable.transport === 'stdio'
           ? {
               command: portable.command,
@@ -94,7 +99,7 @@ function prepareCapabilityRuntime(bundleRoot, output, runtimeRoot, servers, expo
   const routerComponent = components.find(component => component.id === 'capability-router' && !component.external)
   const directServers = servers
     .filter(server => server.name !== 'capability-router')
-    .map(server => directServerForTarget(server, runtimeRoot))
+    .map(server => directServerForTarget(server, runtimeRoot, { portableHttp: true }))
   if (exposure === 'direct' || !routerComponent) {
     return {
       exposure: routerComponent ? 'direct' : 'direct-fallback',
@@ -106,7 +111,7 @@ function prepareCapabilityRuntime(bundleRoot, output, runtimeRoot, servers, expo
   const routerDirectory = join(output, 'capability-router')
   const runtimeRouterDirectory = join(runtimeRoot, 'capability-router')
   mkdirSync(routerDirectory, { recursive: true })
-  writeJson(join(routerDirectory, 'mcp.json'), standardMcpConfig(servers, runtimeRoot))
+  writeJson(join(routerDirectory, 'mcp.json'), standardMcpConfig(servers, runtimeRoot, { portableHttp: true }))
   writeJson(join(routerDirectory, 'mcp.container.json'), standardMcpConfig(servers, '/workspace'))
   if (!copyIfExists(bundlePath(bundleRoot, 'state/capability-router/state.json'), join(routerDirectory, 'state.json'))) {
     writeJson(join(routerDirectory, 'state.json'), {
@@ -138,6 +143,7 @@ function prepareCapabilityRuntime(bundleRoot, output, runtimeRoot, servers, expo
     "}",
     '',
   ].join('\n'), 'utf8')
+  const cuaComponent = components.find(component => component.id === 'cua-desktop-pool' && !component.external)
   writeFileSync(join(output, 'portable-services.compose.yml'), [
     'services:',
     '  capability-router:',
@@ -169,10 +175,38 @@ function prepareCapabilityRuntime(bundleRoot, output, runtimeRoot, servers, expo
     '      CONTEXT7_API_KEY: "${CONTEXT7_API_KEY:-}"',
     '      GITHUB_MCP_PAT: "${GITHUB_MCP_PAT:-}"',
     '      SEARXNG_URL: "${SEARXNG_URL:-}"',
+    ...(cuaComponent ? [
+      '    depends_on:',
+      '      cua-desktop-pool:',
+      '        condition: service_healthy',
+    ] : []),
     '    ports:',
     '      - "127.0.0.1:${CAPABILITY_ROUTER_HOST_PORT:-19868}:8768"',
     '    volumes:',
     '      - ./:/workspace',
+    ...(cuaComponent ? [
+      '  cua-desktop-pool:',
+      '    build:',
+      '      context: ./imports/nova-agent-bundle/capabilities/components/cua-desktop-pool',
+      '      dockerfile: Dockerfile.mcp',
+      '    restart: unless-stopped',
+      '    environment:',
+      '      CUA_POOL_MCP_TRANSPORT: "streamable-http"',
+      '      CUA_POOL_MCP_HOST: "0.0.0.0"',
+      '      CUA_POOL_MCP_PORT: "8767"',
+      '      CUA_POOL_DOCKER_NETWORK: "${NOVA_CUA_NETWORK_NAME:-nova-cua-control}"',
+      '      CUA_POOL_VIEW_HOST: "127.0.0.1"',
+      '      CUA_POOL_MAX_DESKTOPS: "${CUA_POOL_MAX_DESKTOPS:-2}"',
+      '      CUA_POOL_CPUS: "${CUA_POOL_CPUS:-2}"',
+      '      CUA_POOL_MEMORY_MB: "${CUA_POOL_MEMORY_MB:-3072}"',
+      '    ports:',
+      '      - "127.0.0.1:${CUA_POOL_MCP_HOST_PORT:-19767}:8767"',
+      '    volumes:',
+      '      - /var/run/docker.sock:/var/run/docker.sock',
+      '    networks:',
+      '      - default',
+      '      - cua-control',
+    ] : []),
     '  omniroute:',
     '    image: diegosouzapw/omniroute:latest',
     '    restart: unless-stopped',
@@ -189,6 +223,11 @@ function prepareCapabilityRuntime(bundleRoot, output, runtimeRoot, servers, expo
     '      - "127.0.0.1:${OMNIROUTE_HOST_PORT:-20128}:20128"',
     '    volumes:',
     '      - omniroute-data:/app/data',
+    ...(cuaComponent ? [
+      'networks:',
+      '  cua-control:',
+      '    name: "${NOVA_CUA_NETWORK_NAME:-nova-cua-control}"',
+    ] : []),
     'volumes:',
     '  omniroute-data:',
     '',
