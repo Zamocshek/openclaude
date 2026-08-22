@@ -77,6 +77,20 @@ describe('task-aware MCP routing', () => {
     expect(route.reasons).toContain('multimodal')
   })
 
+  test('does not route visual work to Qwen-MM when the server group is disabled', () => {
+    const route = selectMcpServersForPrompt(
+      'Current request:\nПрочитай изображение local_path: /workspace/photo.png',
+      {
+        codingIntent: false,
+        eligibleServerNames: ['hindsight', 'camofox'],
+      },
+    )
+
+    expect(route.servers.has('qwen-mm-core')).toBe(false)
+    expect(route.servers.has('qwen-mm-local')).toBe(false)
+    expect(route.reasons).not.toContain('multimodal')
+  })
+
   test('supports an explicit all-tools escape hatch', () => {
     const route = selectMcpServersForPrompt(
       'Use all MCP tools for this task',

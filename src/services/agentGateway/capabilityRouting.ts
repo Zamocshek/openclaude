@@ -218,6 +218,9 @@ export function selectMcpServersForPrompt(
 
   const servers = new Set<string>()
   const reasons: string[] = []
+  const eligibleServers = options.eligibleServerNames
+    ? new Set([...options.eligibleServerNames].map(name => name.trim().toLowerCase()))
+    : undefined
   const add = (reason: string, ...names: string[]) => {
     reasons.push(reason)
     for (const name of names) servers.add(name)
@@ -226,7 +229,11 @@ export function selectMcpServersForPrompt(
   if (options.codingIntent) add('coding', 'codegraph', 'context7')
   if (RESEARCH_RE.test(request)) add('research', 'searxng')
   if (BROWSER_RE.test(request)) add('browser', 'camofox')
-  if (MULTIMODAL_RE.test(request)) add('multimodal', 'qwen-mm-core', 'qwen-mm-local')
+  if (MULTIMODAL_RE.test(request)) {
+    const qwenServers = ['qwen-mm-core', 'qwen-mm-local']
+      .filter(name => !eligibleServers || eligibleServers.has(name))
+    if (qwenServers.length > 0) add('multimodal', ...qwenServers)
+  }
   if (BROWSER_MODEL_RE.test(request)) add('browser-model', 'camofox')
   if (MEMORY_RE.test(request)) add('explicit-memory', 'hindsight')
   if (RAG_RE.test(request)) add('rag', 'lightrag')

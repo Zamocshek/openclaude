@@ -115,6 +115,7 @@ const OPENAI_CONTEXT_WINDOWS: Record<string, number> = {
   'deepseek-chat':            128_000,
   'deepseek-reasoner':        128_000,
   'deepseek-v4-flash':        128_000,
+  'deepseek-v4-flash-vision-exp': 128_000,
   'deepseek-v4-flash-free':   128_000,
   'deepseek-v4-pro':          128_000,
 
@@ -332,6 +333,7 @@ const OPENAI_MAX_OUTPUT_TOKENS: Record<string, number> = {
   'deepseek-chat':              8_192,
   'deepseek-reasoner':         32_768,
   'deepseek-v4-flash':          8_192,
+  'deepseek-v4-flash-vision-exp': 8_192,
   'deepseek-v4-flash-free':     8_192,
   'deepseek-v4-pro':           32_768,
 

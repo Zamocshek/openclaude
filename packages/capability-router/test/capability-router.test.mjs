@@ -122,6 +122,26 @@ test('catalogs every downstream tool and persists individual tool switches', asy
   assert.equal(restored.tools.find(tool => tool.name === 'send_weather').enabled, false)
 })
 
+test('marks server switches as the shared MCP enablement authority', async t => {
+  const root = fixture()
+  const statePath = join(root, 'state', 'state.json')
+  const router = new CapabilityRouter({
+    workspaceRoot: root,
+    registryPath: join(root, 'capability-registry.json'),
+    mcpConfigPath: join(root, '.mcp.json'),
+    statePath,
+  })
+  t.after(async () => {
+    await router.shutdown()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  router.setEnabled('server', 'codegraph', false)
+  const stored = JSON.parse(readFileSync(statePath, 'utf8'))
+  assert.deepEqual(stored.disabledServers, ['codegraph'])
+  assert.equal(stored.mcpEnablementAuthority, 'capability-router')
+})
+
 test('merges switches from independent router processes and refreshes stale readers', async t => {
   const root = fixture()
   const options = {

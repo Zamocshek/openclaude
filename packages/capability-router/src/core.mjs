@@ -558,6 +558,7 @@ export class CapabilityRouter {
       if (enabled) disabled.delete(name)
       else disabled.add(name)
       state[key] = [...disabled].sort()
+      if (kind === 'server') state.mcpEnablementAuthority = 'capability-router'
     })
     if (kind === 'server' && !enabled) void this.disconnect(name)
     if (kind === 'server') {

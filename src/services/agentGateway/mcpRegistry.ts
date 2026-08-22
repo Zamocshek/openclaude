@@ -14,6 +14,10 @@ import {
   type McpServerConfig,
 } from '../mcp/types.js'
 import { getAgentGatewayStateDir } from './config.js'
+import {
+  readCapabilityRouterMcpState,
+  updateCapabilityRouterServerEnablement,
+} from './capabilityRouterState.js'
 
 const MCP_IMPORT_MAX_CHARS = 64 * 1024
 const MCP_IMPORT_MAX_SERVERS = 20
@@ -291,19 +295,40 @@ async function loadState(projectRoot: string): Promise<ManagedMcpState> {
   return parseState(await readJson(paths.statePath), paths.root)
 }
 
+function legacyDisabledServerNames(state: ManagedMcpState): string[] {
+  return Object.entries(state.servers)
+    .filter(([, entry]) => !entry.enabled)
+    .map(([name]) => name)
+}
+
+function isManagedServerEnabled(
+  name: string,
+  legacyEnabled: boolean,
+  routerState: ReturnType<typeof readCapabilityRouterMcpState>,
+): boolean {
+  if (routerState.disabledServers.has(name)) return false
+  return routerState.authoritative || legacyEnabled
+}
+
 export async function listManagedMcpServers(projectRoot: string): Promise<ManagedMcpServer[]> {
   const base = await loadBaseConfig(projectRoot)
   const state = await loadState(projectRoot)
+  const routerState = readCapabilityRouterMcpState()
   const names = new Set([...Object.keys(base.mcpServers), ...Object.keys(state.servers)])
   return [...names]
     .sort((left, right) => left.localeCompare(right))
     .map(name => {
       const stateEntry = state.servers[name]
-      if (stateEntry) return { name, managed: true, ...stateEntry }
+      if (stateEntry) return {
+        name,
+        managed: true,
+        ...stateEntry,
+        enabled: isManagedServerEnabled(name, stateEntry.enabled, routerState),
+      }
       return {
         name,
         managed: false,
-        enabled: true,
+        enabled: isManagedServerEnabled(name, true, routerState),
         origin: 'base' as const,
         config: base.mcpServers[name]!,
       }
@@ -326,6 +351,11 @@ export async function importManagedMcpServers(
       }
     }
     await writeJsonAtomic(paths.statePath, state)
+    updateCapabilityRouterServerEnablement(
+      Object.keys(config.mcpServers),
+      true,
+      legacyDisabledServerNames(state),
+    )
     return listManagedMcpServers(paths.root)
   })
 }
@@ -347,6 +377,7 @@ export async function setManagedMcpServerGroupEnabled(
     const paths = statePaths(projectRoot)
     const base = await loadBaseConfig(paths.root)
     const state = await loadState(paths.root)
+    const legacyDisabled = legacyDisabledServerNames(state)
     const uniqueNames = [...new Set(names)]
     if (uniqueNames.length === 0) {
       throw new McpRegistryError('At least one MCP server name is required')
@@ -372,6 +403,7 @@ export async function setManagedMcpServerGroupEnabled(
       }
     }
     await writeJsonAtomic(paths.statePath, state)
+    updateCapabilityRouterServerEnablement(uniqueNames, enabled, legacyDisabled)
     return listManagedMcpServers(paths.root)
   })
 }
@@ -396,6 +428,11 @@ export async function removeManagedMcpServer(
     }
     delete state.servers[name]
     await writeJsonAtomic(paths.statePath, state)
+    updateCapabilityRouterServerEnablement(
+      [name],
+      true,
+      legacyDisabledServerNames(state),
+    )
     return listManagedMcpServers(paths.root)
   })
 }
@@ -404,17 +441,21 @@ export function resolveEffectiveMcpConfigPath(projectRoot: string): string | und
   const paths = statePaths(projectRoot)
   const base = parseConfigObject(readJsonSync(paths.basePath))
   const state = parseState(readJsonSync(paths.statePath), paths.root)
+  const routerState = readCapabilityRouterMcpState()
   const hasState = Object.keys(state.servers).length > 0
-  if (!hasState) return existsSync(paths.basePath) ? paths.basePath : undefined
+  if (!hasState && routerState.disabledServers.size === 0) {
+    return existsSync(paths.basePath) ? paths.basePath : undefined
+  }
 
   const mcpServers: Record<string, McpServerConfig> = { ...base.mcpServers }
   for (const [name, entry] of Object.entries(state.servers)) {
-    if (!entry.enabled) {
+    if (!isManagedServerEnabled(name, entry.enabled, routerState)) {
       delete mcpServers[name]
     } else if (entry.origin !== 'base') {
       mcpServers[name] = entry.config
     }
   }
+  for (const name of routerState.disabledServers) delete mcpServers[name]
 
   mkdirSync(paths.stateDir, { recursive: true })
   const temporary = `${paths.effectivePath}.${process.pid}.${randomUUID()}.tmp`

@@ -16,6 +16,22 @@ export type LocalQwenVisionOptions = {
   signal?: AbortSignal
 }
 
+export type OpenAiCompatibleVisionEndpoint = {
+  provider: string
+  baseUrl: string
+  model: string
+  apiKey: string
+  timeoutMs: number
+}
+
+export type OpenAiCompatibleVisionOptions = {
+  imagePaths: string[]
+  prompt: string
+  endpoint: OpenAiCompatibleVisionEndpoint
+  fetchImpl?: FetchLike
+  signal?: AbortSignal
+}
+
 function isTruthy(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined || value.trim() === '') return fallback
   return !/^(?:0|false|no|off)$/iu.test(value.trim())
@@ -40,6 +56,51 @@ export function resolveLocalQwenMmEndpoint(
     baseUrl,
     model: env.QWEN_MM_MODEL || DEFAULT_MODEL,
     apiKey: env.QWEN_MM_API_KEY || 'ollama-local',
+    timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_TIMEOUT_MS,
+  }
+}
+
+function explicitBoolean(value: string | undefined): boolean | undefined {
+  if (value === undefined || value.trim() === '' || value.trim().toLowerCase() === 'auto') {
+    return undefined
+  }
+  return isTruthy(value, false)
+}
+
+const KNOWN_MULTIMODAL_MODEL_RE = /(?:gpt-(?:4o|5)|gemini|claude-(?:3|4)|qwen[^\s/]*(?:vl|vision)|(?:vision|multimodal))/iu
+
+export function resolveActiveProviderVisionEndpoint(
+  env: NodeJS.ProcessEnv = process.env,
+): OpenAiCompatibleVisionEndpoint | undefined {
+  const provider = String(env.OPENCLAUDE_PROVIDER || '').trim().toLowerCase()
+  const baseUrl = String(env.OPENCLAUDE_BASE_URL || env.OPENAI_BASE_URL || '')
+    .trim()
+    .replace(/\/+$/u, '')
+  const model = String(env.OPENCLAUDE_MODEL || env.OPENAI_MODEL || '').trim()
+  if (!provider || !baseUrl || !model || provider === 'codex') return undefined
+
+  const explicit = explicitBoolean(env.OPENCLAUDE_ACTIVE_MODEL_MULTIMODAL)
+  const supportsVision = explicit ?? KNOWN_MULTIMODAL_MODEL_RE.test(model)
+  if (!supportsVision) return undefined
+
+  const apiKey = String(
+    provider === 'deepseek'
+      ? env.DEEPSEEK_API_KEY || env.OPENCLAUDE_DEEPSEEK_API_KEY || env.OPENCLAUDE_API_KEY
+      : provider === 'openrouter'
+        ? env.OPENROUTER_API_KEY || env.OPENCLAUDE_API_KEY
+        : provider === 'opencode-zen'
+          ? env.OPENCODE_ZEN_API_KEY || env.OPENCLAUDE_API_KEY
+          : provider === 'omniroute'
+            ? env.OMNIROUTE_API_KEY || env.OPENCLAUDE_API_KEY
+            : env.OPENAI_API_KEY || env.OPENCLAUDE_API_KEY || 'local-openai-compatible',
+  ).trim()
+  if (!apiKey) return undefined
+  const timeout = Number(env.OPENCLAUDE_ACTIVE_VISION_TIMEOUT_MS || DEFAULT_TIMEOUT_MS)
+  return {
+    provider,
+    baseUrl,
+    model,
+    apiKey,
     timeoutMs: Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_TIMEOUT_MS,
   }
 }
@@ -73,22 +134,22 @@ function extractResponseText(body: unknown): string {
   return ''
 }
 
-export async function inspectImagesWithLocalQwen(
-  options: LocalQwenVisionOptions,
+export async function inspectImagesWithOpenAiCompatibleVision(
+  options: OpenAiCompatibleVisionOptions,
 ): Promise<string> {
   if (options.imagePaths.length === 0) throw new Error('No image paths were provided')
-  const endpoint = resolveLocalQwenMmEndpoint(options.env)
+  const endpoint = options.endpoint
   const content: Array<Record<string, unknown>> = []
   let totalBytes = 0
 
   for (const path of [...new Set(options.imagePaths)]) {
     const image = await readFile(path)
     if (image.byteLength > MAX_IMAGE_BYTES) {
-      throw new Error(`Image exceeds the ${MAX_IMAGE_BYTES}-byte local vision limit: ${path}`)
+      throw new Error(`Image exceeds the ${MAX_IMAGE_BYTES}-byte vision limit: ${path}`)
     }
     totalBytes += image.byteLength
     if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
-      throw new Error(`Images exceed the ${MAX_TOTAL_IMAGE_BYTES}-byte local vision limit`)
+      throw new Error(`Images exceed the ${MAX_TOTAL_IMAGE_BYTES}-byte vision limit`)
     }
     content.push({
       type: 'image_url',
@@ -131,19 +192,34 @@ export async function inspectImagesWithLocalQwen(
     )
     const raw = await response.text()
     if (!response.ok) {
-      throw new Error(`Local Qwen-MM HTTP ${response.status}: ${raw.slice(0, 500)}`)
+      throw new Error(`${endpoint.provider} vision HTTP ${response.status}: ${raw.slice(0, 500)}`)
     }
     let body: unknown
     try {
       body = JSON.parse(raw)
     } catch {
-      throw new Error('Local Qwen-MM returned invalid JSON')
+      throw new Error(`${endpoint.provider} vision returned invalid JSON`)
     }
     const evidence = extractResponseText(body)
-    if (!evidence) throw new Error('Local Qwen-MM returned no visual evidence')
+    if (!evidence) throw new Error(`${endpoint.provider} vision returned no visual evidence`)
     return evidence
   } finally {
     clearTimeout(timer)
     options.signal?.removeEventListener('abort', onAbort)
   }
+}
+
+export async function inspectImagesWithLocalQwen(
+  options: LocalQwenVisionOptions,
+): Promise<string> {
+  return inspectImagesWithOpenAiCompatibleVision({
+    imagePaths: options.imagePaths,
+    prompt: options.prompt,
+    endpoint: {
+      provider: 'local qwen-mm',
+      ...resolveLocalQwenMmEndpoint(options.env),
+    },
+    fetchImpl: options.fetchImpl,
+    signal: options.signal,
+  })
 }

@@ -138,7 +138,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/evolve [on|off|now|status] - control evolution or run one cycle')
     expect(help).toContain('/goal [status|clear|<objective>] - set persistent objective')
     expect(help).toContain('/loop [start|stop|status|<objective>] - run or resume objective')
-    expect(help).toContain('/dsflash - switch to DeepSeek V4 Flash')
+    expect(help).toContain('/dsflash|dsvision|dspro - DeepSeek Flash, Vision, Pro')
     expect(help).toContain('/gemmacoder - switch to LM Studio Huihui Gemma Coder')
     expect(help).toContain(
       '/omni* - OmniRoute modes: auto,code,fast,cheap,smart,offline',
@@ -202,6 +202,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands).toContainEqual({
       command: 'dsflash',
       description: 'switch to DeepSeek V4 Flash',
+    })
+    expect(commands).toContainEqual({
+      command: 'dsvision',
+      description: 'switch to DeepSeek V4 Flash Vision',
     })
     expect(commands).toContainEqual({
       command: 'gemmacoder',
@@ -1870,6 +1874,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(getTelegramProviderShortcut('/dsflash')).toMatchObject({
       provider: 'deepseek',
       model: 'deepseek-v4-flash',
+    })
+    expect(getTelegramProviderShortcut('/dsvision')).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash-vision-exp',
     })
     expect(getTelegramProviderShortcut('/dspro@openclaude_bot')).toMatchObject({
       provider: 'deepseek',

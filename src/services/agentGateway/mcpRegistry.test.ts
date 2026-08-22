@@ -16,6 +16,7 @@ const temporaryPaths: string[] = []
 
 afterEach(async () => {
   delete process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR
+  delete process.env.CAPABILITY_ROUTER_STATE
   await Promise.all(temporaryPaths.splice(0).map(path =>
     rm(path, { recursive: true, force: true })
   ))
@@ -26,6 +27,7 @@ async function makeProject(): Promise<{ project: string; state: string }> {
   const state = await mkdtemp(join(tmpdir(), 'openclaude-mcp-state-'))
   temporaryPaths.push(project, state)
   process.env.OPENCLAUDE_AGENT_GATEWAY_STATE_DIR = state
+  process.env.CAPABILITY_ROUTER_STATE = join(state, 'capability-router.json')
   await writeFile(join(project, '.mcp.json'), JSON.stringify({
     mcpServers: {
       core: {
@@ -114,7 +116,7 @@ describe('agent gateway managed MCP registry', () => {
   })
 
   test('toggles a capability server group atomically', async () => {
-    const { project } = await makeProject()
+    const { project, state } = await makeProject()
     const parsed = parseMcpConfigImport(JSON.stringify({
       mcpServers: {
         vision: { command: 'node', args: ['vision.js'] },
@@ -130,6 +132,11 @@ describe('agent gateway managed MCP registry', () => {
     expect(servers
       .filter(server => ['core', 'vision'].includes(server.name))
       .every(server => server.enabled === false)).toBe(true)
+    expect(JSON.parse(await readFile(join(state, 'capability-router.json'), 'utf8')))
+      .toMatchObject({
+        disabledServers: ['core', 'vision'],
+        mcpEnablementAuthority: 'capability-router',
+      })
 
     await expect(setManagedMcpServerGroupEnabled(
       project,
@@ -144,5 +151,32 @@ describe('agent gateway managed MCP registry', () => {
     expect(servers
       .filter(server => ['core', 'vision'].includes(server.name))
       .every(server => server.enabled === true)).toBe(true)
+  })
+
+  test('treats Capability Router server state as authoritative for execution', async () => {
+    const { project, state } = await makeProject()
+    const routerStatePath = join(state, 'capability-router.json')
+    await writeFile(routerStatePath, JSON.stringify({
+      schemaVersion: 2,
+      revision: 1,
+      disabledServers: ['core'],
+      mcpEnablementAuthority: 'capability-router',
+    }))
+
+    expect((await listManagedMcpServers(project))[0]).toMatchObject({
+      name: 'core',
+      enabled: false,
+    })
+    let effective = JSON.parse(await readFile(resolveEffectiveMcpConfigPath(project)!, 'utf8'))
+    expect(effective.mcpServers.core).toBeUndefined()
+
+    await writeFile(routerStatePath, JSON.stringify({
+      schemaVersion: 2,
+      revision: 2,
+      disabledServers: [],
+      mcpEnablementAuthority: 'capability-router',
+    }))
+    effective = JSON.parse(await readFile(resolveEffectiveMcpConfigPath(project)!, 'utf8'))
+    expect(effective.mcpServers.core).toBeTruthy()
   })
 })

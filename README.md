@@ -140,9 +140,9 @@ Telegram:
   the provider and model used by the next agent runs; `/provider` and
   `/models` include Telegram inline buttons for Codex, DeepSeek, OpenCode Zen,
   OpenRouter, OmniRoute, and LM Studio
-- `/sol`, `/terra`, `/luna`, `/gpt55`, `/codex`, `/dsflash`, `/dspro`, `/zenflash`,
+- `/sol`, `/terra`, `/luna`, `/gpt55`, `/codex`, `/dsflash`, `/dsvision`, `/dspro`, `/zenflash`,
   `/gemma`, `/gemmacoder` - quick switches for Codex GPT-5.6 Sol/Terra/Luna,
-  GPT-5.5, DeepSeek V4 Flash/Pro, OpenCode Zen DeepSeek V4 Flash Free, and the
+  GPT-5.5, DeepSeek V4 Flash/Vision/Pro, OpenCode Zen DeepSeek V4 Flash Free, and the
   LM Studio Gemma profiles
 - `/reasoning [low|medium|high|xhigh|max|ultra]` - open the Codex reasoning
   picker or set a supported level directly; the bot reads supported levels

@@ -67,6 +67,7 @@ const BUILT_IN_CODEX_MODELS: ProviderModelOption[] = [
 
 const DEEPSEEK_MODELS: ProviderModelOption[] = [
   basicModel('deepseek-v4-flash', 'DeepSeek V4 Flash'),
+  basicModel('deepseek-v4-flash-vision-exp', 'DeepSeek V4 Flash Vision'),
   basicModel('deepseek-v4-pro', 'DeepSeek V4 Pro'),
 ]
 

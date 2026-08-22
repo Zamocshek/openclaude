@@ -48,8 +48,10 @@ import {
 import { resolveEffectiveMcpConfigPath } from './mcpRegistry.js'
 import { hasVisionInputReference } from './vision.js'
 import {
+  inspectImagesWithOpenAiCompatibleVision,
   inspectImagesWithLocalQwen,
   isLocalQwenMmEnabled,
+  resolveActiveProviderVisionEndpoint,
 } from './qwenMmVision.js'
 import {
   createAgentInteraction,
@@ -920,6 +922,8 @@ export function buildAgentChildEnv(
     'OPENCLAUDE_CONTEXT_WINDOW_TOKENS',
     'OPENCLAUDE_MAX_CONTEXT_TOKENS',
     'OPENCLAUDE_OPENAI_TEXT_TOOL_MODE',
+    'OPENCLAUDE_ACTIVE_MODEL_MULTIMODAL',
+    'OPENCLAUDE_ACTIVE_VISION_TIMEOUT_MS',
     'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
     'OPENCLAUDE_API_CONTEXT_CHARS',
     'OPENCLAUDE_TELEGRAM_CONTEXT_CHARS',
@@ -1464,13 +1468,36 @@ async function runScheduledOpenClaudeAgent(
   let evidence = ''
   let visionResult: AgentRunResult | undefined
   const localVisionActivity: string[] = []
+  const childEnv = buildAgentChildEnv(process.env, cwd)
+  const activeVisionEndpoint = resolveActiveProviderVisionEndpoint(childEnv)
   const effectiveServers = readPreparedMcpServerNames(
     resolveEffectiveMcpConfigPath(cwd),
   )
-  const localQwenRouted = isLocalQwenMmEnabled()
+  const localQwenRouted = isLocalQwenMmEnabled(childEnv)
     && effectiveServers.has('qwen-mm-local')
 
-  if (localQwenRouted) {
+  if (activeVisionEndpoint) {
+    const activeLabel = `${activeVisionEndpoint.provider}/${activeVisionEndpoint.model}`
+    routedOptions.onProgress?.(`vision preflight: inspecting image with ${activeLabel}`)
+    try {
+      evidence = await inspectImagesWithOpenAiCompatibleVision({
+        imagePaths,
+        prompt: sanitizeVisualPrompt(extractCurrentUserRequest(routedOptions.prompt)),
+        endpoint: activeVisionEndpoint,
+        signal: routedOptions.signal,
+      })
+      localVisionActivity.push(`${activeLabel}: visual evidence ready`)
+      routedOptions.onProgress?.(`vision preflight: ${activeLabel} evidence ready`)
+    } catch (error) {
+      const failure = redactAgentText(
+        error instanceof Error ? error.message : String(error),
+      ).slice(0, 1200)
+      localVisionActivity.push(`${activeLabel} vision fallback: ${failure}`)
+      routedOptions.onProgress?.(`vision preflight: ${activeLabel} unavailable; trying enabled fallback`)
+    }
+  }
+
+  if (!evidence && localQwenRouted) {
     routedOptions.onProgress?.('vision preflight: inspecting image with local qwen-mm')
     try {
       evidence = await inspectImagesWithLocalQwen({

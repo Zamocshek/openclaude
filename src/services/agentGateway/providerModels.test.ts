@@ -25,6 +25,7 @@ describe('agent gateway provider model catalog', () => {
     expect(codexModels.find(model => model.id === 'gpt-5.3-codex-spark')?.defaultReasoning).toBeUndefined()
     expect(getBuiltInProviderModels('deepseek').map(model => model.id)).toEqual([
       'deepseek-v4-flash',
+      'deepseek-v4-flash-vision-exp',
       'deepseek-v4-pro',
     ])
     expect(getBuiltInProviderModels('opencode-zen').map(model => model.id)).toEqual([

@@ -484,6 +484,12 @@ const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
     description: 'switch to DeepSeek V4 Flash',
   },
   {
+    command: '/dsvision',
+    provider: 'deepseek',
+    model: 'deepseek-v4-flash-vision-exp',
+    description: 'switch to DeepSeek V4 Flash Vision',
+  },
+  {
     command: '/zenflash',
     provider: 'opencode-zen',
     model: 'deepseek-v4-flash-free',
@@ -697,6 +703,11 @@ export function buildTelegramHelpText(
       }
       if (command.syntax === '/control') continue
       if (command.syntax === '/context') continue
+      if (['/dsflash', '/dsvision', '/dspro'].includes(command.syntax)) {
+        if (command.syntax !== '/dsflash') continue
+        lines.push('/dsflash|dsvision|dspro - DeepSeek Flash, Vision, Pro')
+        continue
+      }
       if (command.syntax.startsWith('/omni')) {
         if (command.syntax !== '/omni') continue
         lines.push('/omni* - OmniRoute modes: auto,code,fast,cheap,smart,offline')
