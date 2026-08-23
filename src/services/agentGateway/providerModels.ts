@@ -72,6 +72,7 @@ const DEEPSEEK_MODELS: ProviderModelOption[] = [
 ]
 
 const OPENCODE_ZEN_MODELS: ProviderModelOption[] = [
+  basicModel('x-preview-f-free', 'Ox Alpha Free'),
   basicModel('deepseek-v4-flash-free', 'DeepSeek V4 Flash Free'),
   basicModel('deepseek-v4-flash', 'DeepSeek V4 Flash'),
   basicModel('deepseek-v4-pro', 'DeepSeek V4 Pro'),

@@ -29,6 +29,7 @@ describe('agent gateway provider model catalog', () => {
       'deepseek-v4-pro',
     ])
     expect(getBuiltInProviderModels('opencode-zen').map(model => model.id)).toEqual([
+      'x-preview-f-free',
       'deepseek-v4-flash-free',
       'deepseek-v4-flash',
       'deepseek-v4-pro',

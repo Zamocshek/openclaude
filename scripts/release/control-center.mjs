@@ -56,7 +56,7 @@ const PROVIDERS = [
   { value: 'onlysq', label: 'OnlySQ', flag: 'openai', baseUrl: 'https://api.onlysq.ru/ai/openai' },
   { value: 'openai', label: 'OpenAI', flag: 'openai', baseUrl: 'https://api.openai.com/v1' },
   { value: 'openrouter', label: 'OpenRouter', flag: 'openai', baseUrl: 'https://openrouter.ai/api/v1' },
-  { value: 'opencode-zen', label: 'OpenCode Zen', flag: 'openai', baseUrl: 'https://opencode.ai/zen/v1', models: ['deepseek-v4-flash-free', 'deepseek-v4-flash', 'deepseek-v4-pro'] },
+  { value: 'opencode-zen', label: 'OpenCode Zen', flag: 'openai', baseUrl: 'https://opencode.ai/zen/v1', models: ['x-preview-f-free', 'deepseek-v4-flash-free', 'deepseek-v4-flash', 'deepseek-v4-pro'] },
   { value: 'deepseek', label: 'DeepSeek', flag: 'openai', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro'] },
   { value: 'groq', label: 'Groq', flag: 'openai', baseUrl: 'https://api.groq.com/openai/v1' },
   { value: 'ollama', label: 'Ollama', flag: 'openai', baseUrl: 'http://localhost:11434/v1', apiKey: 'ollama' },

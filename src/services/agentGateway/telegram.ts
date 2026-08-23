@@ -496,6 +496,12 @@ const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
     description: 'switch to OpenCode Zen DeepSeek V4 Flash Free',
   },
   {
+    command: '/oxalpha',
+    provider: 'opencode-zen',
+    model: 'x-preview-f-free',
+    description: 'switch to OpenCode Zen Ox Alpha Free',
+  },
+  {
     command: '/dspro',
     provider: 'deepseek',
     model: 'deepseek-v4-pro',
@@ -706,6 +712,11 @@ export function buildTelegramHelpText(
       if (['/dsflash', '/dsvision', '/dspro'].includes(command.syntax)) {
         if (command.syntax !== '/dsflash') continue
         lines.push('/dsflash|dsvision|dspro - DeepSeek Flash, Vision, Pro')
+        continue
+      }
+      if (['/zenflash', '/oxalpha'].includes(command.syntax)) {
+        if (command.syntax !== '/zenflash') continue
+        lines.push('/zenflash|oxalpha - OpenCode Zen Flash Free or Ox Alpha Free')
         continue
       }
       if (command.syntax.startsWith('/omni')) {

@@ -139,6 +139,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/goal [status|clear|<objective>] - set persistent objective')
     expect(help).toContain('/loop [start|stop|status|<objective>] - run or resume objective')
     expect(help).toContain('/dsflash|dsvision|dspro - DeepSeek Flash, Vision, Pro')
+    expect(help).toContain('/zenflash|oxalpha - OpenCode Zen Flash Free or Ox Alpha Free')
     expect(help).toContain('/gemmacoder - switch to LM Studio Huihui Gemma Coder')
     expect(help).toContain(
       '/omni* - OmniRoute modes: auto,code,fast,cheap,smart,offline',
@@ -206,6 +207,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands).toContainEqual({
       command: 'dsvision',
       description: 'switch to DeepSeek V4 Flash Vision',
+    })
+    expect(commands).toContainEqual({
+      command: 'oxalpha',
+      description: 'switch to OpenCode Zen Ox Alpha Free',
     })
     expect(commands).toContainEqual({
       command: 'gemmacoder',
@@ -1886,6 +1891,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(getTelegramProviderShortcut('/zenflash')).toMatchObject({
       provider: 'opencode-zen',
       model: 'deepseek-v4-flash-free',
+    })
+    expect(getTelegramProviderShortcut('/oxalpha')).toMatchObject({
+      provider: 'opencode-zen',
+      model: 'x-preview-f-free',
     })
     expect(getTelegramProviderShortcut('/gpt55')).toMatchObject({
       provider: 'codex',

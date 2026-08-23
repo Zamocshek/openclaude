@@ -140,7 +140,7 @@ Telegram:
   the provider and model used by the next agent runs; `/provider` and
   `/models` include Telegram inline buttons for Codex, DeepSeek, OpenCode Zen,
   OpenRouter, OmniRoute, and LM Studio
-- `/sol`, `/terra`, `/luna`, `/gpt55`, `/codex`, `/dsflash`, `/dsvision`, `/dspro`, `/zenflash`,
+- `/sol`, `/terra`, `/luna`, `/gpt55`, `/codex`, `/dsflash`, `/dsvision`, `/dspro`, `/zenflash`, `/oxalpha`,
   `/gemma`, `/gemmacoder` - quick switches for Codex GPT-5.6 Sol/Terra/Luna,
   GPT-5.5, DeepSeek V4 Flash/Vision/Pro, OpenCode Zen DeepSeek V4 Flash Free, and the
   LM Studio Gemma profiles
@@ -158,6 +158,8 @@ Telegram:
 - `/zenflash` - switch to OpenCode Zen at `https://opencode.ai/zen/v1` using
   the free `deepseek-v4-flash-free` model. Its credential is retained in the
   ignored `OPENCODE_ZEN_API_KEY` environment variable.
+- `/oxalpha` - switch the same OpenCode Zen profile to the limited-time free
+  `x-preview-f-free` (Ox Alpha Free) model without replacing its API key.
 - `/model [model]`, `/baseurl <url>`, `/apikey <key>` - open model buttons or update the active
   OpenAI-compatible provider profile. OpenRouter keys are retained separately
   in `OPENROUTER_API_KEY` so switching away and back does not lose them.
