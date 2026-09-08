@@ -44,6 +44,16 @@ describe('local Qwen-MM vision adapter', () => {
     })
     expect(resolveActiveProviderVisionEndpoint({
       OPENCLAUDE_PROVIDER: 'deepseek',
+      OPENCLAUDE_BASE_URL: 'https://deepseek.test/v1/',
+      OPENCLAUDE_MODEL: 'deepseek-v4.1-flash-expires-on-0910',
+      DEEPSEEK_API_KEY: 'test-key',
+      OPENCLAUDE_QWEN_MM_ENABLED: 'off',
+    })).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-v4.1-flash-expires-on-0910',
+    })
+    expect(resolveActiveProviderVisionEndpoint({
+      OPENCLAUDE_PROVIDER: 'deepseek',
       OPENCLAUDE_BASE_URL: 'https://deepseek.test/v1',
       OPENCLAUDE_MODEL: 'deepseek-v4-pro',
       DEEPSEEK_API_KEY: 'test-key',

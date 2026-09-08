@@ -18,6 +18,7 @@ describe('OpenAI-compatible model context windows', () => {
       ['gpt-5.1-codex', 400_000, 32_768],
       ['gpt-5.1-codex-max', 400_000, 32_768],
       ['gpt-5.1-codex-mini', 400_000, 32_768],
+      ['deepseek-v4.1-flash-expires-on-0910', 1_000_000, 384_000],
       ['deepseek-v4-flash', 128_000, 8_192],
       ['deepseek-v4-flash-vision-exp', 128_000, 8_192],
       ['deepseek-v4-flash-free', 128_000, 8_192],

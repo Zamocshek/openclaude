@@ -517,6 +517,17 @@ describe('getProviderPresetDefaults', () => {
     expect(defaults.model).toBe('deepseek-v4-flash-free')
     expect(defaults.requiresApiKey).toBe(true)
   })
+
+  test('DeepSeek preset selects the V4.1 Flash preview by default', async () => {
+    const { getProviderPresetDefaults } = await importFreshProviderProfileModules()
+
+    const defaults = getProviderPresetDefaults('deepseek')
+
+    expect(defaults.provider).toBe('openai')
+    expect(defaults.baseUrl).toBe('https://api.deepseek.com/v1')
+    expect(defaults.model).toBe('deepseek-v4.1-flash-expires-on-0910')
+    expect(defaults.requiresApiKey).toBe(true)
+  })
 })
 
 describe('deleteProviderProfile', () => {

@@ -114,6 +114,7 @@ const OPENAI_CONTEXT_WINDOWS: Record<string, number> = {
   // DeepSeek (V3: 128k context per official docs)
   'deepseek-chat':            128_000,
   'deepseek-reasoner':        128_000,
+  'deepseek-v4.1-flash-expires-on-0910': 1_000_000,
   'deepseek-v4-flash':        128_000,
   'deepseek-v4-flash-vision-exp': 128_000,
   'deepseek-v4-flash-free':   128_000,
@@ -332,6 +333,7 @@ const OPENAI_MAX_OUTPUT_TOKENS: Record<string, number> = {
   // DeepSeek
   'deepseek-chat':              8_192,
   'deepseek-reasoner':         32_768,
+  'deepseek-v4.1-flash-expires-on-0910': 384_000,
   'deepseek-v4-flash':          8_192,
   'deepseek-v4-flash-vision-exp': 8_192,
   'deepseek-v4-flash-free':     8_192,

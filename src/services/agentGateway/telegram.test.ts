@@ -138,7 +138,7 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(help).toContain('/evolve [on|off|now|status] - control evolution or run one cycle')
     expect(help).toContain('/goal [status|clear|<objective>] - set persistent objective')
     expect(help).toContain('/loop [start|stop|status|<objective>] - run or resume objective')
-    expect(help).toContain('/dsflash|dsvision|dspro - DeepSeek Flash, Vision, Pro')
+    expect(help).toContain('/dsv41|dsflash|dsvision|dspro - DeepSeek V4.1, Flash, Vision, Pro')
     expect(help).toContain('/zenflash|oxalpha - OpenCode Zen Flash Free or Ox Alpha Free')
     expect(help).toContain('/gemmacoder - switch to LM Studio Huihui Gemma Coder')
     expect(help).toContain(
@@ -199,6 +199,10 @@ describe('agent gateway Telegram bridge helpers', () => {
     expect(commands).toContainEqual({
       command: 'tools',
       description: 'Control model tools',
+    })
+    expect(commands).toContainEqual({
+      command: 'dsv41',
+      description: 'switch to DeepSeek V4.1 Flash Preview',
     })
     expect(commands).toContainEqual({
       command: 'dsflash',
@@ -1876,6 +1880,10 @@ describe('agent gateway Telegram bridge helpers', () => {
   })
 
   test('resolves short Telegram provider/model switches', () => {
+    expect(getTelegramProviderShortcut('/dsv41')).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-v4.1-flash-expires-on-0910',
+    })
     expect(getTelegramProviderShortcut('/dsflash')).toMatchObject({
       provider: 'deepseek',
       model: 'deepseek-v4-flash',

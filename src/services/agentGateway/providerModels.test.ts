@@ -24,10 +24,16 @@ describe('agent gateway provider model catalog', () => {
     expect(codexModels.find(model => model.id === 'gpt-5.5')?.defaultReasoning).toBe('xhigh')
     expect(codexModels.find(model => model.id === 'gpt-5.3-codex-spark')?.defaultReasoning).toBeUndefined()
     expect(getBuiltInProviderModels('deepseek').map(model => model.id)).toEqual([
+      'deepseek-v4.1-flash-expires-on-0910',
       'deepseek-v4-flash',
       'deepseek-v4-flash-vision-exp',
       'deepseek-v4-pro',
     ])
+    expect(
+      getBuiltInProviderModels('deepseek').find(
+        model => model.id === 'deepseek-v4.1-flash-expires-on-0910',
+      )?.contextWindow,
+    ).toBe(1_000_000)
     expect(getBuiltInProviderModels('opencode-zen').map(model => model.id)).toEqual([
       'x-preview-f-free',
       'deepseek-v4-flash-free',

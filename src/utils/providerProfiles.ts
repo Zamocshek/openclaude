@@ -222,7 +222,7 @@ export function getProviderPresetDefaults(
         provider: 'openai',
         name: 'DeepSeek',
         baseUrl: 'https://api.deepseek.com/v1',
-        model: 'deepseek-chat',
+        model: 'deepseek-v4.1-flash-expires-on-0910',
         apiKey: '',
         requiresApiKey: true,
       }

@@ -67,7 +67,7 @@ function explicitBoolean(value: string | undefined): boolean | undefined {
   return isTruthy(value, false)
 }
 
-const KNOWN_MULTIMODAL_MODEL_RE = /(?:gpt-(?:4o|5)|gemini|claude-(?:3|4)|qwen[^\s/]*(?:vl|vision)|(?:vision|multimodal))/iu
+const KNOWN_MULTIMODAL_MODEL_RE = /(?:gpt-(?:4o|5)|gemini|claude-(?:3|4)|deepseek-v4\.1-flash|qwen[^\s/]*(?:vl|vision)|(?:vision|multimodal))/iu
 
 export function resolveActiveProviderVisionEndpoint(
   env: NodeJS.ProcessEnv = process.env,

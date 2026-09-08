@@ -478,6 +478,12 @@ const TELEGRAM_PROVIDER_SHORTCUTS: TelegramProviderShortcut[] = [
     description: 'switch to Codex GPT-5.6 Sol',
   },
   {
+    command: '/dsv41',
+    provider: 'deepseek',
+    model: 'deepseek-v4.1-flash-expires-on-0910',
+    description: 'switch to DeepSeek V4.1 Flash Preview',
+  },
+  {
     command: '/dsflash',
     provider: 'deepseek',
     model: 'deepseek-v4-flash',
@@ -709,9 +715,9 @@ export function buildTelegramHelpText(
       }
       if (command.syntax === '/control') continue
       if (command.syntax === '/context') continue
-      if (['/dsflash', '/dsvision', '/dspro'].includes(command.syntax)) {
-        if (command.syntax !== '/dsflash') continue
-        lines.push('/dsflash|dsvision|dspro - DeepSeek Flash, Vision, Pro')
+      if (['/dsv41', '/dsflash', '/dsvision', '/dspro'].includes(command.syntax)) {
+        if (command.syntax !== '/dsv41') continue
+        lines.push('/dsv41|dsflash|dsvision|dspro - DeepSeek V4.1, Flash, Vision, Pro')
         continue
       }
       if (['/zenflash', '/oxalpha'].includes(command.syntax)) {
